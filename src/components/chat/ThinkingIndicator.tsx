@@ -8,9 +8,10 @@
 
 import { useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
-import { Check, Loader2 } from 'lucide-react'
+import { Check, Compass, Loader2, NotebookPen } from 'lucide-react'
 
 import { AgentAvatar } from './AgentAvatar'
+import { cn } from '@/lib/utils'
 import type { ThinkingStep } from '@/lib/types'
 
 const MODES = ['bounce', 'fade', 'wave'] as const
@@ -90,11 +91,24 @@ export function ThinkingIndicator({
           </motion.span>
         </div>
 
-        {/* latest live step: spinner while active, emerald check when done */}
+        {/* latest live step: spinner while active, emerald check when done.
+            Research steps (R15) render their own icon — Compass / NotebookPen,
+            mirroring ThinkingBlock's mapping — with a subtle amber start
+            border so deep-research moments feel distinct while live. */}
         {shownStep && (
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground/80">
+          <div
+            className={cn(
+              'flex items-center gap-1.5 text-xs text-muted-foreground/80',
+              (shownStep.icon === 'research' || shownStep.icon === 'note') &&
+                'border-s-2 border-[var(--wakil-amber)]/40 ps-1.5',
+            )}
+          >
             {shownStep.state === 'done' ? (
               <Check className="size-3 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+            ) : shownStep.icon === 'research' ? (
+              <Compass className="size-3.5 shrink-0 animate-pulse text-[var(--wakil-amber)]" aria-hidden="true" />
+            ) : shownStep.icon === 'note' ? (
+              <NotebookPen className="size-3.5 shrink-0 animate-pulse text-[var(--wakil-amber)]" aria-hidden="true" />
             ) : (
               <Loader2 className="size-3 shrink-0 animate-spin text-wakil-amber" aria-hidden="true" />
             )}

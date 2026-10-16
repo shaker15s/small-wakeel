@@ -1,0 +1,462 @@
+   901→          if (perGram > 0 && amountPiastres > 0) {
+   902→            const grams = Math.round(amountPiastres / perGram)
+   903→            if (grams < 1) {
+   904→              return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'المبلغ', failMessage: `${egp(amountPiastres)} أقل من سعر الجرام (${egp(perGram)}) — الزبون ده عايز ياخد حاجة تانية؟` }
+   905→            }
+   906→            if (grams > item.stockQty) {
+   907→              return { ok: false, opType: type, payload: {}, summary: '', card: null as never, failMessage: `المتاح من ${item.name} ${fmtQty(item.stockQty, arUnit(item.unit))} بس — ${egp(amountPiastres)} يعني ${fmtQty(grams, 'جرام')}` }
+   908→            }
+   909→            // revenue = the money the customer asked to buy with (integer piastres)
+   910→            const total = amountPiastres
+   911→            const paid = resolvePaid(norm, f, total)
+   912→            const customer = (f.customerName ? matchEntity(String(f.customerName), customers)?.entity : null) ?? findPartyMention(text, customers)
+   913→            const payload: Record<string, unknown> = {
+   914→              itemId: item.id,
+   915→              itemName: item.name,
+   916→              qty: grams,
+   917→              unit: 'gram',
+   918→              unitPrice: perGram,
+   919→              total,
+   920→              paid,
+   921→              reverseSell: true,
+   922→              requestedAmount: amountPiastres,
+   923→              ...(customer ? { customerId: customer.id, customerName: customer.name } : {}),
+   924→            }
+   925→            const risk = computeRisk(type, total)
+   926→            const summary = `بيع بالوزن: ${fmtQty(grams, 'جرام')} ${item.name} بمبلغ ${egp(total)}${customer ? ` — ${customer.name}` : ''}`
+   927→            let dangerNote: string | undefined
+   928→            let creditField: { label: string; value: string; hint?: string } | undefined
+   929→            if (customer && total - paid > 0 && memCtx.rules.length > 0) {
+   930→              const check = creditLimitFor(memCtx.rules, customer, customer.balance + (total - paid))
+   931→              if (check) {
+   932→                dangerNote = check.warning
+   933→                creditField = { label: '⚠️ قانون المحل', value: `هيوصل رصيد ${customer.name} لـ${egp(check.projectedPiastres)} — القانون: ${egp(check.limitPiastres)}` }
+   934→                memCtx.referencedIds.push(check.rule.id)
+   935→              }
+   936→            }
+   937→            const card = fieldsToCard('', type, risk, summary, [
+   938→              { label: 'الصنف', value: item.name },
+   939→              { label: 'الوزن المحسوب', value: fmtQty(grams, 'جرام'), hint: `⚖️ اوزن ${fmtQty(grams, 'جرام')} للزبون` },
+   940→              { label: 'سعر الجرام', value: egp(perGram) },
+   941→              { label: 'المبلغ (بيع بـ)', value: egp(total) },
+   942→              { label: 'مدفوع', value: egp(paid) },
+   943→              ...(total - paid > 0 ? [{ label: 'باقي (آجل)', value: egp(total - paid) }] : []),
+   944→              ...(customer ? [{ label: 'العميل', value: customer.name }] : []),
+   945→              ...(creditField ? [creditField] : []),
+   946→            ], [
+   947→              { label: `مخزون ${item.name}`, value: `${fmtQty(item.stockQty, arUnit(item.unit))} ← ${fmtQty(item.stockQty - grams, arUnit(item.unit))}`, tone: 'neutral' },
+   948→              { label: 'الخزنة', value: egp(paid), tone: 'good' },
+   949→            ], dangerNote ?? RISK_META[risk].hint)
+   950→            return { ok: true, opType: type, payload, summary, card }
+   951→          }
+   952→        }
+   953→      }
+   954→
+   955→      // Quantity: LLM → mention → text (paid clause already stripped) → default 1
+   956→      // («بع لبن» = one unit of the item's own canonical kind — the cashier's shorthand)
+   957→      // (when a reverse-sell amount was detected but a real qty survived the
+   958→      // strip, the normal path runs — the explicit weight is the ground truth)
+   959→      const textQ = parseQuantity(reverseAmountEgp != null ? scanText : textNoPaid, null)
+   960→      const llmQty = typeof f.qty === 'number' && f.qty > 0 ? f.qty : null
+   961→      // reverse-sell candidate: an LLM qty equal to the money is the echo — drop it
+   962→      const qtySource = reverseAmountEgp != null && llmQty === reverseAmountEgp ? null : llmQty
+   963→      const qty = qtySource ?? mentioned?.qty ?? textQ.qty ?? 1
+   964→      if (qty <= 0) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'الكمية', failMessage: 'الكمية قد إيه بالظبط؟' }
+   965→      // Unit: LLM → mention → text word → the item's OWN canonical unit (الافتراضي)
+   966→      const rawUnit = unitToCode(f.unit as string) ?? mentioned?.unit ?? unitToCode(textQ.unit) ?? item.unit
+   967→      const baseQty = convertToBaseUnit(qty, rawUnit, item.unit)
+   968→      if (baseQty == null || !(baseQty > 0)) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, failMessage: `الوحدة «${rawUnit}» مش متوافقة مع وحدة ${item.name} (${arUnit(item.unit)})` }
+   969→      const qtyN = Math.round(baseQty * 1000) / 1000
+   970→      if (type === 'sale' && qtyN > item.stockQty) {
+   971→        return { ok: false, opType: type, payload: {}, summary: '', card: null as never, failMessage: `المتاح من ${item.name} ${fmtQty(item.stockQty, arUnit(item.unit))} بس — انت طلبت ${fmtQty(qtyN, arUnit(item.unit))}` }
+   972→      }
+   973→      // Total from REAL price
+   974→      const unitPrice = type === 'sale' ? item.sellPrice : item.costPrice
+   975→      const total = Math.round(qtyN * unitPrice)
+   976→      // Paid (آجل = 0, explicit clause wins, default = full cash)
+   977→      const paid = resolvePaid(norm, f, total)
+   978→      // Party: lexicon → LLM field → deterministic Egyptian-phrasing scan («لأحمد», «العميل أحمد», «من المورد»)
+   979→      const customerName = String(f.customerName ?? '')
+   980→      const lexCustomer = type === 'sale' ? lexiconResolve(norm, memCtx.lexicon, customers)?.entity : null
+   981→      if (lexCustomer) memCtx.referencedIds.push(...memCtx.lexicon.filter((l) => l.entityRef === lexCustomer.id).map((l) => l.id))
+   982→      const customer = lexCustomer ?? (customerName ? matchEntity(customerName, customers)?.entity : null) ?? (type === 'sale' ? findPartyMention(text, customers) : null)
+   983→      const supplierName = String(f.supplierName ?? '')
+   984→      const supplier = (supplierName ? matchEntity(supplierName, suppliers)?.entity : null) ?? (type === 'purchase' ? findPartyMention(text, suppliers, 'من') : null)
+   985→
+   986→      const payload: Record<string, unknown> = {
+   987→        itemId: item.id,
+   988→        itemName: item.name,
+   989→        qty: qtyN,
+   990→        unit: item.unit,
+   991→        unitPrice,
+   992→        total,
+   993→        paid,
+   994→        ...(type === 'sale' && customer ? { customerId: customer.id, customerName: customer.name } : {}),
+   995→        ...(type === 'purchase' && supplier ? { supplierId: supplier.id, supplierName: supplier.name } : {}),
+   996→      }
+   997→      const ref = `WKL-DRAFT` // replaced by real ref from createDraft
+   998→      const risk = computeRisk(type, total)
+   999→      const summary = `${type === 'sale' ? 'بيع' : 'شرا'} ${fmtQty(qtyN, arUnit(item.unit))} ${item.name} بـ${egp(total)}${type === 'sale' && customer ? ` — ${customer.name}` : ''}${type === 'purchase' && supplier ? ` — من ${supplier.name}` : ''}`
+  1000→      // BUSINESS_DNA credit-limit enforcement (آجل on a capped party)
+  1001→      let dangerNote: string | undefined
+  1002→      let creditField: { label: string; value: string; hint?: string } | undefined
+  1003→      if (type === 'sale' && customer && total - paid > 0 && memCtx.rules.length > 0) {
+  1004→        const check = creditLimitFor(memCtx.rules, customer, customer.balance + (total - paid))
+  1005→        if (check) {
+  1006→          dangerNote = check.warning
+  1007→          creditField = { label: '⚠️ قانون المحل', value: `هيوصل رصيد ${customer.name} لـ${egp(check.projectedPiastres)} — القانون: ${egp(check.limitPiastres)}` }
+  1008→          memCtx.referencedIds.push(check.rule.id)
+  1009→        }
+  1010→      }
+  1011→      const card = fieldsToCard(ref, type, risk, summary, [
+  1012→        { label: 'الصنف', value: item.name },
+  1013→        { label: 'الكمية', value: fmtQty(qtyN, arUnit(item.unit)) },
+  1014→        { label: `سعر ${type === 'sale' ? 'البيع' : 'الشرا'} (للوحدة)`, value: egp(unitPrice) },
+  1015→        { label: 'الإجمالي', value: egp(total) },
+  1016→        { label: 'مدفوع', value: egp(paid) },
+  1017→        ...(total - paid > 0 ? [{ label: 'باقي (آجل)', value: egp(total - paid) }] : []),
+  1018→        ...(type === 'sale' && customer ? [{ label: 'العميل', value: customer.name }] : []),
+  1019→        ...(type === 'purchase' && supplier ? [{ label: 'المورد', value: supplier.name }] : []),
+  1020→        ...(creditField ? [creditField] : []),
+  1021→      ], [
+  1022→        { label: `مخزون ${item.name}`, value: `${fmtQty(item.stockQty, arUnit(item.unit))} ← ${fmtQty(item.stockQty + (type === 'sale' ? -qtyN : qtyN), arUnit(item.unit))}`, tone: 'neutral' },
+  1023→        { label: 'الخزنة', value: egp(type === 'sale' ? paid : -paid), tone: type === 'sale' ? 'good' : 'bad' },
+  1024→      ], dangerNote ?? RISK_META[risk].hint)
+  1025→      return { ok: true, opType: type, payload, summary, card }
+  1026→    }
+  1027→
+  1028→    case 'expense': {
+  1029→      const amountRaw = f.amount as number | undefined
+  1030→      let amount = amountRaw && amountRaw > 0 ? Math.round(amountRaw * 100) : null
+  1031→      if (amount == null) {
+  1032→        const m = norm.match(/([٠-٩0-9]+(?:[.,][٠-٩0-9]+)?)/)
+  1033→        if (m) {
+  1034→          const western = m[1].replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d))).replace(',', '.')
+  1035→          const parsed = parseFloat(western)
+  1036→          if (!Number.isNaN(parsed)) amount = Math.round(parsed * 100)
+  1037→        }
+  1038→      }
+  1039→      if (amount == null || amount <= 0) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'المبلغ', failMessage: 'المبلغ قد إيه؟' }
+  1040→      const label = String(f.label ?? '') || (norm.includes('كهربا') ? 'كهربا' : norm.includes('ايجار') ? 'إيجار' : norm.includes('تليفون') ? 'تليفون' : 'مصروف')
+  1041→      const payload = { label, total: amount }
+  1042→      const risk = computeRisk(type, amount)
+  1043→      const summary = `مصروف ${label} بـ${egp(amount)}`
+  1044→      const card = fieldsToCard('', type, risk, summary, [
+  1045→        { label: 'البند', value: label },
+  1046→        { label: 'المبلغ', value: egp(amount) },
+  1047→      ], [{ label: 'الخزنة', value: egp(-amount), tone: 'bad' }], RISK_META[risk].hint)
+  1048→      return { ok: true, opType: type, payload, summary, card }
+  1049→    }
+  1050→
+  1051→    case 'collection': {
+  1052→      const customersAll = customers.length > 0 ? customers : []
+  1053→      const customerName = String(f.customerName ?? '')
+  1054→      const lexCustomer = lexiconResolve(norm, memCtx.lexicon, customersAll)?.entity ?? null
+  1055→      if (lexCustomer) memCtx.referencedIds.push(...memCtx.lexicon.filter((l) => l.entityRef === lexCustomer.id).map((l) => l.id))
+  1056→      const customer = lexCustomer ?? matchEntity(customerName || text, customersAll)?.entity ?? null
+  1057→      if (!customer) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'العميل', failMessage: 'تحصيل من مين بالظبط؟' }
+  1058→      let amount = (f.amount as number | undefined) && (f.amount as number) > 0 ? Math.round((f.amount as number) * 100) : null
+  1059→      if (amount == null) {
+  1060→        const m = norm.match(/([٠-٩0-9]+(?:[.,][٠-٩0-9]+)?)/)
+  1061→        if (m) {
+  1062→          const western = m[1].replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+  1063→          amount = Math.round(parseFloat(western.replace(',', '.')) * 100)
+  1064→        }
+  1065→      }
+  1066→      if (amount == null || amount <= 0) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'المبلغ', failMessage: `هتحصّل قد إيه من ${customer.name}؟` }
+  1067→      if (amount > customer.balance) {
+  1068→        return { ok: false, opType: type, payload: {}, summary: '', card: null as never, failMessage: `${customer.name} عليه ${egp(customer.balance)} بس — مش ممكن تحصّل ${egp(amount)}` }
+  1069→      }
+  1070→      const payload = { customerId: customer.id, customerName: customer.name, amount }
+  1071→      const risk = computeRisk(type, amount)
+  1072→      const summary = `تحصيل ${egp(amount)} من ${customer.name}`
+  1073→      const card = fieldsToCard('', type, risk, summary, [
+  1074→        { label: 'العميل', value: customer.name },
+  1075→        { label: 'المبلغ', value: egp(amount) },
+  1076→        { label: 'المديونية الحالية', value: egp(customer.balance) },
+  1077→        { label: 'بعد التحصيل', value: egp(customer.balance - amount) },
+  1078→      ], [{ label: 'الخزنة', value: egp(amount), tone: 'good' }], RISK_META[risk].hint)
+  1079→      return { ok: true, opType: type, payload, summary, card }
+  1080→    }
+  1081→
+  1082→    case 'payment': {
+  1083→      const supplierName = String(f.supplierName ?? '')
+  1084→      const supplier = matchEntity(supplierName || text, suppliers)?.entity ?? null
+  1085→      if (!supplier) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'المورد', failMessage: 'هسدد لمين؟' }
+  1086→      let amount = (f.amount as number | undefined) && (f.amount as number) > 0 ? Math.round((f.amount as number) * 100) : null
+  1087→      if (amount == null) {
+  1088→        const m = norm.match(/([٠-٩0-9]+(?:[.,][٠-٩0-9]+)?)/)
+  1089→        if (m) {
+  1090→          const western = m[1].replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+  1091→          amount = Math.round(parseFloat(western.replace(',', '.')) * 100)
+  1092→        }
+  1093→      }
+  1094→      if (amount == null || amount <= 0) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'المبلغ', failMessage: `هسدد قد إيه لـ${supplier.name}؟` }
+  1095→      if (amount > supplier.balance) {
+  1096→        return { ok: false, opType: type, payload: {}, summary: '', card: null as never, failMessage: `المستحق لـ${supplier.name} ${egp(supplier.balance)} بس` }
+  1097→      }
+  1098→      const payload = { supplierId: supplier.id, supplierName: supplier.name, amount }
+  1099→      const risk = computeRisk(type, amount)
+  1100→      const summary = `سداد ${egp(amount)} لـ${supplier.name}`
+  1101→      const card = fieldsToCard('', type, risk, summary, [
+  1102→        { label: 'المورد', value: supplier.name },
+  1103→        { label: 'المبلغ', value: egp(amount) },
+  1104→        { label: 'المستفق الحالي', value: egp(supplier.balance) },
+  1105→        { label: 'بعد السداد', value: egp(supplier.balance - amount) },
+  1106→      ], [{ label: 'الخزنة', value: egp(-amount), tone: 'bad' }], RISK_META[risk].hint)
+  1107→      return { ok: true, opType: type, payload, summary, card }
+  1108→    }
+  1109→
+  1110→    case 'membership': {
+  1111→      const isRenewal = norm.includes('تجديد') || norm.includes('جدد')
+  1112→      const explicitName = String(f.customerName ?? '').trim()
+  1113→      const customer = explicitName ? matchEntity(explicitName, customers)?.entity ?? null : matchEntity(text, customers)?.entity ?? null
+  1114→      if (!customer && isRenewal) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'العضو', failMessage: 'تجديد لمين؟' }
+  1115→      // A NEW subscription with NO name at all (rule path, question-like text)
+  1116→      // must never draft «عضو جديد» — ask for the name first.
+  1117→      if (!customer && !explicitName) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'العضو', failMessage: 'اشتراك جديد لمين؟ اكتبلي اسم العضو' }
+  1118→      const plan = String(f.plan ?? 'شهرية')
+  1119→      const months = Math.max(1, Math.min(12, Math.round(Number(f.months ?? 1))))
+  1120→      // plan price from items (gym plans are items) or fallback 35000
+  1121→      const planItem = items.find((i) => normalizeAr(i.name).includes(normalizeAr(plan)))
+  1122→      const total = Math.round((planItem?.sellPrice ?? 35000) * months)
+  1123→      let paid = total
+  1124→      if (typeof f.paid === 'number' && f.paid > 0) paid = Math.round(f.paid * 100)
+  1125→      paid = Math.min(paid, total)
+  1126→      const name = customer?.name ?? explicitName
+  1127→      const payload = {
+  1128→        ...(customer ? { customerId: customer.id } : { customerName: name }),
+  1129→        plan,
+  1130→        months,
+  1131→        total,
+  1132→        paid,
+  1133→      }
+  1134→      const risk = computeRisk(type, total)
+  1135→      const summary = `${isRenewal ? 'تجديد' : 'اشتراك جديد'} ${plan} لـ${name} — ${egp(total)}`
+  1136→      const card = fieldsToCard('', type, risk, summary, [
+  1137→        { label: 'العضو', value: name },
+  1138→        { label: 'الخطة', value: plan },
+  1139→        { label: 'المدة', value: fmtQty(months, 'شهر') },
+  1140→        { label: 'الإجمالي', value: egp(total) },
+  1141→        { label: 'مدفوع', value: egp(paid) },
+  1142→      ], [
+  1143→        { label: 'الخزنة', value: egp(paid), tone: 'good' },
+  1144→        ...(total - paid > 0 ? [{ label: 'باقي على العضو', value: egp(total - paid), tone: 'bad' as const }] : []),
+  1145→      ], RISK_META[risk].hint)
+  1146→      return { ok: true, opType: type, payload, summary, card }
+  1147→    }
+  1148→
+  1149→    case 'attendance': {
+  1150→      const customerName = String(f.customerName ?? '')
+  1151→      const customer = matchEntity(customerName || text, customers)?.entity ?? null
+  1152→      if (!customer) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'العضو', failMessage: 'حضور مين؟' }
+  1153→      const payload = { customerId: customer.id, customerName: customer.name }
+  1154→      const risk = computeRisk(type)
+  1155→      const summary = `حضور ${customer.name}`
+  1156→      const card = fieldsToCard('', type, risk, summary, [
+  1157→        { label: 'العضو', value: customer.name },
+  1158→        { label: 'اليوم', value: 'النهاردة' },
+  1159→        ...(customer.expiresAt ? [{ label: 'الاشتراك لحد', value: arDate(customer.expiresAt) }] : []),
+  1160→      ], [], RISK_META[risk].hint)
+  1161→      return { ok: true, opType: type, payload, summary, card }
+  1162→    }
+  1163→
+  1164→    case 'stock_adjustment': {
+  1165→      const rawItemName = String(f.itemName ?? '')
+  1166→      const item = matchEntity(rawItemName || text, items)?.entity ?? null
+  1167→      if (!item) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'الصنف', failMessage: 'تسوية مخزون لأنهي صنف؟' }
+  1168→      let delta = (f.delta as number | undefined) ?? null
+  1169→      if (delta == null && typeof f.qty === 'number') delta = f.qty - item.stockQty
+  1170→      if (delta == null) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'الكمية الجديدة/الفرق', failMessage: `المخزون الحالي ${fmtQty(item.stockQty, arUnit(item.unit))} — عايزه يبقى قد إيه؟` }
+  1171→      const reason = String(f.reason ?? '') || 'تسوية جرد'
+  1172→      const payload = { itemId: item.id, itemName: item.name, delta, reason, unit: item.unit }
+  1173→      const risk = computeRisk(type)
+  1174→      const summary = `تسوية مخزون ${item.name}: ${fmtQty(item.stockQty, arUnit(item.unit))} ← ${fmtQty(item.stockQty + delta, arUnit(item.unit))}`
+  1175→      const card = fieldsToCard('', type, risk, summary, [
+  1176→        { label: 'الصنف', value: item.name },
+  1177→        { label: 'الحالي', value: fmtQty(item.stockQty, arUnit(item.unit)) },
+  1178→        { label: 'الجديد', value: fmtQty(item.stockQty + delta, arUnit(item.unit)) },
+  1179→        { label: 'السبب', value: reason },
+  1180→      ], [{ label: `مخزون ${item.name}`, value: `${fmtQty(item.stockQty, arUnit(item.unit))} ← ${fmtQty(item.stockQty + delta, arUnit(item.unit))}`, tone: delta >= 0 ? 'good' : 'bad' }], 'تسوية المخزون عملية حساسة (R3) — محتاجة سبب واعتماد')
+  1181→      return { ok: true, opType: type, payload, summary, card }
+  1182→    }
+  1183→
+  1184→    case 'reversal': {
+  1185→      const ref = String(f.ref ?? '') || (norm.match(/WKL-\d+/)?.[0] ?? '')
+  1186→      if (!ref) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'رقم العملية', failMessage: 'عايز تعكس أنهي عملية؟ اكتب رقمها (زي WKL-1006)' }
+  1187→      const original = await db.operation.findFirst({ where: { businessId: business.id, ref } })
+  1188→      if (!original) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, failMessage: `ملقيتش عملية رقم ${ref}` }
+  1189→      if (original.reversedByRef) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, failMessage: `العملية ${ref} معكوسة قبل كده بـ${original.reversedByRef}` }
+  1190→      const reason = String(f.reason ?? '') || 'تصحيح خطأ'
+  1191→      const payload = { originalRef: ref, reason }
+  1192→      const risk = computeRisk(type)
+  1193→      const summary = `عكس العملية ${ref} (${original.summary})`
+  1194→      const card = fieldsToCard('', type, risk, summary, [
+  1195→        { label: 'العملية الأصلية', value: `${ref} — ${TYPE_AR[original.type] ?? original.type}` },
+  1196→        { label: 'ملخصها', value: original.summary },
+  1197→        { label: 'السبب', value: reason },
+  1198→      ], [{ label: 'الأثر', value: 'هيتلغى بالكامل بعملية عكسية موثقة', tone: 'neutral' }], 'عكس عملية مالية حساس (R3) — التاريخ مش بيتمسح، بيتصحح')
+  1199→      return { ok: true, opType: type, payload, summary, card }
+  1200→    }
+  1201→
+  1202→    default:
+  1203→      return { ok: false, opType: type, payload: {}, summary: '', card: null as never, failMessage: 'نوع العملية مش مدعوم' }
+  1204→  }
+  1205→}
+  1206→
+  1207→// ---------------------------------------------------------------------------
+  1208→// The turn runner
+  1209→// ---------------------------------------------------------------------------
+  1210→export interface TurnResult {
+  1211→  replyText: string
+  1212→  card?: ActionCardDTO | null
+  1213→  cards?: ResultCardDTO[] | null
+  1214→  thinking: ThinkingStep[]
+  1215→  modelLabel: string
+  1216→  opId?: string
+  1217→  actions?: ChatActionDTO[] | null
+  1218→}
+  1219→
+  1220→export async function runAgentTurn(ctx: TurnContext, emit: TurnEmit): Promise<TurnResult> {
+  1221→  const { business, user, text } = ctx
+  1222→  const v = getVertical(business.type)
+  1223→  const model = await resolveModel(ctx.modelKey)
+  1224→  const modelLabel = modelLabelFor(model)
+  1225→
+  1226→  // Load context once (memories raised to 8; pending ops count for the persona)
+  1227→  const [items, customers, suppliers, memories, pendingCount] = await Promise.all([
+  1228→    db.item.findMany({ where: { businessId: business.id } }),
+  1229→    db.customer.findMany({ where: { businessId: business.id } }),
+  1230→    db.supplier.findMany({ where: { businessId: business.id } }),
+  1231→    db.agentMemory.findMany({ where: { businessId: business.id, userId: user.id, active: true }, orderBy: { createdAt: 'desc' }, take: 12 }),
+  1232→    db.operation.count({ where: { businessId: business.id, status: 'AWAITING_APPROVAL' } }),
+  1233→  ])
+  1234→  const rules = memories.filter((m) => m.kind === 'rule')
+  1235→  const memCtx: MemoryContext = {
+  1236→    lexicon: parseLexicon(memories),
+  1237→    rules,
+  1238→    referencedIds: [],
+  1239→  }
+  1240→  // Prompt memories: preferences + facts (rules are injected in their own block)
+  1241→  const promptMemories = memories.filter((m) => m.kind === 'preference' || m.kind === 'fact')
+  1242→
+  1243→  // Thinking steps — with a «فتكرت من ذاكرتي» recall step injected right after
+  1244→  // «بفهم طلبك» whenever the agent actually remembers something about this user.
+  1245→  const memStep: ThinkingStep[] =
+  1246→    memories.length > 0
+  1247→      ? [
+  1248→          {
+  1249→            label: 'فتكرت من ذاكرتي',
+  1250→            detail: memories[0].text.slice(0, 60) + (memories[0].text.length > 60 ? '…' : ''),
+  1251→            state: 'done',
+  1252→            icon: 'verify',
+  1253→          },
+  1254→        ]
+  1255→      : []
+  1256→  const steps: ThinkingStep[] = [
+  1257→    { label: 'بفهم طلبك', detail: 'بحلل الجملة وأستخرج القصد والحقول', state: 'active', icon: 'understand' },
+  1258→    ...memStep,
+  1259→    { label: 'بدوّر في سجلك', detail: 'بدوّر على الأصناف والأسماء الحقيقية', state: 'pending', icon: 'search' },
+  1260→    { label: 'بتحقق من الأرقام', detail: 'بحسب من الأسعار الفعلية مش من دماغي', state: 'pending', icon: 'verify' },
+  1261→    { label: 'بجهّز الرد', detail: '', state: 'pending', icon: 'plan' },
+  1262→  ]
+  1263→  const IDX = { understand: 0, search: 1 + memStep.length, verify: 2 + memStep.length, reply: 3 + memStep.length }
+  1264→  const pushThinking = () => emit({ event: 'thinking', steps: steps.map((s) => ({ ...s })) })
+  1265→  const done = (i: number, detail?: string) => {
+  1266→    if (steps[i]) {
+  1267→      steps[i].state = 'done'
+  1268→      if (detail) steps[i].detail = detail
+  1269→    }
+  1270→    pushThinking()
+  1271→  }
+  1272→  pushThinking()
+  1273→
+  1274→  const norm = normalizeAr(text)
+  1275→
+  1276→  // ---- PASS 0a: Identity question → instant, deterministic, zero LLM ----
+  1277→  if (isIdentityQuestion(norm)) {
+  1278→    const lowStockCount = items.filter((i) => i.stockQty <= i.lowStockThreshold).length
+  1279→    const receivablesTotal = customers.reduce((s, c) => s + Math.max(0, c.balance), 0)
+  1280→    done(IDX.understand, 'سؤال عن هويتي — بجاوب من سجلك من غير موديل')
+  1281→    done(IDX.search, 'جبت بياناتي من سجلك الحقيقي')
+  1282→    done(IDX.verify, 'عدّيت النواقص والعمليات المستنية من قاعدة البيانات')
+  1283→    emit({ event: 'step', label: 'بتعرّف بنفسي', state: 'done' })
+  1284→    done(IDX.reply)
+  1285→    const identityMemory = memories.find((m) => m.kind === 'preference' || m.kind === 'rule' || m.kind === 'fact') ?? null
+  1286→    if (identityMemory) memCtx.referencedIds.push(identityMemory.id)
+  1287→    const replyText = buildIdentityReply({
+  1288→      business,
+  1289→      user,
+  1290→      verticalLabel: v.label,
+  1291→      memoryText: identityMemory?.text ?? null,
+  1292→      lowStockCount,
+  1293→      pendingCount,
+  1294→      receivablesTotal,
+  1295→    })
+  1296→    const actions: ChatActionDTO[] = [
+  1297→      { id: 'act-today', label: 'لوحة اليوم', view: 'today', icon: 'today', tone: 'primary' },
+  1298→      ...(lowStockCount > 0
+  1299→        ? [{ id: 'act-inventory', label: 'شوف المخزون', view: 'inventory' as const, icon: 'boxes' as const, tone: 'outline' as const }]
+  1300→        : []),
+  1301→    ]
+  1302→    await streamDeterministic(replyText, emit, 1200)
+  1303→    emit({ event: 'actions', actions })
+  1304→    await trackUsage(business.id, user.id, 'chat', 'chat')
+  1305→    await bumpMemoryUsage(memCtx.referencedIds)
+  1306→    return { replyText, card: null, cards: null, thinking: steps, modelLabel, actions }
+  1307→  }
+  1308→
+  1309→  // ---- PASS 0b: Memory save (preference OR BUSINESS_DNA rule) → instant, persisted, zero LLM ----
+  1310→  const saveRequest = extractSaveRequest(text, norm) ?? extractRuleRequest(text, norm)
+  1311→  if (saveRequest) {
+  1312→    // Dedupe: re-saving the exact same memory must NOT clutter the memory
+  1313→    // list — the owner repeating himself deserves a calm «already saved».
+  1314→    const isDuplicate = memories.some((m) => normalizeAr(m.text) === normalizeAr(saveRequest.text))
+  1315→    if (!isDuplicate) {
+  1316→      await db.agentMemory.create({
+  1317→        data: {
+  1318→          businessId: business.id,
+  1319→          userId: user.id,
+  1320→          kind: saveRequest.kind,
+  1321→          category: saveRequest.category,
+  1322→          text: saveRequest.text,
+  1323→          confidence: saveRequest.confidence,
+  1324→        },
+  1325→      })
+  1326→    }
+  1327→    const isRule = saveRequest.kind === 'rule'
+  1328→    done(IDX.understand, isRule ? 'قانون من صاحب الشغل — مش محتاج موديل' : 'طلب حفظ في الذاكرة — مش محتاج موديل')
+  1329→    done(IDX.search, 'بتخزنها في ذاكرتي عنك')
+  1330→    done(IDX.verify, isDuplicate ? 'موجودة أصلًا — من غير تكرار' : 'اتحفظت فعليًا في قاعدة البيانات')
+  1331→    emit({ event: 'step', label: 'بحفظ في ذاكرتي', state: 'done' })
+  1332→    done(IDX.reply)
+  1333→    const replyText = isDuplicate
+  1334→      ? `دي محفوظة عندي أصلًا ✅ — «${saveRequest.text}». مطمن، مش هنسيها.`
+  1335→      : isRule
+  1336→        ? `اتحفظت قانون من قوانين المحل ✅ — «${saveRequest.text}».\nمن دلوقتي أي عملية تخص الموضوع ده هتتنبه عليه قبل الاعتماد.`
+  1337→        : `اتحفظت في ذاكرتي ✅ — هفتكرها: «${saveRequest.text}». لما الموقف ده يتكرر هرفعها على طول.`
+  1338→    await streamDeterministic(replyText, emit, 1000)
+  1339→    await trackUsage(business.id, user.id, 'chat', 'chat')
+  1340→    return { replyText, card: null, cards: null, thinking: steps, modelLabel, actions: null }
+  1341→  }
+  1342→
+  1343→  // ---- PASS 0c: FORGET («انسى…») → deactivate, instant, zero LLM ----
+  1344→  const forgetRequest = extractForgetRequest(text, norm)
+  1345→  if (forgetRequest) {
+  1346→    const target = findMemoryByReference(forgetRequest.reference, memories)
+  1347→    done(IDX.understand, 'طلب مسح من الذاكرة — مش محتاج موديل')
+  1348→    done(IDX.search, 'بدوّر عليها في ذاكرتي المحفوظة')
+  1349→    let replyText: string
+  1350→    if (target) {
+  1351→      await db.agentMemory.update({ where: { id: target.id }, data: { active: false, updatedAt: new Date() } })
+  1352→      done(IDX.verify, 'اتمسحت فعليًا (متفعّلة لأ)')
+  1353→      emit({ event: 'step', label: 'بامسح من ذاكرتي', state: 'done' })
+  1354→      replyText = `اتمسحت من ذاكرة وكيل ✅ — الكلام ده: «${target.text.slice(0, 100)}».\nلو احتجته تاني في يوم من الأيام قولي «احفظ» وأرجعه لك.`
+  1355→    } else {
+  1356→      done(IDX.verify, 'ملقيتش حاجة بالشكل ده')
+  1357→      emit({ event: 'step', label: 'بامسح من ذاكرتي', state: 'done' })
+  1358→      replyText = `بصراحة ملقيتش في ذاكرتي حاجة بالشكل ده 🤔 — قولي جزء من الكلام اللي حفظته بالظبط وأمسحه لك.`
+  1359→    }
+  1360→    done(IDX.reply)
+
+[showing lines 901-1360 of 1712; use offset=1361 with limit to continue reading]

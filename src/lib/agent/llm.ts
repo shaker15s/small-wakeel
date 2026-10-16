@@ -4,9 +4,17 @@
 // External calls are HARD-TIMEOUT-capped so a slow provider can never hang the
 // agent turn: intent extraction 20s, reply streaming 60s. On timeout the
 // harness falls back to its rule-based / deterministic paths.
+//
+// R15 resilience: every real LLM invocation is wrapped with
+// withBreaker(`${provider}:${model}`) + withRetry (graduated 0/800/2500ms
+// ladder). For streams the CONNECTION phase (first chunk) is what gets
+// retried — once bytes flow, the stream continues live; mid-stream failures
+// keep the pre-existing fallback paths. `llmHealth` feeds per-turn telemetry
+// (fallback=true on the UsageEvent whenever a retry or fallback fired).
 
 import ZAI from 'z-ai-web-dev-sdk'
 import { db } from '@/lib/db'
+import { withBreaker, withRetry } from './resilience'
 
 export interface LLMMessage {
   role: 'system' | 'user' | 'assistant'
@@ -115,6 +123,51 @@ export const INTENT_TIMEOUT_MS = 20_000
 /** Hard timeout for external reply streaming — 60s. */
 export const REPLY_STREAM_TIMEOUT_MS = 60_000
 
+// ---------------------------------------------------------------------------
+// R15 resilience wiring + per-turn health telemetry
+// ---------------------------------------------------------------------------
+
+/** Set by retry/fallback hooks; the harness resets + reads it per turn. */
+export const llmHealth = { retried: false, fellBack: false }
+
+function breakerKeyFor(model: ModelInfo): string {
+  return `${model.source === 'external' ? 'external' : 'builtin'}:${model.key}`
+}
+
+function retryHook(label: string) {
+  return (attempt: number, delayMs: number, err: unknown) => {
+    llmHealth.retried = true
+    console.warn(`[llm] retry «${label}» محاولة ${attempt} بعد ${delayMs}ms:`, err instanceof Error ? err.message : err)
+  }
+}
+
+/** A started stream: the first chunk already pulled + the live generator. */
+interface StartedStream {
+  gen: AsyncGenerator<StreamChunk>
+  first: IteratorResult<StreamChunk>
+}
+
+/**
+ * Start an async generator under retry+breaker: the connection phase (fetch /
+ * SDK create / first chunk) is where 429-5xx-ECONNRESET live — retry THAT,
+ * then continue streaming live. `start()` itself never yields.
+ */
+async function startStream(
+  gen: AsyncGenerator<StreamChunk>,
+  key: string,
+  label: string,
+): Promise<StartedStream> {
+  return withBreaker(key, () =>
+    withRetry(
+      async () => {
+        const first = await gen.next() // connection errors throw HERE
+        return { gen, first }
+      },
+      { label, onRetry: retryHook(label) },
+    ),
+  )
+}
+
 async function* streamExternal(model: ModelInfo, messages: LLMMessage[]): AsyncGenerator<StreamChunk> {
   const configId = model.key.slice(4)
   const config = await db.modelConfig.findUnique({ where: { id: configId }, include: { provider: true } })
@@ -173,20 +226,40 @@ export async function* streamChat(
 ): AsyncGenerator<StreamChunk> {
   if (model.source === 'external') {
     try {
-      yield* streamExternal(model, messages)
+      const started = await startStream(
+        streamExternal(model, messages),
+        breakerKeyFor(model),
+        `stream:${model.key}`,
+      )
+      if (!started.first.done) yield started.first.value
+      yield* started.gen
       return
     } catch (err) {
       console.error('[llm] external provider failed, falling back to builtin:', err)
+      llmHealth.fellBack = true
       yield { type: 'reasoning', text: 'المزوّد الخارجي مش متاح حاليًا — هرجع للموديل الداخلي.' }
-      yield* streamBuiltin(messages)
-      return
+      // fall through to the builtin path below
     }
   }
-  yield* streamBuiltin(messages)
+  const builtinKey = model.source === 'builtin' ? `builtin:${model.key}` : 'builtin:fallback'
+  const started = await startStream(streamBuiltin(messages), builtinKey, `stream:${model.key}`)
+  if (!started.first.done) yield started.first.value
+  yield* started.gen
 }
 
-/** Non-streaming completion (used for intent extraction pass). */
+/** Non-streaming completion (intent extraction / research synthesis / judge) —
+ *  wrapped with retry + breaker; the harness's deterministic fallbacks still
+ *  catch the final throw. */
 export async function completeChat(model: ModelInfo, messages: LLMMessage[]): Promise<string> {
+  return withBreaker(breakerKeyFor(model), () =>
+    withRetry(() => completeChatOnce(model, messages), {
+      label: `intent:${model.key}`,
+      onRetry: retryHook(`intent:${model.key}`),
+    }),
+  )
+}
+
+async function completeChatOnce(model: ModelInfo, messages: LLMMessage[]): Promise<string> {
   if (model.source === 'builtin') {
     const zai = await ZAI.create()
     const sdkMessages = messages.map((m) => ({

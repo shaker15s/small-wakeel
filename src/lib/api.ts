@@ -18,6 +18,9 @@ import type {
   SuggestionDTO,
   ThinkingStep,
   ChatTurn,
+  NoteDTO,
+  ResearchDTO,
+  VerifyDTO,
 } from './types'
 
 async function get<T>(url: string): Promise<T> {
@@ -124,6 +127,9 @@ export const api = {
   ) => patch<QuickCommandDTO>('/api/quick-commands', { id, ...patchBody }),
   touchQuickCommand: (id: string) => patch<QuickCommandDTO>('/api/quick-commands', { id, touch: true }),
   deleteQuickCommand: (id: string) => del(`/api/quick-commands?id=${id}`),
+  // — ورقة وكيل (scratchpad notes — the agent writes, the UI reads only)
+  notes: (businessId: string, conversationId: string) =>
+    get<NoteDTO[]>(`/api/notes?businessId=${businessId}&conversationId=${conversationId}`),
 }
 
 // ---------------------------------------------------------------------------
@@ -140,7 +146,12 @@ export interface StreamHandlers {
   onCards?: (cards: ResultCardDTO[]) => void
   onActions?: (actions: ChatActionDTO[]) => void
   onDelta?: (text: string) => void
-  onDone?: (messageId: string, modelLabel: string) => void
+  /** carried on the done event — R15 self-verification + deep-research metadata */
+  onDone?: (
+    messageId: string,
+    modelLabel: string,
+    meta?: { verified?: VerifyDTO; research?: ResearchDTO },
+  ) => void
   onError?: (message: string) => void
 }
 
@@ -153,6 +164,8 @@ export async function streamChat(
     conversationId?: string | null
     /** set when the user tapped a suggestion chip — feeds the usage ranking */
     suggestionId?: string | null
+    /** R15 — «بحث عميق» composer toggle: force the plan-and-execute research pipeline */
+    deepResearch?: boolean
   },
   handlers: StreamHandlers,
   signal?: AbortSignal,
@@ -188,7 +201,7 @@ export async function streamChat(
           | { event: 'cards'; cards: ResultCardDTO[] }
           | { event: 'actions'; actions: ChatActionDTO[] }
           | { event: 'delta'; text: string }
-          | { event: 'done'; messageId: string; modelLabel: string }
+          | { event: 'done'; messageId: string; modelLabel: string; verified?: VerifyDTO; research?: ResearchDTO }
           | { event: 'error'; message: string }
         switch (ev.event) {
           case 'start': handlers.onStart?.(ev.conversationId, ev.messageId); break
@@ -198,7 +211,9 @@ export async function streamChat(
           case 'cards': handlers.onCards?.(ev.cards); break
           case 'actions': handlers.onActions?.(ev.actions); break
           case 'delta': handlers.onDelta?.(ev.text); break
-          case 'done': handlers.onDone?.(ev.messageId, ev.modelLabel); break
+          case 'done':
+            handlers.onDone?.(ev.messageId, ev.modelLabel, { verified: ev.verified, research: ev.research })
+            break
           case 'error': handlers.onError?.(ev.message); break
         }
       } catch {
@@ -208,7 +223,15 @@ export async function streamChat(
   }
 }
 
-export function messageToTurn(m: MessageDTO): ChatTurn {
+/** ChatTurn + the R15 deep-research / self-verification metadata persisted on the message. */
+export type ChatTurnWithMeta = ChatTurn & {
+  /** deep-research metadata (plan + cited sources) — «وضع البحث» */
+  research?: ResearchDTO | null
+  /** self-verification ledger — «اتأكدت الأرقام» */
+  verified?: VerifyDTO | null
+}
+
+export function messageToTurn(m: MessageDTO): ChatTurnWithMeta {
   return {
     id: m.id,
     role: m.role,
@@ -220,5 +243,7 @@ export function messageToTurn(m: MessageDTO): ChatTurn {
     actions: m.actions ?? null,
     createdAt: m.createdAt,
     outcome: m.outcome ?? undefined,
+    research: m.research ?? null,
+    verified: m.verified ?? null,
   }
 }

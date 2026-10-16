@@ -130,6 +130,9 @@ export function compactCardsSummary(cards: ResultCardDTO[]): string {
         const footer = c.footer?.map((f) => `${f.label}: ${f.value}`).join('، ') ?? ''
         return `${c.title} (${c.rows.length} صف): ${rows}${more}${footer ? `. ${footer}` : ''}`
       }
+      if (c.kind === 'sources') {
+        return `${c.title}: ${c.sources.map((s) => s.title).join('؛ ')}`
+      }
       return `${c.title}: ${c.body}`
     })
     .join('\n')

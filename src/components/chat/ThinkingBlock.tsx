@@ -14,8 +14,10 @@ import {
   Check,
   ChevronDown,
   Circle,
+  Compass,
   Lightbulb,
   ListChecks,
+  NotebookPen,
   Search,
   Zap,
 } from 'lucide-react'
@@ -30,6 +32,8 @@ const STEP_ICONS: Record<NonNullable<ThinkingStep['icon']>, LucideIcon> = {
   verify: BadgeCheck,
   plan: ListChecks,
   execute: Zap,
+  research: Compass,
+  note: NotebookPen,
 }
 
 export function ThinkingBlock({ steps }: { steps: ThinkingStep[] }) {

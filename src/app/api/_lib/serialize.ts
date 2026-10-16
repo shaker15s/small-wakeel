@@ -8,14 +8,17 @@ import type {
   ItemDTO,
   MemoryDTO,
   MessageDTO,
+  NoteDTO,
   OpStatus,
   OpType,
   OperationDTO,
+  ResearchDTO,
   ResultCardDTO,
   Risk,
   ScheduledTaskDTO,
   SupplierDTO,
   ThinkingStep,
+  VerifyDTO,
 } from '@/lib/types'
 import type {
   AgentMemory,
@@ -149,7 +152,30 @@ export function serializeMessage(m: Message): MessageDTO {
     cards: m.cards ? parseJson<ResultCardDTO[] | null>(m.cards, null) : null,
     thinking: m.thinking ? parseJson<ThinkingStep[] | null>(m.thinking, null) : null,
     modelLabel: m.modelLabel,
+    research: m.research ? parseJson<ResearchDTO | null>(m.research, null) : null,
+    verified: m.verified ? parseJson<VerifyDTO | null>(m.verified, null) : null,
     createdAt: m.createdAt.toISOString(),
+  }
+}
+
+/** AgentNote row → NoteDTO (the «ورقة وقلم» scratchpad). */
+export function serializeNote(n: {
+  id: string
+  kind: string
+  text: string
+  source: string | null
+  pinned: boolean
+  createdAt: Date
+}): NoteDTO {
+  return {
+    id: n.id,
+    kind: (['fact', 'hypothesis', 'todo', 'plan', 'citation'].includes(n.kind)
+      ? n.kind
+      : 'fact') as NoteDTO['kind'],
+    text: n.text,
+    source: n.source,
+    pinned: n.pinned,
+    createdAt: n.createdAt.toISOString(),
   }
 }
 

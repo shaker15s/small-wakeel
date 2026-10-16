@@ -120,5 +120,6 @@ export const QUERY_KEYS = {
   conversations: (b: string, u: string) => ['conversations', b, u] as const,
   suggestions: (b: string, u: string) => ['suggestions', b, u] as const,
   quickCommands: (b: string) => ['quickCommands', b] as const,
+  notes: (b: string, c: string) => ['notes', b, c] as const,
   radar: (b: string) => ['radar', b] as const,
 }

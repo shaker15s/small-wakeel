@@ -23,19 +23,42 @@
 // Pass 5 (Buttons): deterministic per-tool deep-link actions are emitted after
 //   the reply deltas and persisted with the message.
 //
-// Every turn writes a UsageEvent (tool/chat/advisory) so the suggestions
-// engine and fraud radar learn from REAL usage.
+// R15 «الموظف الحقيقي» additions:
+//   Pass 0d (Research): explicit deepResearch toggle OR Arabic auto-detect →
+//     plan-first pipeline (خطة → جمع من السجل → بحث ويب → مصادر مرقمة →
+//     تقرير الخلاصة/التحليل/التوصيات) with self-verification BEFORE any delta.
+//   Scratchpad («ورقة وقلم»): every tool run jots facts on the AgentNote paper
+//     (fire-and-forget) and the newest notes are injected into every prompt.
+//   Self-verification: numeric claims in the reply cross-checked against the
+//     turn's ground-truth facts — wrong digits deterministically replaced.
+//   Telemetry: ONE UsageEvent per turn (latency/ttft/tokens/fallback) + retry
+//     ladder + circuit breaker on every LLM call (via ./llm wiring).
+//
+// Every turn writes a UsageEvent (tool/chat/advisory/research) so the
+// suggestions engine and fraud radar learn from REAL usage.
 
 import type { AgentMemory, Business, User, Item, Customer, Supplier } from '@prisma/client'
 import { db } from '@/lib/db'
-import type { ActionCardDTO, ChatActionDTO, OpType, ResultCardDTO, Risk, ThinkingStep } from '@/lib/types'
+import type {
+  ActionCardDTO,
+  ChatActionDTO,
+  OpType,
+  ResearchDTO,
+  ResultCardDTO,
+  Risk,
+  ThinkingStep,
+  VerifyDTO,
+} from '@/lib/types'
 import type { VerticalDef } from '@/lib/verticals'
 import { egp, qty as fmtQty, arDate } from '@/lib/format'
 import { arUnit, getVertical } from '@/lib/verticals'
 import { convertToBaseUnit, matchEntity, normalizeAr, parseQuantity, toWesternDigits, unitToCode } from './arabic'
 import { createDraft } from '@/lib/domain/executors'
 import { canDraft, computeRisk, RISK_META } from '@/lib/domain/risk'
-import { completeChat, modelLabelFor, resolveModel, streamChat, type LLMMessage } from './llm'
+import { completeChat, llmHealth, modelLabelFor, resolveModel, streamChat, type LLMMessage } from './llm'
+import { RESEARCH_TRIGGER_RE, runDeepResearch } from './research'
+import { ensurePrismaFresh, jotFactsFromCards, jotNote, notesContext } from './scratchpad'
+import { factsFromCards, verifyReply, type VerifyFact } from './verify'
 import { buildAdvisoryPrompt, buildReplyPrompt, buildSystemPrompt, roleTitle } from './prompt'
 import { READ_TOOLS, runReadTool, TYPE_AR, type ReadTool } from './tools'
 import {
@@ -70,6 +93,8 @@ interface TurnContext {
   text: string
   modelKey: string | null
   history: { role: string; text: string }[]
+  /** R15: user-toggled deep research («بحث عميق») — forces the research pipeline */
+  deepResearch?: boolean
 }
 
 /** Context handed to entity resolution — lexicon + active rules + usage side-effects. */
@@ -138,6 +163,52 @@ async function trackUsage(businessId: string, userId: string, kind: 'tool' | 'ch
     await db.usageEvent.create({ data: { businessId, userId, kind, label: label.slice(0, 80) } })
   } catch (e) {
     console.error('[harness] usageEvent failed:', e)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// R15 per-turn telemetry — ONE UsageEvent with latency / TTFT / tokens /
+// fallback, so the «100-expert council» observability gap closes for real.
+// ---------------------------------------------------------------------------
+
+interface TurnTelemetry {
+  latencyMs: number
+  ttftMs: number | null
+  tokens: number
+  fallback: boolean
+}
+
+async function trackTurnUsage(
+  businessId: string,
+  userId: string,
+  kind: 'chat' | 'advisory' | 'research',
+  label: string,
+  t: TurnTelemetry,
+): Promise<void> {
+  try {
+    await db.usageEvent.create({
+      data: {
+        businessId,
+        userId,
+        kind,
+        label: label.trim().slice(0, 40),
+        latencyMs: Math.max(0, Math.round(t.latencyMs)),
+        ttftMs: t.ttftMs == null ? null : Math.max(0, Math.round(t.ttftMs)),
+        tokens: t.tokens,
+        fallback: t.fallback,
+      },
+    })
+  } catch (e) {
+    console.error('[harness] turn usageEvent failed:', e)
+  }
+}
+
+/** Small auxiliary event kinds (verify: label = the verification status). */
+async function trackKindEvent(businessId: string, userId: string, kind: 'verify', label: string): Promise<void> {
+  try {
+    await db.usageEvent.create({ data: { businessId, userId, kind, label: label.slice(0, 40) } })
+  } catch (e) {
+    console.error('[harness] kind usageEvent failed:', e)
   }
 }
 
@@ -1215,21 +1286,85 @@ export interface TurnResult {
   modelLabel: string
   opId?: string
   actions?: ChatActionDTO[] | null
+  /** R15: deep-research metadata (plan + cited sources) when the turn researched */
+  research?: ResearchDTO | null
+  /** R15: self-verification ledger («اتأكدت الأرقام») */
+  verified?: VerifyDTO | null
+  /** R15: scratchpad jots started this turn (notes invalidation hint for done) */
+  notesJotted?: number
 }
 
+/** Mutable per-turn state owned by the wrapper: telemetry kind + fallback + jots. */
+interface TurnMeta {
+  kind: 'chat' | 'advisory' | 'research'
+  fallback: boolean
+  notesJotted: number
+}
+
+/**
+ * The public turn runner — a telemetry shell around the real engine:
+ * measures total latency + TTFT (first delta/step on the wire), resets the
+ * LLM health flags (retry/fallback ladder), writes exactly ONE UsageEvent per
+ * turn {kind, label = أول ٤٠ حرف من رسالة المستخدم, latencyMs, ttftMs,
+ * tokens ≈ len/3, fallback}, plus a 'verify' event when verification did work.
+ */
 export async function runAgentTurn(ctx: TurnContext, emit: TurnEmit): Promise<TurnResult> {
+  ensurePrismaFresh() // dev-server prisma hot-reload seam (no-op on fresh processes)
+  const t0 = Date.now()
+  let ttftMs: number | null = null
+  let sawFirstToken = false
+  const meta: TurnMeta = { kind: 'chat', fallback: false, notesJotted: 0 }
+  llmHealth.retried = false
+  llmHealth.fellBack = false
+  const trackedEmit: TurnEmit = (ev) => {
+    if (!sawFirstToken && (ev.event === 'delta' || ev.event === 'step')) {
+      sawFirstToken = true
+      ttftMs = Date.now() - t0
+    }
+    emit(ev)
+  }
+  let result: TurnResult
+  try {
+    result = await runAgentTurnInner(ctx, trackedEmit, meta)
+  } catch (err) {
+    // the engine itself exploded — record the failure, then let the route's
+    // catch send the SSE error (the user never sees a half-turn silently die)
+    void trackTurnUsage(ctx.business.id, ctx.user.id, meta.kind, ctx.text, {
+      latencyMs: Date.now() - t0,
+      ttftMs,
+      tokens: 0,
+      fallback: true,
+    })
+    throw err
+  }
+  void trackTurnUsage(ctx.business.id, ctx.user.id, meta.kind, ctx.text, {
+    latencyMs: Date.now() - t0,
+    ttftMs,
+    tokens: Math.ceil(result.replyText.length / 3),
+    fallback: meta.fallback || llmHealth.retried || llmHealth.fellBack,
+  })
+  if (result.verified && (result.verified.status === 'corrected' || result.verified.checks.length > 0)) {
+    void trackKindEvent(ctx.business.id, ctx.user.id, 'verify', result.verified.status)
+  }
+  result.notesJotted = meta.notesJotted
+  return result
+}
+
+async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMeta): Promise<TurnResult> {
   const { business, user, text } = ctx
   const v = getVertical(business.type)
   const model = await resolveModel(ctx.modelKey)
   const modelLabel = modelLabelFor(model)
 
-  // Load context once (memories raised to 8; pending ops count for the persona)
-  const [items, customers, suppliers, memories, pendingCount] = await Promise.all([
+  // Load context once (memories raised to 8; pending ops count for the persona;
+  // R15: «ورقة وكيل» scratchpad notes for prompt injection)
+  const [items, customers, suppliers, memories, pendingCount, notesSection] = await Promise.all([
     db.item.findMany({ where: { businessId: business.id } }),
     db.customer.findMany({ where: { businessId: business.id } }),
     db.supplier.findMany({ where: { businessId: business.id } }),
     db.agentMemory.findMany({ where: { businessId: business.id, userId: user.id, active: true }, orderBy: { createdAt: 'desc' }, take: 12 }),
     db.operation.count({ where: { businessId: business.id, status: 'AWAITING_APPROVAL' } }),
+    notesContext(ctx.conversationId),
   ])
   const rules = memories.filter((m) => m.kind === 'rule')
   const memCtx: MemoryContext = {
@@ -1299,11 +1434,26 @@ export async function runAgentTurn(ctx: TurnContext, emit: TurnEmit): Promise<Tu
         ? [{ id: 'act-inventory', label: 'شوف المخزون', view: 'inventory' as const, icon: 'boxes' as const, tone: 'outline' as const }]
         : []),
     ]
-    await streamDeterministic(replyText, emit, 1200)
+    // R15 self-verification: the identity numbers came from the DB — the
+    // deterministic checker still cross-quotes them before anything streams.
+    const idFacts: VerifyFact[] = [
+      { label: 'أصناف ناقصة', value: String(lowStockCount) },
+      { label: 'عمليات مستنية اعتماد', value: String(pendingCount) },
+      { label: 'مديونيات العملاء', value: egp(receivablesTotal) },
+    ]
+    const idVerified = verifyReply(replyText, idFacts)
+    await streamDeterministic(idVerified.text, emit, 1200)
     emit({ event: 'actions', actions })
-    await trackUsage(business.id, user.id, 'chat', 'chat')
     await bumpMemoryUsage(memCtx.referencedIds)
-    return { replyText, card: null, cards: null, thinking: steps, modelLabel, actions }
+    return {
+      replyText: idVerified.text,
+      card: null,
+      cards: null,
+      thinking: steps,
+      modelLabel,
+      actions,
+      verified: idVerified.verified,
+    }
   }
 
   // ---- PASS 0b: Memory save (preference OR BUSINESS_DNA rule) → instant, persisted, zero LLM ----
@@ -1336,11 +1486,19 @@ export async function runAgentTurn(ctx: TurnContext, emit: TurnEmit): Promise<Tu
         ? `اتحفظت قانون من قوانين المحل ✅ — «${saveRequest.text}».\nمن دلوقتي أي عملية تخص الموضوع ده هتتنبه عليه قبل الاعتماد.`
         : `اتحفظت في ذاكرتي ✅ — هفتكرها: «${saveRequest.text}». لما الموقف ده يتكرر هرفعها على طول.`
     await streamDeterministic(replyText, emit, 1000)
-    await trackUsage(business.id, user.id, 'chat', 'chat')
-    return { replyText, card: null, cards: null, thinking: steps, modelLabel, actions: null }
+    const saveVerified = verifyReply(replyText, [])
+    return {
+      replyText: saveVerified.text,
+      card: null,
+      cards: null,
+      thinking: steps,
+      modelLabel,
+      actions: null,
+      verified: saveVerified.verified,
+    }
   }
 
-  // ---- PASS 0c: FORGET («انسى…») → deactivate, instant, zero LLM ----
+  // ---- PASS 0c: FORGET («انسى…") → deactivate, instant, zero LLM ----
   const forgetRequest = extractForgetRequest(text, norm)
   if (forgetRequest) {
     const target = findMemoryByReference(forgetRequest.reference, memories)
@@ -1358,16 +1516,68 @@ export async function runAgentTurn(ctx: TurnContext, emit: TurnEmit): Promise<Tu
       replyText = `بصراحة ملقيتش في ذاكرتي حاجة بالشكل ده 🤔 — قولي جزء من الكلام اللي حفظته بالظبط وأمسحه لك.`
     }
     done(IDX.reply)
-    await streamDeterministic(replyText, emit, 1000)
-    await trackUsage(business.id, user.id, 'chat', 'chat')
-    return { replyText, card: null, cards: null, thinking: steps, modelLabel, actions: null }
+    const forgetVerified = verifyReply(replyText, [])
+    await streamDeterministic(forgetVerified.text, emit, 1000)
+    return {
+      replyText: forgetVerified.text,
+      card: null,
+      cards: null,
+      thinking: steps,
+      modelLabel,
+      actions: null,
+      verified: forgetVerified.verified,
+    }
+  }
+
+  // ---- PASS 0d: DEEP RESEARCH (user-toggled OR auto-detected) — R15 ----
+  // Plan-first pipeline: خطة البحث → جمع من السجل (نفس أدوات الريجستري) →
+  // بحث ويب (٢ استعلامات) → كارت المصادر المرقمة → تقرير الخلاصة/التحليل/
+  // التوصيات باستشهادات [١] [٢] → تحقق ذاتي (أرقام + حكم LLM) — كله يتعمل
+  // وييتحقق قبل أول حرف يوصل للمستخدم.
+  if (ctx.deepResearch === true || RESEARCH_TRIGGER_RE.test(text)) {
+    meta.kind = 'research'
+    const researchResult = await runDeepResearch({
+      business,
+      user,
+      conversationId: ctx.conversationId,
+      text,
+      model,
+      mode: ctx.deepResearch === true ? 'forced' : 'auto',
+      emit,
+      notesSection,
+      onJot: () => {
+        meta.notesJotted++
+      },
+    })
+    if (researchResult.llmFallback) meta.fallback = true
+    // stream the VERIFIED report letter-by-letter (research already emitted
+    // its thinking/step/cards events incl. the sources card BEFORE any delta)
+    await streamDeterministic(researchResult.reportText, emit, 2600)
+    const researchActions: ChatActionDTO[] = [
+      { id: 'act-research-stats', label: 'افتح الإحصائيات', view: 'stats', icon: 'chart', tone: 'primary' },
+      { id: 'act-research-journal', label: 'سجل العمليات', view: 'journal', icon: 'journal', tone: 'outline' },
+    ]
+    emit({ event: 'actions', actions: researchActions })
+    await bumpMemoryUsage(memCtx.referencedIds)
+    return {
+      replyText: researchResult.reportText,
+      card: null,
+      cards: researchResult.cards,
+      thinking: researchResult.steps,
+      modelLabel,
+      research: researchResult.research,
+      verified: researchResult.verified,
+      actions: researchActions,
+    }
   }
 
   // ---- PASS 1: Understand (LLM with deterministic multi-split + rule fallback) ----
   let llmRaws: RawIntentJson[] = []
   let llmSingle: ExtractedIntent | null = null
   try {
-    const system = buildSystemPrompt({ business, user, items, customers, suppliers, memories: promptMemories, rules, history: ctx.history })
+    const baseSystem = buildSystemPrompt({ business, user, items, customers, suppliers, memories: promptMemories, rules, history: ctx.history })
+    // «ورقة وقلم» — the employee's OWN working notes ride along every prompt
+    const system = notesSection ? `${baseSystem}\n\n${notesSection}` : baseSystem
     const raw = await completeChat(model, [
       { role: 'system', content: system },
       { role: 'user', content: text },
@@ -1423,6 +1633,9 @@ export async function runAgentTurn(ctx: TurnContext, emit: TurnEmit): Promise<Tu
   /** multi-intent: per-part deterministic replies (the guaranteed fallback) */
   let multiReplyParts: string[] | null = null
   let multiOverflow = 0
+  /** R15: ground-truth numbers from this turn's tools/cards/drafts — the
+   *  self-verification basis («الأرقام الوحيدة اللي الوكيل مسموح يقولها») */
+  const turnFacts: VerifyFact[] = []
 
   if (subs.length >= 2) {
     // ================= MULTI-INTENT TURN =================
@@ -1467,6 +1680,12 @@ export async function runAgentTurn(ctx: TurnContext, emit: TurnEmit): Promise<Tu
         // growing array — the frontend card buffer REPLACES on each cards event
         emit({ event: 'cards', cards: allCards })
         usedTools.push(sub.tool)
+        // R15: ground-truth facts + scratchpad jot («ورقة وقلم»)
+        turnFacts.push(...factsFromCards(subCards))
+        meta.notesJotted += jotFactsFromCards(
+          { businessId: business.id, userId: user.id, conversationId: ctx.conversationId },
+          subCards,
+        )
         const label = TOOL_LABEL_AR[sub.tool] ?? sub.tool
         situationParts.push(`الطلب ${AR_ORDINALS[i]}/${Math.min(N, 4)} (${label}) — نفذت أداة ${sub.tool} ودي النتايج:\n${JSON.stringify(subCards).slice(0, 900)}`)
         replyParts.push(deterministicReadReply(subCards))
@@ -1509,6 +1728,19 @@ export async function runAgentTurn(ctx: TurnContext, emit: TurnEmit): Promise<Tu
         }
         anyDraft = true
         await trackUsage(business.id, user.id, 'tool', resolved.opType)
+        // R15: draft numbers join the ground truth + a scratchpad todo note
+        turnFacts.push(
+          ...[...resolved.card.fields, ...resolved.card.effects].map((f) => ({ label: f.label, value: f.value })),
+        )
+        void jotNote({
+          businessId: business.id,
+          userId: user.id,
+          conversationId: ctx.conversationId,
+          kind: 'todo',
+          text: `مسودة ${draft.ref} (${TYPE_AR[resolved.opType] ?? resolved.opType}): ${resolved.summary} — مستنية اعتماد`,
+          source: 'draft',
+        })
+        meta.notesJotted++
         situationParts.push(`الطلب ${AR_ORDINALS[i]}/${Math.min(N, 4)} — اتعملت مسودة رقم ${draft.ref} (${resolved.summary}) مستنية اعتماد المستخدم${resolved.card.dangerNote ? `، وفيها تحذير: ${resolved.card.dangerNote}` : ''}. مفيش حاجة اتنفذت لسه.`)
         replyParts.push(`جهزت مسودة «${TYPE_AR[resolved.opType] ?? resolved.opType}» (${draft.ref}): ${resolved.summary} — مستنية اعتمادك.`)
       }
@@ -1520,6 +1752,23 @@ export async function runAgentTurn(ctx: TurnContext, emit: TurnEmit): Promise<Tu
     if (allCards.length > 0) cards = allCards
     multiReplyParts = replyParts
     multiOverflow = overflow
+    // R15: deferred sub-requests land on the scratchpad as todos — the paper
+    // keeps them alive across turns instead of losing them in the scroll
+    if (overflow > 0) {
+      const deferred = subs
+        .slice(4)
+        .map((s) => s.sourceText.slice(0, 60))
+        .join('؛ ')
+      void jotNote({
+        businessId: business.id,
+        userId: user.id,
+        conversationId: ctx.conversationId,
+        kind: 'todo',
+        text: `مهمات مؤجلة من رسالة متعددة (${toArabicNum(overflow)}): ${deferred}`,
+        source: 'multi-intent',
+      })
+      meta.notesJotted++
+    }
     done(verifyIdx, N > 4 ? `${toArabicNum(Math.min(N, 4))} طلبات اتجاوب عليهم — والباقي ${toArabicNum(overflow)}` : 'كل الأرقام من قاعدة البيانات مباشرة')
     done(replyIdx)
 
@@ -1543,6 +1792,12 @@ export async function runAgentTurn(ctx: TurnContext, emit: TurnEmit): Promise<Tu
     emit({ event: 'cards', cards })
     emit({ event: 'step', label: `بشغّل أداة ${tool}`, state: 'done' })
     done(IDX.verify, 'الأرقام جاية من قاعدة البيانات مباشرة')
+    // R15: ground-truth facts + scratchpad jot («ورقة وقلم»)
+    turnFacts.push(...factsFromCards(cards))
+    meta.notesJotted += jotFactsFromCards(
+      { businessId: business.id, userId: user.id, conversationId: ctx.conversationId },
+      cards,
+    )
     situation = `شغّلت أداة القراءة ${tool} ودي النتايج:\n${JSON.stringify(cards, null, 1).slice(0, 1600)}`
     replyInstruction = 'لخّص النتيجة للمستخدم بالمصري بأرقامها الصحيحة من الجدول فوق. لو مفيش بيانات قول كده بصراحة.'
     const hint = proactiveHintFor(tool, cards)
@@ -1567,6 +1822,17 @@ export async function runAgentTurn(ctx: TurnContext, emit: TurnEmit): Promise<Tu
         situation = `معلومات ناقصة: ${resolved.missing ?? ''} — ${resolved.failMessage ?? ''}`
         replyInstruction = 'اسأل سؤال واحد قصير يطلب أهم حقل ناقص. متاخدش أي قرار.'
         questionMode = true
+        // R15: an ambiguous request lands on the paper as a HYPOTHESIS — the
+        // employee notes what he THINKS the user wants before asking
+        void jotNote({
+          businessId: business.id,
+          userId: user.id,
+          conversationId: ctx.conversationId,
+          kind: 'hypothesis',
+          text: `طلب غامض — ناقص ${resolved.missing ?? 'بيانات'}: ${resolved.failMessage ?? ''}`,
+          source: 'resolve',
+        })
+        meta.notesJotted++
       } else {
         done(IDX.verify, `حسبت الإجمالي من السعر الحقيقي: ${resolved.summary}`)
         emit({ event: 'step', label: `بجهّز مسودة ${TYPE_AR[resolved.opType]}`, state: 'active' })
@@ -1595,24 +1861,51 @@ export async function runAgentTurn(ctx: TurnContext, emit: TurnEmit): Promise<Tu
         }
         actions = DRAFT_ACTIONS
         await trackUsage(business.id, user.id, 'tool', resolved.opType)
+        // R15: draft numbers join the ground truth + a scratchpad todo note
+        turnFacts.push(
+          ...[...resolved.card.fields, ...resolved.card.effects].map((f) => ({ label: f.label, value: f.value })),
+        )
+        void jotNote({
+          businessId: business.id,
+          userId: user.id,
+          conversationId: ctx.conversationId,
+          kind: 'todo',
+          text: `مسودة ${draft.ref} (${TYPE_AR[resolved.opType] ?? resolved.opType}): ${resolved.summary} — مستنية اعتماد`,
+          source: 'draft',
+        })
+        meta.notesJotted++
       }
     }
   } else {
     // ================= ADVISORY FREE-CHAT («موظف حقيقي») =================
     advisoryMode = true
+    meta.kind = 'advisory'
     done(IDX.understand, 'سؤال عن الشغل — بجمع سياقك الحقيقي')
     done(IDX.search, 'بجمع أرقام شغلك من السجل')
     const snapshot = await getSnapshot(business)
     done(IDX.verify, 'الأرقام من قاعدة البيانات بس — مفيش تخمين')
-    advisorySystem = buildAdvisoryPrompt({ business, user, snapshot, memories, history: ctx.history })
+    // R15: the snapshot numbers ARE the verification ground truth here
+    turnFacts.push(
+      { label: 'مبيعات النهاردة', value: egp(snapshot.salesToday) },
+      { label: 'تحصيلات النهاردة', value: egp(snapshot.collectionsToday) },
+      { label: 'مصروفات النهاردة', value: egp(snapshot.expensesToday) },
+      { label: 'رصيد الخزنة', value: egp(snapshot.cash) },
+      { label: 'أصناف ناقصة', value: String(snapshot.lowStockCount) },
+      { label: 'مديونيات العملاء', value: egp(snapshot.receivablesTotal) },
+      { label: 'عمليات مستنية اعتماد', value: String(snapshot.pendingCount) },
+    )
+    // «ورقة وكيل» rides along the advisory prompt too — the paper is alive
+    const baseAdvisory = buildAdvisoryPrompt({ business, user, snapshot, memories, history: ctx.history })
+    advisorySystem = notesSection ? `${baseAdvisory}\n\n${notesSection}` : baseAdvisory
     situation = `سؤال عام عن الشغل (استشارة). سياق حقيقي: مبيعات النهاردة ${egp(snapshot.salesToday)}، خزنة ${egp(snapshot.cash)}، ${snapshot.lowStockCount} صنف ناقص، مديونيات ${egp(snapshot.receivablesTotal)}، ${snapshot.pendingCount} عملية مستنية.`
     replyInstruction = 'انصحه كموظف شاطر بالمصري — ودود ودافئ.'
     for (const m of memories) memCtx.referencedIds.push(m.id)
-    await trackUsage(business.id, user.id, 'advisory', 'advisory')
   }
 
   // ---- PASS 4: Explain (letter-by-letter, ADAPTIVE pacing) ----
   let replyText = ''
+  /** R15: self-verification ledger of this turn (filled in PASS 4.5) */
+  let verifiedLedger: VerifyDTO | null = null
   const pacer: PacerState = { t0: null, emitted: 0 }
   // NOTE: the reply pass MUST carry a trailing user turn — providers reject a
   // conversation that is only a system/assistant prompt (z-ai: code 1214).
@@ -1644,7 +1937,13 @@ export async function runAgentTurn(ctx: TurnContext, emit: TurnEmit): Promise<Tu
       console.error('[harness] multi-intent reply stream failed → deterministic numbered reply:', err)
     }
     const acceptable = collected.trim().length > 0 && replyAnswersAllParts(collected, Math.min(subs.length, 4))
+    if (!acceptable) meta.fallback = true
     replyText = acceptable ? collected.trim() : deterministicMultiReply(multiReplyParts, multiOverflow)
+    // R15: buffered text is fully known → verify BEFORE it streams (the user
+    // only ever sees checked numbers on multi-intent turns)
+    const multiVerified = verifyReply(replyText, turnFacts)
+    replyText = multiVerified.text
+    verifiedLedger = multiVerified.verified
     await streamDeterministic(replyText, emit, REPLY_PACING_BUDGET_MS)
   } else {
     try {
@@ -1664,6 +1963,7 @@ export async function runAgentTurn(ctx: TurnContext, emit: TurnEmit): Promise<Tu
       }
     } catch (err) {
       console.error('[harness] reply stream failed:', err)
+      meta.fallback = true
       if (!replyText) {
         const fallback = advisoryMode
           ? advisoryFallback(v)
@@ -1685,6 +1985,7 @@ export async function runAgentTurn(ctx: TurnContext, emit: TurnEmit): Promise<Tu
   }
 
   if (!replyText.trim()) {
+    meta.fallback = true
     const fallback = advisoryMode
       ? advisoryFallback(v)
       : multiReplyParts
@@ -1694,13 +1995,35 @@ export async function runAgentTurn(ctx: TurnContext, emit: TurnEmit): Promise<Tu
     replyText = fallback
   }
 
+  // ---- PASS 4.5: R15 self-verification (post-hoc for live-streamed turns) ----
+  // Deterministic ONLY here (regex digit cross-check, sub-ms) — the LLM judge
+  // is a research-mode exclusive (hard contract: <600ms on normal turns).
+  // A corrected text replaces the PERSISTED message; the done event carries
+  // the verified ledger so the UI re-renders the corrected numbers.
+  if (verifiedLedger == null) {
+    const postVerified = verifyReply(replyText, turnFacts)
+    verifiedLedger = postVerified.verified
+    if (postVerified.verified.status === 'corrected') {
+      replyText = postVerified.text
+    }
+  }
+
   // ---- PASS 5: Deep-link action buttons (after deltas, before done) ----
   if (actions && actions.length > 0) {
     emit({ event: 'actions', actions })
   }
 
   await bumpMemoryUsage(memCtx.referencedIds)
-  return { replyText, card, cards, thinking: steps, modelLabel, opId, actions: actions && actions.length > 0 ? actions : null }
+  return {
+    replyText,
+    card,
+    cards,
+    thinking: steps,
+    modelLabel,
+    opId,
+    actions: actions && actions.length > 0 ? actions : null,
+    verified: verifiedLedger,
+  }
 }
 
 /** Legacy chip fallback for non-advisory plain-chat turns (R13, kept for safety). */

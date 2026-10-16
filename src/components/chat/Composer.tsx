@@ -5,9 +5,12 @@
 // commands first («أدواتك السريعة» — dashed, primary-tinted, always visible),
 // then the top dynamic suggestions (compact, hidden while streaming). Every
 // chip SENDS its prompt on tap — no filling the box.
+// R15: a «بحث عميق» toggle (Compass) sits next to the send button — forces the
+// plan-and-execute research pipeline for the NEXT message, then resets.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowUp, Loader2, Mic } from 'lucide-react'
+import { motion } from 'framer-motion'
+import { ArrowUp, ArrowUpToLine, Compass, Loader2, Mic } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
@@ -17,6 +20,8 @@ import { cn } from '@/lib/utils'
 
 const MAX_HEIGHT = 128 // 4 rows max (max-h-32)
 
+const DEEP_RESEARCH_LABEL = 'بحث عميق — وكيل يدور ويدقق قبل ما يرد'
+
 export function Composer({
   commands,
   suggestions,
@@ -24,20 +29,25 @@ export function Composer({
   onCommandTap,
   onSuggestionTap,
   disabled,
+  queuedCount = 0,
   onVoiceClick,
 }: {
   /** the user's own tools — always visible above the input */
   commands: QuickCommandDTO[]
   /** dynamic suggestions (top 3-4 are rendered) */
   suggestions: SuggestionDTO[]
-  onSend: (text: string) => void
+  onSend: (text: string, opts?: { deepResearch?: boolean }) => void
   onCommandTap: (command: QuickCommandDTO) => void
   onSuggestionTap: (suggestion: SuggestionDTO) => void
   disabled?: boolean
+  /** messages queued behind the live turn — shown as a waiting pill */
+  queuedCount?: number
   /** voice input hook — optional; the mic stays a disabled teaser without it */
   onVoiceClick?: () => void
 }) {
   const [value, setValue] = useState('')
+  /** «بحث عميق» — lives per-message: ON until the next send, then resets */
+  const [deepResearch, setDeepResearch] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   const autosize = useCallback(() => {
@@ -53,11 +63,17 @@ export function Composer({
 
   const send = useCallback(() => {
     const text = value.trim()
-    if (!text || disabled) return
-    onSend(text)
+    // STORM-SAFE (R15-5 CEO fix): a live turn NO LONGER blocks submission —
+    // the parent ChatView QUEUES mid-stream sends and flushes them on done.
+    // Blocking here was the silent-loss bug (text kept getting overwritten by
+    // the next fill while the message never left the composer).
+    if (!text) return
+    // the flag rides WITH this message only — then resets for the next one
+    onSend(text, { deepResearch })
     setValue('')
+    setDeepResearch(false)
     textareaRef.current?.focus()
-  }, [value, disabled, onSend])
+  }, [value, onSend, deepResearch])
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -66,7 +82,7 @@ export function Composer({
     }
   }
 
-  const canSend = value.trim().length > 0 && !disabled
+  const canSend = value.trim().length > 0
 
   const topSuggestions = suggestions.slice(0, 4)
   // the suggestion row hides while the agent is replying; the user's own
@@ -154,20 +170,82 @@ export function Composer({
             <Mic className="size-4.5" aria-hidden="true" />
           </Button>
 
-          <Button
-            type="submit"
-            className="press size-11 shrink-0 rounded-full"
-            aria-label="إرسال الرسالة"
-            disabled={!canSend}
-          >
-            {disabled ? (
-              <Loader2 className="size-5 animate-spin" aria-hidden="true" />
-            ) : (
-              <ArrowUp className="size-5" aria-hidden="true" />
-            )}
-          </Button>
+          <div className="flex items-center gap-1.5">
+            {/* «بحث عميق» toggle — amber when armed, resets after each send */}
+            <Button
+              type="button"
+              variant="ghost"
+              className={cn(
+                'press size-11 shrink-0 rounded-full',
+                deepResearch
+                  ? 'bg-[var(--wakil-amber)]/15 text-[var(--wakil-amber)] hover:bg-[var(--wakil-amber)]/25 hover:text-[var(--wakil-amber)]'
+                  : 'text-muted-foreground hover:text-foreground',
+              )}
+              aria-pressed={deepResearch}
+              aria-label={DEEP_RESEARCH_LABEL}
+              title={DEEP_RESEARCH_LABEL}
+              onClick={() => setDeepResearch((v) => !v)}
+            >
+              <Compass
+                className={cn(
+                  'size-5 transition-transform duration-200',
+                  deepResearch && 'scale-110',
+                )}
+                aria-hidden="true"
+              />
+            </Button>
+
+            <Button
+              type="submit"
+              className="press size-11 shrink-0 rounded-full"
+              aria-label="إرسال الرسالة"
+              disabled={!canSend}
+            >
+              {disabled ? (
+                queuedCount > 0 ? (
+                  <ArrowUpToLine className="size-5" aria-hidden="true" />
+                ) : (
+                  <Loader2 className="size-5 animate-spin" aria-hidden="true" />
+                )
+              ) : (
+                <ArrowUp className="size-5" aria-hidden="true" />
+              )}
+            </Button>
+          </div>
         </div>
       </form>
+
+      {/* deep-research hint — only while the mode is armed */}
+      {deepResearch && (
+        <motion.p
+          initial={{ opacity: 0, y: -4 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.18, ease: 'easeOut' }}
+          className="flex items-center justify-center gap-1.5 px-2 text-[11px] font-medium text-[var(--wakil-amber)]/90"
+          role="status"
+        >
+          <Compass className="size-3 shrink-0" aria-hidden="true" />
+          <span>وضع البحث العميق شغّال — هياخد وقت أطول ويرجع بمصادر</span>
+        </motion.p>
+      )}
+
+      {/* storm-safe queue — messages waiting for the live turn to finish */}
+      {queuedCount > 0 && (
+        <motion.p
+          initial={{ opacity: 0, y: -4 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.18, ease: 'easeOut' }}
+          className="flex items-center justify-center gap-1.5 px-2 text-[11px] font-medium text-muted-foreground"
+          role="status"
+          aria-live="polite"
+        >
+          <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden="true" />
+          <span>
+            رسالتك في الطابور — هتبعت أول ما يخلص الرد الجاري
+            {queuedCount > 1 ? ` (${queuedCount})` : ''}
+          </span>
+        </motion.p>
+      )}
     </div>
   )
 }

@@ -1,0 +1,797 @@
+     1→'use client'
+     2→
+     3→// وكيل — ChatView: the conversation-first heart of the app, rebuilt to
+     4→// ChatGPT/Claude quality. The live turn lives INSIDE the turns list (same DOM
+     5→// node from first thinking frame to final card reveal — zero flicker):
+     6→//   • pre-text → ThinkingIndicator (3 rotating animation modes + statuses)
+     7→//   • deltas   → ONLY the streamed text + caret + compact step line
+     8→//   • card / cards / actions are BUFFERED in closure refs — never rendered
+     9→//     mid-stream — then revealed BELOW the finished text with a staggered
+    10→//     spring (fixes «الكروت بتظهر فوق الرد»).
+    11→// Round 14 adds the conversation layer: «محادثة جديدة» + history drawer
+    12→// (ConversationDrawer) + dynamic suggestion chips that follow the user's work
+    13→// + the user's own quick tools pinned in the Composer.
+    14→
+    15→import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+    16→import { useQuery, useQueryClient } from '@tanstack/react-query'
+    17→import { motion, MotionConfig } from 'framer-motion'
+    18→import type { LucideIcon } from 'lucide-react'
+    19→import { Brain, Check, ChevronDown, Cpu, History, Loader2, Scale, Sparkles, SquarePen, Zap } from 'lucide-react'
+    20→import { api, messageToTurn, streamChat } from '@/lib/api'
+    21→import { getVertical } from '@/lib/verticals'
+    22→import { useWakil, QUERY_KEYS, type ViewKey } from '@/lib/store'
+    23→import { TIER_AR } from '@/lib/labels'
+    24→import type {
+    25→  ActionCardDTO,
+    26→  BusinessLite,
+    27→  ChatActionDTO,
+    28→  ChatTurn,
+    29→  ModelConfigDTO,
+    30→  QuickCommandDTO,
+    31→  ResultCardDTO,
+    32→  SuggestionDTO,
+    33→} from '@/lib/types'
+    34→import { AgentAvatar, type AgentState } from './AgentAvatar'
+    35→import { MessageBubble } from './MessageBubble'
+    36→import { Composer } from './Composer'
+    37→import { ConversationDrawer } from './ConversationDrawer'
+    38→import { TOOL_ICONS } from './QuickCommandsManager'
+    39→import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+    40→import { Button } from '@/components/ui/button'
+    41→import { cn } from '@/lib/utils'
+    42→import { useToast } from '@/hooks/use-toast'
+    43→
+    44→interface ChatViewProps {
+    45→  business: BusinessLite
+    46→  userId: string
+    47→  /** deep-link navigation from agent action buttons (e.g. «افتح الإحصائيات») */
+    48→  onNavigate?: (view: ViewKey) => void
+    49→}
+    50→
+    51→const BUILTIN_MODELS = [
+    52→  {
+    53→    key: 'builtin-deep',
+    54→    label: 'عميق مفكّر',
+    55→    sub: 'glm-4.6 · للمهام المعقدة',
+    56→    icon: Brain,
+    57→  },
+    58→  {
+    59→    key: 'builtin-air',
+    60→    label: 'خفيف سريع',
+    61→    sub: 'glm-4.5-air · سريع ويكفي',
+    62→    icon: Zap,
+    63→  },
+    64→] as const
+    65→
+    66→const TIER_ICONS: Record<string, LucideIcon> = { air: Zap, balanced: Scale, deep: Brain }
+    67→
+    68→export function ChatView({ business, userId, onNavigate }: ChatViewProps) {
+    69→  const vertical = getVertical(business.type)
+    70→  const modelKey = useWakil((s) => s.modelKey)
+    71→  const setModel = useWakil((s) => s.setModel)
+    72→  const activeConversationId = useWakil((s) => s.activeConversationId)
+    73→  const setActiveConversation = useWakil((s) => s.setActiveConversation)
+    74→  const queryClient = useQueryClient()
+    75→  const { toast } = useToast()
+    76→
+    77→  const [turns, setTurns] = useState<ChatTurn[]>([])
+    78→  // the conversation ACTUALLY displayed (from GET / start event) — distinct
+    79→  // from the requested one so the query key only re-keys on explicit intent
+    80→  const [loadedConvId, setLoadedConvId] = useState<string | null>(null)
+    81→  const [sending, setSending] = useState(false)
+    82→  const [busyOpId, setBusyOpId] = useState<string | null>(null)
+    83→  const [revealId, setRevealId] = useState<string | null>(null)
+    84→  const [failedId, setFailedId] = useState<string | null>(null)
+    85→  const [nearBottom, setNearBottom] = useState(true)
+    86→  const [drawerOpen, setDrawerOpen] = useState(false)
+    87→  const [creating, setCreating] = useState(false)
+    88→
+    89→  const scrollRef = useRef<HTMLDivElement>(null)
+    90→  const nearBottomRef = useRef(true)
+    91→  const sendingRef = useRef(false)
+    92→  const retryRef = useRef<string | null>(null)
+    93→  const creatingRef = useRef(false)
+    94→
+    95→  // ---- load conversation history (keyed to the ACTIVE conversation) ----
+    96→  const { data, isLoading } = useQuery({
+    97→    queryKey: QUERY_KEYS.chatConversation(business.id, userId, activeConversationId),
+    98→    queryFn: () => api.chat(business.id, userId, activeConversationId),
+    99→    refetchOnWindowFocus: false,
+   100→  })
+   101→  // One effect owns the transcript: it applies the fetched history whenever
+   102→  // the data or the target conversation changes, and drops the old transcript
+   103→  // while a NEW key has no cached data yet (so stale messages never linger).
+   104→  // (deps include the conversation key — a cache-hit key switch can return a
+   105→  // deep-equal object via structural sharing, which alone wouldn't re-fire.)
+   106→  useEffect(() => {
+   107→    if (!data) {
+   108→      setTurns([])
+   109→      setRevealId(null)
+   110→      setFailedId(null)
+   111→      return
+   112→    }
+   113→    if (sendingRef.current) return
+   114→    setTurns(data.messages.map(messageToTurn))
+   115→    setLoadedConvId(data.conversation.id)
+   116→    setRevealId(null)
+   117→    setFailedId(null)
+   118→  }, [data, business.id, userId, activeConversationId])
+   119→
+   120→  // ---- smart scroll: follow only while the user is near the bottom ----
+   121→  const scrollToBottom = useCallback((smooth = true) => {
+   122→    const el = scrollRef.current
+   123→    if (!el) return
+   124→    el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'auto' })
+   125→    nearBottomRef.current = true
+   126→  }, [])
+   127→
+   128→  const onScroll = useCallback(() => {
+   129→    const el = scrollRef.current
+   130→    if (!el) return
+   131→    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 140
+   132→    nearBottomRef.current = near
+   133→    setNearBottom((prev) => (prev === near ? prev : near))
+   134→  }, [])
+   135→
+   136→  useEffect(() => {
+   137→    if (nearBottomRef.current) scrollToBottom(false)
+   138→  }, [turns, scrollToBottom])
+   139→
+   140→  // ---- providers for the model picker ----
+   141→  const { data: providersData } = useQuery({
+   142→    queryKey: QUERY_KEYS.providers,
+   143→    queryFn: () => api.providers(),
+   144→  })
+   145→  const currentLabel = useMemo(() => {
+   146→    if (modelKey === 'builtin-deep') return 'عميق مفكّر'
+   147→    if (modelKey === 'builtin-air') return 'خفيف سريع'
+   148→    const ext = providersData?.providers.flatMap((p) => p.models).find((m) => `ext:${m.id}` === modelKey)
+   149→    return ext?.label ?? 'عميق مفكّر'
+   150→  }, [modelKey, providersData])
+   151→
+   152→  // carry the provider name so two providers exposing the same model label
+   153→  // (e.g. مزوّد تجريبي + مزوّد الاختبار → وكيل خفيف ×2) stay distinguishable
+   154→  const enabledExternal = (providersData?.providers ?? [])
+   155→    .flatMap((p) => p.models.map((m) => ({ ...m, providerName: p.name })))
+   156→    .filter((m) => m.enabled)
+   157→
+   158→  // ---- dynamic suggestions (the adaptive demos — بتتغير مع شغلك) ----
+   159→  const suggestionsQ = useQuery({
+   160→    queryKey: QUERY_KEYS.suggestions(business.id, userId),
+   161→    queryFn: () => api.suggestions(business.id, userId),
+   162→    refetchOnMount: true,
+   163→    retry: 1,
+   164→  })
+   165→
+   166→  // ---- the user's own quick tools (أدواتك السريعة — always visible) ----
+   167→  const commandsQ = useQuery({
+   168→    queryKey: QUERY_KEYS.quickCommands(business.id),
+   169→    queryFn: () => api.quickCommands(business.id),
+   170→  })
+   171→
+   172→  // ---- send a message → stream the turn (ChatGPT order guaranteed) ----
+   173→  const send = useCallback(
+   174→    async (text: string, opts?: { suggestionId?: string }) => {
+   175→      if (sendingRef.current || !text.trim()) return
+   176→      const trimmed = text.trim()
+   177→      sendingRef.current = true
+   178→      setSending(true)
+   179→      setFailedId(null)
+   180→      setRevealId(null)
+   181→      retryRef.current = trimmed
+   182→
+   183→      const userLocalId = `local-user-${Date.now()}`
+   184→      const liveId = `local-live-${Date.now()}`
+   185→
+   186→      setTurns((prev) => [
+   187→        ...prev,
+   188→        { id: userLocalId, role: 'user', text: trimmed, createdAt: new Date().toISOString() },
+   189→        {
+   190→          id: liveId,
+   191→          role: 'assistant',
+   192→          text: '',
+   193→          thinking: [],
+   194→          createdAt: new Date().toISOString(),
+   195→          streaming: true,
+   196→        },
+   197→      ])
+   198→      nearBottomRef.current = true
+   199→      setNearBottom(true)
+   200→
+   201→      // BUFFERS: card/cards/actions stay out of render until the stream ends
+   202→      const buf = {
+   203→        card: null as ActionCardDTO | null,
+   204→        cards: null as ResultCardDTO[] | null,
+   205→        actions: null as ChatActionDTO[] | null,
+   206→      }
+   207→      let errored = false
+   208→      let doneId: string | null = null
+   209→      // IMPORTANT: capture the target id at HANDLER-CALL time — closures that
+   210→      // resolve it inside the setTurns updater would read `doneId` at flush
+   211→      // time and silently drop the final deltas that arrive in the same batch
+   212→      // as the done event.
+   213→      const patchTurn = (patch: Partial<ChatTurn>) => {
+   214→        const id = doneId ?? liveId
+   215→        setTurns((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)))
+   216→      }
+   217→
+   218→      try {
+   219→        await streamChat(
+   220→          {
+   221→            businessId: business.id,
+   222→            userId,
+   223→            text: trimmed,
+   224→            modelKey,
+   225→            conversationId: activeConversationId ?? loadedConvId,
+   226→            suggestionId: opts?.suggestionId ?? null,
+   227→          },
+   228→          {
+   229→            onStart: (cid, userMessageId) => {
+   230→              // a new conversation may be created server-side when none was
+   231→              // passed — track it so later sends stay in the same thread
+   232→              setLoadedConvId(cid)
+   233→              // swap optimistic user id → the real persisted id so any later
+   234→              // refetch reconciles by key (no remount → no flicker)
+   235→              setTurns((prev) => prev.map((t) => (t.id === userLocalId ? { ...t, id: userMessageId } : t)))
+   236→            },
+   237→            onThinking: (steps) => patchTurn({ thinking: steps }),
+   238→            onStep: (label, state) => {
+   239→              const id = doneId ?? liveId
+   240→              setTurns((prev) =>
+   241→                prev.map((t) =>
+   242→                  t.id === id && t.thinking
+   243→                    ? { ...t, thinking: t.thinking.map((s) => (s.label === label ? { ...s, state } : s)) }
+   244→                    : t,
+   245→                ),
+   246→              )
+   247→            },
+   248→            onCard: (card) => {
+   249→              buf.card = card
+   250→            },
+   251→            onCards: (cards) => {
+   252→              buf.cards = cards
+   253→            },
+   254→            onActions: (actions) => {
+   255→              buf.actions = actions
+   256→            },
+   257→            onDelta: (d) => {
+   258→              const id = doneId ?? liveId
+   259→              setTurns((prev) => prev.map((t) => (t.id === id ? { ...t, text: t.text + d } : t)))
+   260→            },
+   261→            onDone: (messageId, modelLabel) => {
+   262→              doneId = messageId
+   263→              // finalize IN PLACE (same DOM node) + reveal the buffers below text
+   264→              setTurns((prev) =>
+   265→                prev.map((t) =>
+   266→                  t.id === liveId
+   267→                    ? {
+   268→                        ...t,
+   269→                        id: messageId,
+   270→                        streaming: false,
+   271→                        modelLabel,
+   272→                        card: buf.card,
+   273→                        cards: buf.cards,
+   274→                        actions: buf.actions,
+   275→                      }
+   276→                    : t,
+   277→                ),
+   278→              )
+   279→              setRevealId(messageId)
+   280→            },
+   281→            onError: (message) => {
+   282→              errored = true
+   283→              patchTurn({ streaming: false })
+   284→              setFailedId(doneId ?? liveId)
+   285→              toast({ title: 'مشكلة', description: message, variant: 'destructive' })
+   286→            },
+   287→          },
+   288→        )
+   289→      } catch {
+   290→        errored = true
+   291→        patchTurn({ streaming: false })
+   292→        setFailedId(doneId ?? liveId)
+   293→        toast({ title: 'مشكلة', description: 'الاتصال اتقطع — جرّب تاني', variant: 'destructive' })
+   294→      } finally {
+   295→        sendingRef.current = false
+   296→        setSending(false)
+   297→        if (errored) {
+   298→          // keep the failed bubble (retry button) — the server never persisted
+   299→          // a reply, so a refetch here would wipe the retry UI
+   300→        } else if (doneId) {
+   301→          // chat state is already exact locally — refresh the app-wide caches
+   302→          void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.overview(business.id, userId) })
+   303→          void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.operations(business.id) })
+   304→          // the conversation list (title/preview/counts) + suggestions follow
+   305→          // the user's work and update live after every turn
+   306→          void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.conversations(business.id, userId) })
+   307→          void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.suggestions(business.id, userId) })
+   308→        } else {
+   309→          // stream closed without done/error — treat as a failed turn
+   310→          patchTurn({ streaming: false })
+   311→          setFailedId(doneId ?? liveId)
+   312→          toast({ title: 'مشكلة', description: 'الرد مشكتلش — جرّب تاني', variant: 'destructive' })
+   313→        }
+   314→      }
+   315→    },
+   316→    [business.id, userId, modelKey, activeConversationId, loadedConvId, toast, queryClient],
+   317→  )
+   318→
+   319→  const retry = useCallback(() => {
+   320→    if (retryRef.current) void send(retryRef.current)
+   321→  }, [send])
+   322→
+   323→  // ---- suggestion / quick-command chips send their prompt directly ----
+   324→  const sendSuggestion = useCallback(
+   325→    (s: SuggestionDTO) => {
+   326→      void send(s.prompt, { suggestionId: s.id })
+   327→    },
+   328→    [send],
+   329→  )
+   330→
+   331→  const handleCommandTap = useCallback(
+   332→    (cmd: QuickCommandDTO) => {
+   333→      void send(cmd.prompt)
+   334→      // silent usage ping — updates «استخدمته X مرة» in the manager
+   335→      api
+   336→        .touchQuickCommand(cmd.id)
+   337→        .then((updated) => {
+   338→          queryClient.setQueryData<QuickCommandDTO[]>(QUERY_KEYS.quickCommands(business.id), (old) =>
+   339→            old?.map((c) => (c.id === updated.id ? updated : c)),
+   340→          )
+   341→        })
+   342→        .catch(() => {})
+   343→    },
+   344→    [send, business.id, queryClient],
+   345→  )
+   346→
+   347→  // ---- «محادثة جديدة» → create + activate + empty hero ----
+   348→  const startNewChat = useCallback(async () => {
+   349→    if (creatingRef.current) return
+   350→    creatingRef.current = true
+   351→    setCreating(true)
+   352→    try {
+   353→      const summary = await api.createConversation(business.id, userId)
+   354→      setActiveConversation(summary.id)
+   355→      setTurns([])
+   356→      setRevealId(null)
+   357→      setFailedId(null)
+   358→      setDrawerOpen(false)
+   359→      void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.conversations(business.id, userId) })
+   360→    } catch (err) {
+   361→      toast({
+   362→        title: 'مشكلة',
+   363→        description: err instanceof Error ? err.message : 'جرّب تاني',
+   364→        variant: 'destructive',
+   365→      })
+   366→    } finally {
+   367→      creatingRef.current = false
+   368→      setCreating(false)
+   369→    }
+   370→  }, [business.id, userId, setActiveConversation, queryClient, toast])
+   371→
+   372→  // ---- approvals (R2+ / R3 reason flow) ----
+   373→  const approve = useCallback(
+   374→    async (card: ActionCardDTO, reason?: string) => {
+   375→      if (!card.opId) return
+   376→      setBusyOpId(card.opId)
+   377→      try {
+   378→        const res = await api.confirmOperation(card.opId, 'approve', userId, reason)
+   379→        setTurns((prev) =>
+   380→          prev.map((t) =>
+   381→            t.card?.opId === card.opId
+   382→              ? { ...t, card: { ...t.card!, status: res.operation.status }, outcome: res.outcome ?? undefined }
+   383→              : t,
+   384→          ),
+   385→        )
+   386→        toast({
+   387→          title: res.outcome?.ok ? 'تم — موثّق ومتحقق' : 'العملية فشلت بأمان',
+   388→          description: res.outcome?.ok
+   389→            ? `${res.operation.ref} — ${res.operation.summary}`
+   390→            : (res.outcome?.failReason ?? 'راجع التفاصيل'),
+   391→          variant: res.outcome?.ok ? 'default' : 'destructive',
+   392→        })
+   393→        void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.overview(business.id, userId) })
+   394→        void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.operations(business.id) })
+   395→        void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.items(business.id) })
+   396→      } catch (err) {
+   397→        toast({
+   398→          title: 'مشكلة في الاعتماد',
+   399→          description: err instanceof Error ? err.message : 'جرّب تاني',
+   400→          variant: 'destructive',
+   401→        })
+   402→      } finally {
+   403→        setBusyOpId(null)
+   404→      }
+   405→    },
+   406→    [userId, business.id, toast, queryClient],
+   407→  )
+   408→
+   409→  const reject = useCallback(
+   410→    async (card: ActionCardDTO) => {
+   411→      if (!card.opId) return
+   412→      setBusyOpId(card.opId)
+   413→      try {
+   414→        const res = await api.confirmOperation(card.opId, 'reject', userId)
+   415→        setTurns((prev) =>
+   416→          prev.map((t) => (t.card?.opId === card.opId ? { ...t, card: { ...t.card!, status: 'CANCELLED' } } : t)),
+   417→        )
+   418→        toast({ title: 'اتلغت المسودة', description: `${res.operation.ref} اتلغت بلا أي أثر` })
+   419→        void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.overview(business.id, userId) })
+   420→      } catch (err) {
+   421→        toast({ title: 'مشكلة', description: err instanceof Error ? err.message : 'جرّب تاني', variant: 'destructive' })
+   422→      } finally {
+   423→        setBusyOpId(null)
+   424→      }
+   425→    },
+   426→    [userId, business.id, toast, queryClient],
+   427→  )
+   428→
+   429→  // ---- derived ----
+   430→  const lastTurn = turns.length > 0 ? turns[turns.length - 1] : null
+   431→  const headerAvatarState: AgentState =
+   432→    failedId && lastTurn?.id === failedId
+   433→      ? 'error'
+   434→      : lastTurn?.role === 'assistant' && lastTurn.streaming
+   435→        ? lastTurn.text
+   436→          ? 'writing'
+   437→          : 'thinking'
+   438→        : 'idle'
+   439→  const showWelcome = !isLoading && turns.length === 0
+   440→  const showJump = !nearBottom && !isLoading
+   441→
+   442→  // hero chips: dynamic when the endpoint answers, else 2 vertical fallbacks
+   443→  const heroSuggestions = !suggestionsQ.isPending && (suggestionsQ.data?.length ?? 0) > 0 ? suggestionsQ.data : null
+   444→  const heroFallback = vertical.examples.slice(0, 2)
+   445→
+   446→  return (
+   447→    <MotionConfig reducedMotion="user">
+   448→      <div className="relative flex h-full min-h-0 flex-col">
+   449→        {/* ===== compact header: agent + business | new chat + history | model ===== */}
+   450→        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border/70 bg-card/60 px-3 py-2 backdrop-blur-sm sm:px-4">
+   451→          <div className="flex min-w-0 items-center gap-1.5 sm:gap-2">
+   452→            <AgentAvatar state={headerAvatarState} size="sm" />
+   453→            <div className="min-w-0">
+   454→              <p className="truncate text-sm font-bold leading-tight">{business.name}</p>
+   455→              <p className="truncate text-[11px] leading-tight text-muted-foreground">{vertical.label}</p>
+   456→            </div>
+   457→            <div className="ms-1 flex shrink-0 items-center gap-1">
+   458→              <Button
+   459→                variant="outline"
+   460→                className="press h-9 shrink-0 gap-1.5 rounded-full px-2.5 text-xs font-medium sm:px-3"
+   461→                onClick={() => void startNewChat()}
+   462→                disabled={creating}
+   463→                aria-label="محادثة جديدة"
+   464→                title="محادثة جديدة"
+   465→              >
+   466→                {creating ? (
+   467→                  <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+   468→                ) : (
+   469→                  <SquarePen className="size-3.5 text-wakil-amber" aria-hidden="true" />
+   470→                )}
+   471→                <span className="hidden sm:inline">محادثة جديدة</span>
+   472→              </Button>
+   473→              <Button
+   474→                variant="ghost"
+   475→                size="icon"
+   476→                className="press size-9 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
+   477→                onClick={() => setDrawerOpen(true)}
+   478→                aria-label="المحادثات القديمة"
+   479→                title="المحادثات القديمة"
+   480→              >
+   481→                <History className="size-4" aria-hidden="true" />
+   482→              </Button>
+   483→            </div>
+   484→          </div>
+   485→
+   486→          <ModelPicker
+   487→            modelKey={modelKey}
+   488→            setModel={setModel}
+   489→            enabledExternal={enabledExternal}
+   490→            currentLabel={currentLabel}
+   491→            onToast={toast}
+   492→          />
+   493→        </div>
+   494→
+   495→        {/* ===== messages (scroll) + floating jump-to-bottom ===== */}
+   496→        <div className="relative min-h-0 flex-1">
+   497→          <div
+   498→            ref={scrollRef}
+   499→            onScroll={onScroll}
+   500→            className="scroll-warm h-full overflow-y-auto px-3 py-4 sm:px-4"
+   501→          >
+   502→            {isLoading && (
+   503→              <div className="mx-auto flex max-w-2xl flex-col gap-5" role="status" aria-label="بيحمّل المحادثة">
+   504→                <div className="ms-auto h-12 w-2/5 animate-pulse rounded-2xl bg-muted" />
+   505→                <div className="flex items-start gap-2.5">
+   506→                  <div className="size-7 shrink-0 animate-pulse rounded-full bg-muted" />
+   507→                  <div className="flex w-full flex-col gap-2">
+   508→                    <div className="h-3.5 w-3/4 animate-pulse rounded-full bg-muted/80" />
+   509→                    <div className="h-3.5 w-1/2 animate-pulse rounded-full bg-muted/60" />
+   510→                  </div>
+   511→                </div>
+   512→                <div className="h-28 w-full animate-pulse rounded-2xl bg-muted/70" />
+   513→              </div>
+   514→            )}
+   515→
+   516→            {showWelcome && (
+   517→              <motion.div
+   518→                initial={{ opacity: 0, y: 12 }}
+   519→                animate={{ opacity: 1, y: 0 }}
+   520→                transition={{ duration: 0.26, ease: 'easeOut' }}
+   521→                className="mx-auto flex max-w-md flex-col items-center gap-4 py-8 text-center"
+   522→              >
+   523→                <AgentAvatar state="idle" size="lg" />
+   524→                <div>
+   525→                  <h2 className="text-lg font-bold">أهلاً بيك 👋</h2>
+   526→                  <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">{vertical.welcome}</p>
+   527→                </div>
+   528→                <div className="flex flex-wrap justify-center gap-1.5">
+   529→                  {suggestionsQ.isPending ? (
+   530→                    <div className="flex flex-wrap justify-center gap-1.5" aria-busy="true" aria-label="بيجهّز الاقتراحات">
+   531→                      {[0, 1, 2, 3].map((i) => (
+   532→                        <span key={i} className="skel h-[4.25rem] w-32 rounded-2xl" />
+   533→                      ))}
+   534→                    </div>
+   535→                  ) : heroSuggestions ? (
+   536→                    heroSuggestions.map((s, i) => (
+   537→                      <SuggestionPill key={s.id} s={s} index={i} onPick={() => sendSuggestion(s)} />
+   538→                    ))
+   539→                  ) : (
+   540→                    // the suggestion engine is unreachable → silent static fallback
+   541→                    heroFallback.map((ex, i) => (
+   542→                      <motion.button
+   543→                        key={ex}
+   544→                        type="button"
+   545→                        initial={{ opacity: 0, y: 8 }}
+   546→                        animate={{ opacity: 1, y: 0 }}
+   547→                        transition={{ delay: 0.15 + i * 0.05, duration: 0.22, ease: 'easeOut' }}
+   548→                        onClick={() => void send(ex)}
+   549→                        className="press rounded-full border border-border bg-card px-3.5 py-2 text-xs transition-all hover:-translate-y-0.5 hover:border-wakil-amber/50 hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+   550→                      >
+   551→                        {ex}
+   552→                      </motion.button>
+   553→                    ))
+   554→                  )}
+   555→                </div>
+   556→              </motion.div>
+   557→            )}
+   558→
+   559→            <div className="mx-auto flex max-w-2xl flex-col gap-5">
+   560→              {turns.map((t) => (
+   561→                <MessageBubble
+   562→                  key={t.id}
+   563→                  turn={t}
+   564→                  onApprove={approve}
+   565→                  onReject={reject}
+   566→                  busyOpId={busyOpId}
+   567→                  onNavigate={onNavigate}
+   568→                  onRetry={t.id === failedId ? retry : undefined}
+   569→                  reveal={t.id === revealId}
+   570→                  error={t.id === failedId}
+   571→                />
+   572→              ))}
+   573→            </div>
+   574→          </div>
+   575→
+   576→          {/* floating scroll-to-bottom (appears when scrolled up) */}
+   577→          {showJump && (
+   578→            <div className="pointer-events-none absolute inset-x-0 bottom-4 flex justify-center">
+   579→              <motion.button
+   580→                type="button"
+   581→                initial={{ scale: 0.6, opacity: 0, y: 4 }}
+   582→                animate={{ scale: 1, opacity: 1, y: 0 }}
+   583→                transition={{ duration: 0.15, ease: 'easeOut' }}
+   584→                onClick={() => scrollToBottom(true)}
+   585→                aria-label="انزل لآخر المحادثة"
+   586→                className="press pointer-events-auto flex size-10 items-center justify-center rounded-full border border-border bg-card text-muted-foreground shadow-lg shadow-black/10 hover:text-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+   587→              >
+   588→                <ChevronDown className="size-4" aria-hidden="true" />
+   589→              </motion.button>
+   590→            </div>
+   591→          )}
+   592→        </div>
+   593→
+   594→        {/* ===== composer ===== */}
+   595→        <div className="shrink-0 border-t border-border/70 bg-card/60 px-3 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2 backdrop-blur-sm sm:px-4 sm:pb-3">
+   596→          <div className="mx-auto max-w-2xl">
+   597→            <Composer
+   598→              commands={commandsQ.data ?? []}
+   599→              suggestions={suggestionsQ.data ?? []}
+   600→              onSend={send}
+   601→              onCommandTap={handleCommandTap}
+   602→              onSuggestionTap={sendSuggestion}
+   603→              disabled={sending}
+   604→            />
+   605→            <p className="mt-1.5 hidden text-center text-[10px] text-muted-foreground sm:block">
+   606→              وكيل بيسأل قبل ما ينفذ — كل عملية بتتحقق بعد التنفيذ
+   607→            </p>
+   608→          </div>
+   609→        </div>
+   610→
+   611→        {/* ===== conversations drawer (سجل المحادثات القديمة) ===== */}
+   612→        {drawerOpen && (
+   613→          <ConversationDrawer
+   614→            businessId={business.id}
+   615→            userId={userId}
+   616→            activeId={activeConversationId ?? loadedConvId}
+   617→            onClose={() => setDrawerOpen(false)}
+   618→            onSwitch={(id) => {
+   619→              if (id !== activeConversationId) setActiveConversation(id)
+   620→              setDrawerOpen(false)
+   621→            }}
+   622→            onNewChat={() => void startNewChat()}
+   623→            creating={creating}
+   624→          />
+   625→        )}
+   626→      </div>
+   627→    </MotionConfig>
+   628→  )
+   629→}
+   630→
+   631→// ---------------------------------------------------------------------------
+   632→// Dynamic suggestion pill (welcome hero) — icon + label + reason badge
+   633→// ---------------------------------------------------------------------------
+   634→function SuggestionPill({ s, index, onPick }: { s: SuggestionDTO; index: number; onPick: () => void }) {
+   635→  const Icon = TOOL_ICONS[s.icon] ?? Sparkles
+   636→  const primary = s.tone === 'primary'
+   637→  return (
+   638→    <motion.button
+   639→      type="button"
+   640→      initial={{ opacity: 0, y: 8 }}
+   641→      animate={{ opacity: 1, y: 0 }}
+   642→      transition={{ delay: 0.15 + index * 0.05, duration: 0.22, ease: 'easeOut' }}
+   643→      onClick={onPick}
+   644→      aria-label={s.reasonLabel ? `${s.label} — ${s.reasonLabel}` : s.label}
+   645→      title={s.prompt}
+   646→      className={cn(
+   647→        'press flex min-h-11 max-w-full flex-col items-start gap-0.5 rounded-2xl border px-3.5 py-2 text-start transition-all hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50',
+   648→        primary
+   649→          ? 'border-transparent bg-primary text-primary-foreground hover:bg-primary/90'
+   650→          : 'border-border bg-card hover:border-wakil-amber/50 hover:bg-accent hover:text-accent-foreground',
+   651→      )}
+   652→    >
+   653→      <span className="flex items-center gap-1.5 text-xs font-medium">
+   654→        <Icon
+   655→          className={cn('size-3.5 shrink-0', primary ? 'text-primary-foreground/80' : 'text-wakil-amber')}
+   656→          aria-hidden="true"
+   657→        />
+   658→        <span className="max-w-56 truncate">{s.label}</span>
+   659→      </span>
+   660→      {s.reasonLabel && (
+   661→        <span className={cn('text-[10px]', primary ? 'text-primary-foreground/70' : 'text-muted-foreground')}>
+   662→          {s.reasonLabel}
+   663→        </span>
+   664→      )}
+   665→    </motion.button>
+   666→  )
+   667→}
+   668→
+   669→// ---------------------------------------------------------------------------
+   670→// Model picker — shadcn Popover (proper focus + outside-click handling)
+   671→// ---------------------------------------------------------------------------
+   672→function ModelPicker({
+   673→  modelKey,
+   674→  setModel,
+   675→  enabledExternal,
+   676→  currentLabel,
+   677→  onToast,
+   678→}: {
+   679→  modelKey: string | null
+   680→  setModel: (key: string) => void
+   681→  enabledExternal: Array<ModelConfigDTO & { providerName: string }>
+   682→  currentLabel: string
+   683→  onToast: (t: { title: string; description?: string }) => void
+   684→}) {
+   685→  const [open, setOpen] = useState(false)
+   686→
+   687→  const select = (key: string, label: string) => {
+   688→    setModel(key)
+   689→    setOpen(false)
+   690→    onToast({ title: 'تم تبديل الموديل', description: label })
+   691→  }
+   692→
+   693→  return (
+   694→    <Popover open={open} onOpenChange={setOpen}>
+   695→      <PopoverTrigger asChild>
+   696→        <Button
+   697→          variant="outline"
+   698→          className="group h-9 shrink-0 gap-1.5 rounded-full text-xs font-medium"
+   699→          aria-label={`تبديل الموديل — الحالي ${currentLabel}`}
+   700→        >
+   701→          <Cpu className="size-3.5 text-wakil-amber" aria-hidden="true" />
+   702→          <span className="max-w-24 truncate">{currentLabel}</span>
+   703→          <ChevronDown
+   704→            className="size-3.5 shrink-0 text-muted-foreground transition-transform duration-200 group-data-[state=open]:rotate-180"
+   705→            aria-hidden="true"
+   706→          />
+   707→        </Button>
+   708→      </PopoverTrigger>
+   709→
+   710→      <PopoverContent align="end" className="w-64 rounded-xl p-0" dir="rtl">
+   711→        <div className="p-1.5">
+   712→          <p className="px-2.5 pb-1 pt-1.5 text-[11px] font-semibold text-muted-foreground">
+   713→            الموديلات الداخلية
+   714→          </p>
+   715→          {BUILTIN_MODELS.map((m) => (
+   716→            <ModelRow
+   717→              key={m.key}
+   718→              icon={m.icon}
+   719→              label={m.label}
+   720→              sub={m.sub}
+   721→              active={modelKey === m.key}
+   722→              onSelect={() => select(m.key, m.label)}
+   723→            />
+   724→          ))}
+   725→
+   726→          {enabledExternal.length > 0 && (
+   727→            <>
+   728→              <p className="mt-1.5 border-t border-border/60 px-2.5 pb-1 pt-2 text-[11px] font-semibold text-muted-foreground">
+   729→                مزوّدين خارجيين
+   730→              </p>
+   731→              {enabledExternal.map((m) => (
+   732→                <ModelRow
+   733→                  key={m.id}
+   734→                  icon={TIER_ICONS[m.tier] ?? Brain}
+   735→                  label={m.label}
+   736→                  sub={`${TIER_AR[m.tier] ?? m.tier} · ${m.providerName}`}
+   737→                  active={modelKey === `ext:${m.id}`}
+   738→                  onSelect={() => select(`ext:${m.id}`, `${m.label} — ${m.providerName}`)}
+   739→                />
+   740→              ))}
+   741→            </>
+   742→          )}
+   743→
+   744→          <p className="mt-1.5 border-t border-border/60 px-2.5 py-2 text-[10px] leading-relaxed text-muted-foreground">
+   745→            تضيف مزوّدين من الإعدادات ↗
+   746→          </p>
+   747→        </div>
+   748→      </PopoverContent>
+   749→    </Popover>
+   750→  )
+   751→}
+   752→
+   753→function ModelRow({
+   754→  icon: Icon,
+   755→  label,
+   756→  sub,
+   757→  active,
+   758→  onSelect,
+   759→}: {
+   760→  icon: LucideIcon
+   761→  label: string
+   762→  sub: string
+   763→  active: boolean
+   764→  onSelect: () => void
+   765→}) {
+   766→  return (
+   767→    <button
+   768→      type="button"
+   769→      onClick={onSelect}
+   770→      aria-label={label}
+   771→      aria-pressed={active}
+   772→      className={cn(
+   773→        'flex min-h-11 w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-start transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50',
+   774→        active && 'bg-accent/70',
+   775→      )}
+   776→    >
+   777→      <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-muted">
+   778→        <Icon className="size-3.5 text-wakil-amber" aria-hidden="true" />
+   779→      </span>
+   780→      <span className="min-w-0 flex-1">
+   781→        <span className="block truncate text-xs font-semibold">{label}</span>
+   782→        <span className="block truncate text-[10px] text-muted-foreground">{sub}</span>
+   783→      </span>
+   784→      {active && (
+   785→        <motion.span
+   786→          initial={{ scale: 0.4, opacity: 0 }}
+   787→          animate={{ scale: 1, opacity: 1 }}
+   788→          transition={{ type: 'spring', stiffness: 420, damping: 22 }}
+   789→          className="flex shrink-0"
+   790→        >
+   791→          <Check className="size-4 text-wakil-amber" aria-hidden="true" />
+   792→        </motion.span>
+   793→      )}
+   794→    </button>
+   795→  )
+   796→}
+   797→

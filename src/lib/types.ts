@@ -126,6 +126,10 @@ export interface MessageDTO {
   actions?: ChatActionDTO[] | null
   /** post-execution outcome synced from the operation's current state */
   outcome?: CardOutcomeDTO | null
+  /** deep-research metadata (plan + cited sources) — R15 */
+  research?: ResearchDTO | null
+  /** self-verification result — R15 («اتأكدت الأرقام») */
+  verified?: VerifyDTO | null
   createdAt: string
 }
 
@@ -169,12 +173,51 @@ export type ResultCardDTO =
     }
   | { kind: 'kv'; title: string; rows: { label: string; value: string }[] }
   | { kind: 'text'; title: string; body: string }
+  | { kind: 'sources'; title: string; sources: SourceDTO[] }
 
 export interface ThinkingStep {
   label: string // e.g. «بفهم الطلب»
   detail: string
   state: 'done' | 'active' | 'pending'
-  icon?: 'understand' | 'search' | 'plan' | 'execute' | 'verify'
+  icon?: 'understand' | 'search' | 'plan' | 'execute' | 'verify' | 'research' | 'note'
+}
+
+// ---------------------------------------------------------------------------
+// R15 — «الموظف الحقيقي»: deep research + scratchpad + self-verification
+
+/** A cited source gathered during deep research (OpenAI-style numbered citations). */
+export interface SourceDTO {
+  title: string
+  url?: string | null
+  snippet?: string | null
+  host?: string | null
+  /** internal evidence ref (e.g. WKL-2027 / items table) when source is the business DB */
+  ref?: string | null
+}
+
+/** Persisted on the assistant message when the turn ran in research mode. */
+export interface ResearchDTO {
+  mode: 'auto' | 'forced' // detected from the text vs user-toggled
+  plan: string[] // the plan shown BEFORE gathering («خطة البحث»)
+  sources: SourceDTO[] // numbered [١] [٢] … citations
+  stepsCount: number
+}
+
+/** Self-verification ledger — checked BEFORE the user sees the reply. */
+export interface VerifyDTO {
+  status: 'verified' | 'corrected' | 'skipped'
+  checks: { claim: string; expected: string; actual: string; ok: boolean }[]
+  note?: string
+}
+
+/** One row of the agent's scratchpad («ورقة وقلم») per conversation. */
+export interface NoteDTO {
+  id: string
+  kind: 'fact' | 'hypothesis' | 'todo' | 'plan' | 'citation'
+  text: string
+  source?: string | null
+  pinned: boolean
+  createdAt: string
 }
 
 export interface BootstrapDTO {

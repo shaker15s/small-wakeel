@@ -2,7 +2,11 @@
 // user (explicit id, else latest; creates «محادثة جديدة» when none exists) +
 // its messages, oldest first.
 // POST /api/chat — SSE stream: the agent turn (thinking → cards → حرف بحرف).
-//   Body may carry `suggestionId` (tracked as UsageEvent kind='suggestion_used').
+//   Body may carry `suggestionId` (tracked as UsageEvent kind='suggestion_used')
+//   and `deepResearch` (R15: forces the بحث عميق pipeline).
+//   R15: every POST first runs maybeReflect (correction-pattern lessons), the
+//   assistant message persists research/verified JSON, and the `done` event
+//   carries {verified, research, notesUpdated} when present (additive).
 //   After the turn: conversation.lastMessageAt + messageCount (+2) are updated
 //   and an untitled conversation gets its title from the first user message
 //   (first 40 chars, trimmed to a word boundary).
@@ -12,6 +16,7 @@ import type { ActionCardDTO, CardOutcomeDTO, ChatActionDTO, MessageDTO } from '@
 import { badRequest, notFound, searchParams, serverError } from '../_lib/http'
 import { parseJson, serializeMessage } from '../_lib/serialize'
 import { runAgentTurn } from '@/lib/agent/harness'
+import { maybeReflect } from '@/lib/agent/reflection'
 
 export const dynamic = 'force-dynamic'
 
@@ -119,6 +124,8 @@ export async function POST(req: Request) {
       modelKey?: string | null
       conversationId?: string | null
       suggestionId?: string | null
+      /** R15: «بحث عميق» toggle from the composer (Compass) */
+      deepResearch?: boolean
     }
     if (!body.businessId) return badRequest('businessId مطلوب')
     if (!body.userId) return badRequest('userId مطلوب')
@@ -172,6 +179,12 @@ export async function POST(req: Request) {
       take: 12,
     })
 
+    // R15 reflection: a correction opener («لا», «غلط», «مش كده», «قصدى») on
+    // the PREVIOUS assistant reply extracts a lesson into agent memory.
+    // Fire-and-forget by contract — it never throws, never blocks the turn.
+    const lastAssistant = [...history].reverse().find((m) => m.role === 'assistant')
+    void maybeReflect(business.id, user.id, body.text.trim(), lastAssistant?.text ?? null)
+
     const encoder = new TextEncoder()
     const stream = new ReadableStream({
       async start(controller) {
@@ -188,11 +201,12 @@ export async function POST(req: Request) {
               text: body.text!.trim(),
               modelKey: body.modelKey ?? null,
               history: history.map((m) => ({ role: m.role, text: m.text })),
+              deepResearch: body.deepResearch === true,
             },
             (ev) => send(ev),
           )
 
-          // Persist assistant message
+          // Persist assistant message (R15: research + verified ride along)
           const assistantMsg = await db.message.create({
             data: {
               conversationId: conversation!.id,
@@ -201,6 +215,8 @@ export async function POST(req: Request) {
               ...(result.card ? { card: JSON.stringify(result.card) } : {}),
               ...(result.cards ? { cards: JSON.stringify(result.cards) } : {}),
               ...(result.actions ? { actions: JSON.stringify(result.actions) } : {}),
+              ...(result.research ? { research: JSON.stringify(result.research) } : {}),
+              ...(result.verified ? { verified: JSON.stringify(result.verified) } : {}),
               thinking: JSON.stringify(result.thinking),
               modelLabel: result.modelLabel,
             },
@@ -210,7 +226,16 @@ export async function POST(req: Request) {
             where: { id: conversation!.id },
             data: { updatedAt: new Date(), lastMessageAt: new Date(), messageCount: { increment: 2 } },
           })
-          send({ event: 'done', messageId: assistantMsg.id, modelLabel: result.modelLabel })
+          // done payload is ADDITIVE: verified/research/notesUpdated appear
+          // only when the turn actually produced them (front consumes optionally)
+          send({
+            event: 'done',
+            messageId: assistantMsg.id,
+            modelLabel: result.modelLabel,
+            ...(result.verified ? { verified: result.verified } : {}),
+            ...(result.research ? { research: result.research } : {}),
+            ...(result.notesJotted && result.notesJotted > 0 ? { notesUpdated: true } : {}),
+          })
         } catch (err) {
           console.error('[api/chat POST]', err)
           send({ event: 'error', message: 'حصل خطأ في السيرفر — جرّب تاني' })

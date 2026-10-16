@@ -12,29 +12,67 @@
 
 import { useState } from 'react'
 import { motion, type Transition } from 'framer-motion'
-import { AlertCircle, Check, Copy, Cpu, Loader2, RotateCcw } from 'lucide-react'
+import { AlertCircle, BadgeCheck, Check, Compass, Copy, Cpu, Loader2, NotebookPen, RotateCcw, TriangleAlert } from 'lucide-react'
 
 import { ActionCard } from './ActionCard'
 import { AgentAvatar, type AgentState } from './AgentAvatar'
 import { ChatActions } from './ChatActions'
-import { ResultCards } from './ResultCards'
+import { ResultCards, SourcesCard } from './ResultCards'
 import { ThinkingBlock } from './ThinkingBlock'
 import { ThinkingIndicator } from './ThinkingIndicator'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
+import type { ChatTurnWithMeta } from '@/lib/api'
 import type { ViewKey } from '@/lib/store'
-import type { ActionCardDTO, ChatTurn, ThinkingStep } from '@/lib/types'
+import type { ActionCardDTO, ThinkingStep } from '@/lib/types'
 
-/** Wrap every digit-run in a .num span so numbers stay LTR inside RTL text. */
+const arNum = (n: number): string => new Intl.NumberFormat('ar-EG').format(n)
+
+/** Wrap every digit-run in a .num span so numbers stay LTR inside RTL text.
+ *  Bracketed runs like the [١] [٢] research citations match as a WHOLE
+ *  (brackets included) — otherwise the RTL bidi mirroring would flip them
+ *  into ]١[ on screen. */
 function withNums(text: string): React.ReactNode {
   if (!text) return text
   const parts = text.split(
-    /([\u0660-\u0669\u066B\u066C\u06F0-\u06F9][\u0660-\u0669\u066B\u066C\u06F0-\u06F9.,]*|\d[\d.,]*)/g,
+    /(\[[\u0660-\u0669\u066B\u066C\u06F0-\u06F9\d.,]+\]|[\u0660-\u0669\u066B\u066C\u06F0-\u06F9][\u0660-\u0669\u066B\u066C\u06F0-\u06F9.,]*|\d[\d.,]*)/g,
   )
   if (parts.length === 1) return text
   return parts.map((p, i) =>
     i % 2 === 1 && p ? <span key={i} className="num">{p}</span> : p,
   )
+}
+
+/** Research reports arrive with lightweight markdown headers (## الخلاصة …).
+ *  Render those as styled section headers instead of raw hashes; everything
+ *  else flows through withNums as usual. */
+function renderRichText(text: string): React.ReactNode {
+  if (!text || !/^#{1,3}\s/m.test(text)) return withNums(text)
+  const lines = text.split('\n')
+  return lines.map((line, i) => {
+    const header = line.match(/^(#{1,3})\s+(.*)$/)
+    if (header) {
+      const depth = header[1].length
+      return (
+        <span
+          key={i}
+          className={
+            depth === 1
+              ? 'mt-2 mb-1 inline-block text-base font-bold text-[var(--wakil-navy)] dark:text-[var(--wakil-amber)]'
+              : 'mt-1.5 mb-0.5 inline-block text-sm font-bold'
+          }
+        >
+          {withNums(header[2])}
+        </span>
+      )
+    }
+    return (
+      <span key={i}>
+        {withNums(line)}
+        {i < lines.length - 1 ? '\n' : ''}
+      </span>
+    )
+  })
 }
 
 /** HH:mm in Arabic (Arabic-Indic digits), kept LTR via .num by the caller. */
@@ -65,7 +103,7 @@ export function MessageBubble({
   reveal = false,
   error = false,
 }: {
-  turn: ChatTurn
+  turn: ChatTurnWithMeta
   onApprove?: (card: ActionCardDTO, reason?: string) => void
   onReject?: (card: ActionCardDTO) => void
   busyOpId?: string | null
@@ -109,14 +147,35 @@ export function MessageBubble({
   const step = latestStep(thinking)
   const canCopy = !streaming && !error && hasText
 
+  // ---- R15: deep-research metadata + self-verification (land on done) ------
+  const research = turn.research ?? null
+  const verified = turn.verified ?? null
+  const showVerified = !streaming && !!verified && verified.status !== 'skipped'
+  const corrected = verified?.status === 'corrected'
+  const checksCount = verified?.checks.length ?? 0
+  const verifyTitle =
+    verified?.note?.trim() ||
+    (verified && checksCount > 0
+      ? verified.checks.map((c) => `${c.claim}: ${c.expected} → ${c.actual}`).join(' · ')
+      : undefined)
+  const researchTitle = research
+    ? `خطة بحث من ${arNum(research.stepsCount)} خطوة مع ${arNum(research.sources.length)} مصدر`
+    : undefined
+
   // staggered reveal order for the buffered visuals (ChatGPT order: text
-  // first, then card → cards → actions below it, 80ms apart)
+  // first, then verify-chip → card → cards → sources → actions, 80ms apart)
+  const hasVerifyChip = showVerified
   const hasCard = !!card
   const hasCards = !!cards && cards.length > 0
+  // sources render here ONLY when the cards stream didn't already carry one
+  const hasSources =
+    !streaming && !!research && research.sources.length > 0 && !cards?.some((c) => c.kind === 'sources')
   const hasActions = !!actions && actions.length > 0
   let ordinal = 0
+  const verifyDelay = hasVerifyChip ? ordinal++ * 0.08 : 0
   const cardDelay = hasCard ? ordinal++ * 0.08 : 0
   const cardsDelay = hasCards ? ordinal++ * 0.08 : 0
+  const sourcesDelay = hasSources ? ordinal++ * 0.08 : 0
   const actionsDelay = hasActions ? ordinal++ * 0.08 : 0
 
   const revealProps = (delay: number) => {
@@ -140,6 +199,15 @@ export function MessageBubble({
           <span className="text-sm font-bold">وكيل</span>
           <span className="num text-[10px] text-muted-foreground">{formatTime(turn.createdAt)}</span>
           <span className="flex-1" />
+          {!streaming && research ? (
+            <span
+              className="flex shrink-0 items-center gap-1 rounded-full border border-[var(--wakil-amber)]/40 bg-[var(--wakil-amber)]/5 px-2 py-0.5 text-[10px] font-medium text-[var(--wakil-amber)]"
+              title={researchTitle}
+            >
+              <Compass className="size-3 shrink-0" aria-hidden="true" />
+              وضع البحث
+            </span>
+          ) : null}
           {!streaming && modelLabel ? (
             <span
               className="flex min-w-0 items-center gap-1 rounded-full border border-border/80 px-2 py-0.5 text-[10px] text-muted-foreground"
@@ -163,11 +231,21 @@ export function MessageBubble({
 
         {/* compact current-step line while the text streams */}
         {streaming && hasText ? (
-          <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <div
+            className={cn(
+              'flex items-center gap-1.5 text-[11px] text-muted-foreground',
+              (step?.icon === 'research' || step?.icon === 'note') &&
+                'border-s-2 border-[var(--wakil-amber)]/40 ps-1.5',
+            )}
+          >
             {step ? (
               <>
                 {step.state === 'done' ? (
                   <Check className="size-3 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+                ) : step.icon === 'research' ? (
+                  <Compass className="size-3.5 shrink-0 animate-pulse text-[var(--wakil-amber)]" aria-hidden="true" />
+                ) : step.icon === 'note' ? (
+                  <NotebookPen className="size-3.5 shrink-0 animate-pulse text-[var(--wakil-amber)]" aria-hidden="true" />
                 ) : (
                   <Loader2 className="size-3 shrink-0 animate-spin text-wakil-amber" aria-hidden="true" />
                 )}
@@ -191,9 +269,38 @@ export function MessageBubble({
               canCopy && 'sm:pe-9',
             )}
           >
-            {withNums(turn.text)}
+            {renderRichText(turn.text)}
             {canCopy ? <CopyButton text={turn.text} /> : null}
           </div>
+        ) : null}
+
+        {/* R15 self-verification chip — right under the reply text */}
+        {hasVerifyChip ? (
+          <motion.span
+            {...revealProps(verifyDelay)}
+            className={cn(
+              'inline-flex w-fit items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium',
+              corrected
+                ? 'bg-[var(--wakil-amber)]/12 text-[var(--wakil-amber)]'
+                : 'bg-[var(--wakil-teal)]/10 text-[var(--wakil-teal)]',
+            )}
+            title={verifyTitle}
+          >
+            {corrected ? (
+              <TriangleAlert className="size-3.5 shrink-0" aria-hidden="true" />
+            ) : (
+              <BadgeCheck className="size-3.5 shrink-0" aria-hidden="true" />
+            )}
+            {corrected ? (
+              <span>اتصححت أرقام في الرد</span>
+            ) : checksCount > 0 ? (
+              <span>
+                اتأكدت الأرقام (<span className="num">{arNum(checksCount)}</span> فحص)
+              </span>
+            ) : (
+              <span>اتأكد الرد من المصادر</span>
+            )}
+          </motion.span>
         ) : null}
 
         {/* failed turn → error state + retry */}
@@ -239,6 +346,14 @@ export function MessageBubble({
         {cards && cards.length > 0 ? (
           <motion.div {...revealProps(cardsDelay)} className="w-full">
             <ResultCards cards={cards} />
+          </motion.div>
+        ) : null}
+
+        {/* deep-research cited sources — only when no sources card already came
+            in the cards stream (back-compat for turns persisted without one) */}
+        {hasSources && research ? (
+          <motion.div {...revealProps(sourcesDelay)} className="w-full">
+            <SourcesCard card={{ kind: 'sources', title: 'المصادر', sources: research.sources }} />
           </motion.div>
         ) : null}
 

@@ -32,6 +32,7 @@ model Business {
   memories       AgentMemory[]
   usageEvents    UsageEvent[]
   quickCommands  QuickCommand[]
+  agentNotes     AgentNote[]
   settings       AgentSettings?
 }
 
@@ -143,6 +144,7 @@ model Conversation {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
   messages      Message[]
+  notes         AgentNote[]
 }
 
 model Message {
@@ -156,7 +158,28 @@ model Message {
   thinking       String? // agent visible thinking steps
   actions        String? // JSON — deep-link action buttons (ChatActionDTO[])
   modelLabel     String?
+  research       String? // JSON — ResearchDTO (deep-research plan + sources)
+  verified       String? // JSON — VerifyDTO (self-verification result)
   createdAt      DateTime     @default(now())
+}
+
+// «ورقة وقلم وكيل» — the agent's private scratchpad per conversation.
+// Facts/hypotheses/TODOs jotted during tool runs; injected into future turns
+// so the employee remembers his own working notes (Claude Code TODO lesson).
+model AgentNote {
+  id             String       @id @default(cuid())
+  businessId     String
+  business       Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  userId         String
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  kind           String       @default("fact") // fact | hypothesis | todo | plan | citation
+  text           String
+  source         String? // tool name / url the note came from
+  pinned         Boolean      @default(false)
+  active         Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @default(now()) @updatedAt
 }
 
 model ScheduledTask {
@@ -199,8 +222,12 @@ model UsageEvent {
   businessId String
   business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
   userId     String
-  kind       String // tool | command | chat | suggestion_used | advisory
+  kind       String // tool | command | chat | suggestion_used | advisory | research | verify | reflection
   label      String // tool name / command text / suggestion id
+  latencyMs  Int? // full turn latency (SpaceX-grade telemetry)
+  ttftMs     Int? // time to first streamed token
+  tokens     Int? // approximate tokens in the reply
+  fallback   Boolean  @default(false) // true when a retry/backoff fallback fired
   createdAt  DateTime @default(now())
 }
 

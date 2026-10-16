@@ -16,8 +16,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion, MotionConfig } from 'framer-motion'
 import type { LucideIcon } from 'lucide-react'
-import { Brain, Check, ChevronDown, Cpu, History, Loader2, Scale, Sparkles, SquarePen, Zap } from 'lucide-react'
-import { api, messageToTurn, streamChat } from '@/lib/api'
+import { Brain, Check, ChevronDown, Cpu, History, Loader2, NotebookPen, Scale, Sparkles, SquarePen, Zap } from 'lucide-react'
+import { api, messageToTurn, streamChat, type ChatTurnWithMeta } from '@/lib/api'
 import { getVertical } from '@/lib/verticals'
 import { useWakil, QUERY_KEYS, type ViewKey } from '@/lib/store'
 import { TIER_AR } from '@/lib/labels'
@@ -35,6 +35,7 @@ import { AgentAvatar, type AgentState } from './AgentAvatar'
 import { MessageBubble } from './MessageBubble'
 import { Composer } from './Composer'
 import { ConversationDrawer } from './ConversationDrawer'
+import { NotesSheet } from './NotesSheet'
 import { TOOL_ICONS } from './QuickCommandsManager'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Button } from '@/components/ui/button'
@@ -65,6 +66,8 @@ const BUILTIN_MODELS = [
 
 const TIER_ICONS: Record<string, LucideIcon> = { air: Zap, balanced: Scale, deep: Brain }
 
+const arNum = (n: number): string => new Intl.NumberFormat('ar-EG').format(n)
+
 export function ChatView({ business, userId, onNavigate }: ChatViewProps) {
   const vertical = getVertical(business.type)
   const modelKey = useWakil((s) => s.modelKey)
@@ -74,7 +77,7 @@ export function ChatView({ business, userId, onNavigate }: ChatViewProps) {
   const queryClient = useQueryClient()
   const { toast } = useToast()
 
-  const [turns, setTurns] = useState<ChatTurn[]>([])
+  const [turns, setTurns] = useState<ChatTurnWithMeta[]>([])
   // the conversation ACTUALLY displayed (from GET / start event) — distinct
   // from the requested one so the query key only re-keys on explicit intent
   const [loadedConvId, setLoadedConvId] = useState<string | null>(null)
@@ -85,6 +88,7 @@ export function ChatView({ business, userId, onNavigate }: ChatViewProps) {
   const [nearBottom, setNearBottom] = useState(true)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [creating, setCreating] = useState(false)
+  const [notesOpen, setNotesOpen] = useState(false)
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const nearBottomRef = useRef(true)
@@ -169,16 +173,41 @@ export function ChatView({ business, userId, onNavigate }: ChatViewProps) {
     queryFn: () => api.quickCommands(business.id),
   })
 
+  // ---- «ورقة وكيل» count (the agent's scratchpad for THIS conversation) ----
+  // same key as the sheet's own query → one fetch, badge + sheet stay in sync
+  const notesQ = useQuery({
+    queryKey: QUERY_KEYS.notes(business.id, loadedConvId ?? 'none'),
+    queryFn: () => api.notes(business.id, loadedConvId as string),
+    enabled: !!loadedConvId,
+    retry: 1,
+    refetchOnWindowFocus: false,
+  })
+  const notesCount = notesQ.data?.length ?? 0
+
   // ---- send a message → stream the turn (ChatGPT order guaranteed) ----
+  // STORM-SAFE QUEUE (R15 CEO fix): sends that arrive mid-stream are NOT
+  // dropped — they queue and auto-flush the instant the live turn finishes
+  // (the silent-loss bug the adversarial audit caught with 3 rapid messages).
+  const pendingSendsRef = useRef<Array<{ text: string; opts?: { suggestionId?: string; deepResearch?: boolean } }>>([])
+  const [queuedCount, setQueuedCount] = useState(0)
+
   const send = useCallback(
-    async (text: string, opts?: { suggestionId?: string }) => {
-      if (sendingRef.current || !text.trim()) return
+    async (text: string, opts?: { suggestionId?: string; deepResearch?: boolean }) => {
+      if (!text.trim()) return
       const trimmed = text.trim()
+      if (sendingRef.current) {
+        // a turn is live → queue this one; it sends automatically on done
+        pendingSendsRef.current.push({ text: trimmed, opts })
+        setQueuedCount(pendingSendsRef.current.length)
+        return
+      }
       sendingRef.current = true
       setSending(true)
       setFailedId(null)
       setRevealId(null)
       retryRef.current = trimmed
+      // the conversation the scratchpad invalidation targets at done time
+      let convId = activeConversationId ?? loadedConvId
 
       const userLocalId = `local-user-${Date.now()}`
       const liveId = `local-live-${Date.now()}`
@@ -224,12 +253,14 @@ export function ChatView({ business, userId, onNavigate }: ChatViewProps) {
             modelKey,
             conversationId: activeConversationId ?? loadedConvId,
             suggestionId: opts?.suggestionId ?? null,
+            deepResearch: opts?.deepResearch ?? false,
           },
           {
             onStart: (cid, userMessageId) => {
               // a new conversation may be created server-side when none was
               // passed — track it so later sends stay in the same thread
               setLoadedConvId(cid)
+              convId = cid
               // swap optimistic user id → the real persisted id so any later
               // refetch reconciles by key (no remount → no flicker)
               setTurns((prev) => prev.map((t) => (t.id === userLocalId ? { ...t, id: userMessageId } : t)))
@@ -258,9 +289,10 @@ export function ChatView({ business, userId, onNavigate }: ChatViewProps) {
               const id = doneId ?? liveId
               setTurns((prev) => prev.map((t) => (t.id === id ? { ...t, text: t.text + d } : t)))
             },
-            onDone: (messageId, modelLabel) => {
+            onDone: (messageId, modelLabel, meta) => {
               doneId = messageId
               // finalize IN PLACE (same DOM node) + reveal the buffers below text
+              // (R15: done carries the verification ledger + research metadata)
               setTurns((prev) =>
                 prev.map((t) =>
                   t.id === liveId
@@ -272,6 +304,8 @@ export function ChatView({ business, userId, onNavigate }: ChatViewProps) {
                         card: buf.card,
                         cards: buf.cards,
                         actions: buf.actions,
+                        verified: meta?.verified ?? null,
+                        research: meta?.research ?? null,
                       }
                     : t,
                 ),
@@ -305,12 +339,22 @@ export function ChatView({ business, userId, onNavigate }: ChatViewProps) {
           // the user's work and update live after every turn
           void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.conversations(business.id, userId) })
           void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.suggestions(business.id, userId) })
+          // «ورقة وكيل» — the agent jots notes while it works; refresh the
+          // scratchpad (header badge + sheet) after every completed turn
+          if (convId) {
+            void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.notes(business.id, convId) })
+          }
         } else {
           // stream closed without done/error — treat as a failed turn
           patchTurn({ streaming: false })
           setFailedId(doneId ?? liveId)
           toast({ title: 'مشكلة', description: 'الرد مشكتلش — جرّب تاني', variant: 'destructive' })
         }
+        // STORM-SAFE QUEUE: flush the next queued message (if any) now that
+        // the live turn finished — the audit's rapid-fire test stays lossless.
+        const next = pendingSendsRef.current.shift()
+        setQueuedCount(pendingSendsRef.current.length)
+        if (next) void send(next.text, next.opts)
       }
     },
     [business.id, userId, modelKey, activeConversationId, loadedConvId, toast, queryClient],
@@ -480,6 +524,28 @@ export function ChatView({ business, userId, onNavigate }: ChatViewProps) {
               >
                 <History className="size-4" aria-hidden="true" />
               </Button>
+              {/* «ورقة وكيل» — the agent's scratchpad for THIS conversation */}
+              <Button
+                variant="ghost"
+                size="icon"
+                className="press relative size-9 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
+                onClick={() => setNotesOpen(true)}
+                disabled={!loadedConvId}
+                aria-label="ورقة وكيل"
+                title="ورقة وكيل — ملاحظاته من شغله في المحادثة دي"
+              >
+                <NotebookPen className="size-4" aria-hidden="true" />
+                {notesCount > 0 && (
+                  <motion.span
+                    initial={{ scale: 0.4, opacity: 0 }}
+                    animate={{ scale: 1, opacity: 1 }}
+                    transition={{ type: 'spring', stiffness: 420, damping: 22 }}
+                    className="num absolute -end-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--wakil-amber)] px-1 text-[9px] font-bold tabular-nums text-white dark:text-black"
+                  >
+                    {arNum(notesCount)}
+                  </motion.span>
+                )}
+              </Button>
             </div>
           </div>
 
@@ -601,6 +667,7 @@ export function ChatView({ business, userId, onNavigate }: ChatViewProps) {
               onCommandTap={handleCommandTap}
               onSuggestionTap={sendSuggestion}
               disabled={sending}
+              queuedCount={queuedCount}
             />
             <p className="mt-1.5 hidden text-center text-[10px] text-muted-foreground sm:block">
               وكيل بيسأل قبل ما ينفذ — كل عملية بتتحقق بعد التنفيذ
@@ -621,6 +688,15 @@ export function ChatView({ business, userId, onNavigate }: ChatViewProps) {
             }}
             onNewChat={() => void startNewChat()}
             creating={creating}
+          />
+        )}
+
+        {/* ===== «ورقة وكيل» — the scratchpad sheet (read-only) ===== */}
+        {notesOpen && loadedConvId && (
+          <NotesSheet
+            businessId={business.id}
+            conversationId={loadedConvId}
+            onClose={() => setNotesOpen(false)}
           />
         )}
       </div>
