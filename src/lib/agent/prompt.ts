@@ -228,6 +228,8 @@ export function buildAgentSystemPrompt(params: {
   suppliers: Supplier[]
   memories: AgentMemory[]
   snapshot: BusinessSnapshot
+  /** R17: conversation history — free chat keeps continuity across turns */
+  history?: { role: string; text: string }[]
 }): string {
   const v = getVertical(params.business.type)
   const { business, user, items, customers, suppliers, memories, snapshot } = params
@@ -275,13 +277,13 @@ export function buildAgentSystemPrompt(params: {
 ${isPharmacy ? '- list_expiring() → اللي صلاحيته قربت تخلص (٣٠ يوم)\n' : ''}العملاء والأعضاء:
 - get_supplier_balance({name}) → رصيد مورد بالاسم
 ${isGym ? '- get_member_status({name}) → حالة عضو (الخطة/الانتهاء/المديونية)\n' : ''}العمليات المالية (بيع/شرا/تحصيل/سداد/مصروف — كل واحدة بتعمل «مسودة» مستنية اعتماد صاحب الشغل، مبتتنفذش لوحدها):
-- record_sale({item, qty, unit?, customerName?, paid?}) → بيع صنف (المبلغ paid بالجنيه لو مدفوع كاش). للبيع بأكتر من صنف: نادي الأداة مرة لكل صنف. للبيع بمبلغ مفتوح في العطارة («بـ٢٠ جنيه فلفل») سيب الـ qty فاضية واكتب المبلغ في paid.
+- record_sale({item, qty, unit?, customerName?, paid?, price?}) → بيع صنف. paid = المدفوع كاش دلوقتي بالجنيه (سيب الباقي آجل لو مدفعش كله). price = إجمالي البيع بالجنيه بس لو ${user.name} نفسه قال سعر مختلف عن الكتالوج (زي «بعت بـ٩٠») — ساعتها بس استخدمه. للبيع بأكتر من صنف: نادي الأداة مرة لكل صنف. للبيع بمبلغ مفتوح في العطارة («بـ٢٠ جنيه فلفل») سيب الـ qty فاضية واكتب المبلغ في paid.
 - record_purchase({item, qty, unit?, supplierName?, paid?}) → شرا بضاعة
 - record_collection({customerName, amount}) → تحصيل من عميل (الجنيه)
 - record_payment({supplierName, amount}) → سداد لمورد (الجنيه)
 - record_expense({reason, amount}) → مصروف من الخزنة (الجنيه)
 ${isGym ? "- register_member({name, plan?, months?}) → اشتراك/تجديد عضوية (السعر من خطة الجيم المسجلة)\n- record_attendance({name}) → حضور عضو النهاردة\n" : ''}الذاكرة (بتتعلم منها):
-- memory_save({text}) → احفظ حاجة دايمة عن ${user.name} أو قانون للمحل
+- memory_save({text}) → احفظ حاجة دايمة عن ${user.name} أو قانون للمحل — ومواعيد الوعود برضو: لو عميل قال «هيدفع الباقي يوم الجمعة» سجلها هنا زي ما قالت بالظبط.
 - memory_forget({query}) → امسح حاجة من الذاكرة
 
 ## بروتوكول الرد — أهم حاجة في الشرح ده
@@ -293,6 +295,7 @@ ${isGym ? "- register_member({name, plan?, months?}) → اشتراك/تجديد
 - هبعتلك نتيجة كل أداة، وساعتها تقرر: تكمل بأدوات تانية، ولا تكتب الرد النهائي.
 
 (٢) لو الرسالة كلام أو سؤال أو نصيحة أو سلام أو قرار بيفكر فيه → رد بالنص العادي مباشرة (بلا JSON خالص) — زي ما أي موظف حقيقي بيرد. انت موظف بتتكلم، مش نموذج بيحلل.
+اتكلم معاه حتى لو الموضوع برا الشغل خالص (سلام/كلام عام/دردشة/سؤال مش عن الأرقام) — انت زميله الموثوق، مش كتاب محاسبة. بس برضو: أي رقم شغل تقوله لازم يكون من أدواتك أو من «أرقام الشغل» تحت.
 
 قواعد ثابتة عمرها ما بتتغير:
 - أي رقم تقوله لازم يكون من نتايج الأدوات أو من «أرقام الشغل» تحت — لو معندكش الرقم قول كده بصراحة.
@@ -317,7 +320,14 @@ ${rulesBlock}${memBlock}${lexBlock}
 ${itemLines || '— لسه مفيش أصناف —'}
 
 ## الناس
-${partyLines || '—'}`
+${partyLines || '—'}${
+    params.history && params.history.length > 0
+      ? `\n\n## آخر الكلام بيناتنا (سياق المحادثة — للأفكار بس، أرصدة السجل هي مصدر الأرقام الوحيد)\n${params.history
+          .slice(-6)
+          .map((h) => `${h.role === 'user' ? user.name : 'انت'}: ${h.text.slice(0, 160)}`)
+          .join('\n')}`
+      : ''
+  }`
 }
 
 // ---------------------------------------------------------------------------

@@ -187,8 +187,14 @@ export function AppShell() {
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-background">
       {/* ===== header ===== */}
-      <header className="shrink-0 border-b border-border/70 bg-card/80 backdrop-blur-md">
-        <div className="mx-auto flex h-14 max-w-5xl items-center gap-2 px-3 sm:px-4">
+      {/* R17 fix: backdrop-blur creates a STACKING CONTEXT that trapped the
+          business-switcher dropdown's z-50 inside the header — main's scroll
+          container (later in DOM) painted OVER the open menu items, so clicks
+          on the lower items (صيدلية/عطارة) landed on the page instead of the
+          menu («القايمة مش بتفتح»). Raising the whole header above main fixes
+          the dropdown AND its fixed close-backdrop. */}
+      <header className="relative z-40 shrink-0 border-b border-border/70 bg-card/80 backdrop-blur-md">
+        <div className="mx-auto flex h-14 w-full max-w-none items-center gap-2 px-3 sm:px-4">
           {/* business switcher */}
           <div className="relative" data-business-switcher>
             <BusinessSwitcher businesses={bootstrap.businesses} active={activeBusiness} onPick={(b, u) => setSession(b, u)} />
@@ -287,7 +293,7 @@ export function AppShell() {
             between sm and lg now that it carries 9 items) */}
         <nav
           aria-label="التنقل الرئيسي"
-          className="scroll-warm mx-auto hidden max-w-5xl gap-1 overflow-x-auto px-3 pb-2 sm:flex sm:px-4"
+          className="scroll-warm mx-auto hidden w-full max-w-none gap-1 overflow-x-auto px-3 pb-2 sm:flex sm:px-4"
         >
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon
@@ -320,7 +326,7 @@ export function AppShell() {
       </header>
 
       {/* ===== main — chat fills it exactly; other views scroll inside ===== */}
-      <main className="mx-auto min-h-0 w-full max-w-5xl flex-1 overflow-hidden">
+      <main className="mx-auto min-h-0 w-full max-w-none flex-1 overflow-hidden">
         {view === 'chat' ? (
           <ChatView business={activeBusiness} userId={activeUser.id} onNavigate={setView} />
         ) : (
@@ -344,7 +350,7 @@ export function AppShell() {
       <footer
         className="shrink-0 border-t border-border/70 bg-card/95 pb-[max(0.25rem,env(safe-area-inset-bottom))] backdrop-blur-md sm:hidden"
       >
-        <nav aria-label="التنقل السريع" className="mx-auto grid max-w-5xl grid-cols-5">
+        <nav aria-label="التنقل السريع" className="mx-auto grid w-full max-w-none grid-cols-5">
           {MOBILE_NAV.map((key) => {
             const item = NAV_ITEMS.find((n) => n.key === key)!
             const Icon = item.icon

@@ -60,7 +60,7 @@ import { RESEARCH_TRIGGER_RE, runDeepResearch } from './research'
 import { ensurePrismaFresh, jotFactsFromCards, jotNote, notesContext } from './scratchpad'
 import { activeTools, userToolsPromptLine } from './userTools'
 import { factsFromCards, verifyReply, type VerifyFact } from './verify'
-import { buildAdvisoryPrompt, buildReplyPrompt, buildSystemPrompt, roleTitle } from './prompt'
+import { buildAdvisoryPrompt, buildAgentSystemPrompt, buildReplyPrompt, buildSystemPrompt, roleTitle } from './prompt'
 import { READ_TOOLS, runReadTool, TYPE_AR, type ReadTool } from './tools'
 import {
   bumpMemoryUsage,
@@ -70,9 +70,12 @@ import {
   extractSaveRequest,
   findMemoryByReference,
   getSnapshot,
+  isRuleText,
   learnableAlias,
   lexiconResolve,
   parseLexicon,
+  preferenceCategory,
+  ruleCategory,
   saveLexiconMemory,
   type LexiconEntry,
 } from './memory'
@@ -1044,7 +1047,22 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
       }
       // Total from REAL price
       const unitPrice = type === 'sale' ? item.sellPrice : item.costPrice
-      const total = Math.round(qtyN * unitPrice)
+      let total = Math.round(qtyN * unitPrice)
+      // R17 «العقل الحقيقي»: the user HIMSELF stated what he sold it for
+      // («بعت آجل لمحمود كرتونة لبن بـ٩٠») — the brain extracts it as
+      // fields.amount (EGP). His stated price wins over the catalog default
+      // for a single-line sale (a real cashier knows his own price); the
+      // catalog stays the fallback when he didn't say one.
+      const statedEgp =
+        typeof f.amount === 'number' && f.amount > 0 ? f.amount : typeof f.amount === 'string' && Number(f.amount) > 0 ? Number(f.amount) : null
+      let priceOverride = false
+      if (type === 'sale' && statedEgp != null) {
+        const statedPiastres = Math.round(statedEgp * 100)
+        if (statedPiastres > 0) {
+          total = statedPiastres
+          priceOverride = true
+        }
+      }
       // Paid (آجل = 0, explicit clause wins, default = full cash)
       const paid = resolvePaid(norm, f, total)
       // Party: lexicon → LLM field → deterministic Egyptian-phrasing scan («لأحمد», «العميل أحمد», «من المورد»)
@@ -1060,9 +1078,10 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
         itemName: item.name,
         qty: qtyN,
         unit: item.unit,
-        unitPrice,
+        unitPrice: priceOverride && qtyN > 0 ? Math.round(total / qtyN) : unitPrice,
         total,
         paid,
+        ...(priceOverride ? { priceOverride: true } : {}),
         ...(type === 'sale' && customer ? { customerId: customer.id, customerName: customer.name } : {}),
         ...(type === 'purchase' && supplier ? { supplierId: supplier.id, supplierName: supplier.name } : {}),
       }
@@ -1083,7 +1102,7 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
       const card = fieldsToCard(ref, type, risk, summary, [
         { label: 'الصنف', value: item.name },
         { label: 'الكمية', value: fmtQty(qtyN, arUnit(item.unit)) },
-        { label: `سعر ${type === 'sale' ? 'البيع' : 'الشرا'} (للوحدة)`, value: egp(unitPrice) },
+        { label: `سعر ${type === 'sale' ? 'البيع' : 'الشرا'} (للوحدة)`, value: egp(priceOverride && qtyN > 0 ? Math.round(total / qtyN) : unitPrice), ...(priceOverride ? { hint: 'السعر اللي قلته — بيتقدم على الكتالوج' } : {}) },
         { label: 'الإجمالي', value: egp(total) },
         { label: 'مدفوع', value: egp(paid) },
         ...(total - paid > 0 ? [{ label: 'باقي (آجل)', value: egp(total - paid) }] : []),
@@ -1274,6 +1293,139 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
     default:
       return { ok: false, opType: type, payload: {}, summary: '', card: null as never, failMessage: 'نوع العملية مش مدعوم' }
   }
+}
+
+// ---------------------------------------------------------------------------
+// R17 «العقل الحقيقي» — THE BRAIN LOOP (model-driven tools + free chat)
+// ---------------------------------------------------------------------------
+/** One model-issued tool call: {"tool":"record_sale","args":{…}}. */
+interface BrainToolCall {
+  tool: string
+  args: Record<string, unknown>
+}
+
+/**
+ * Parse a brain reply: {"tool_calls":[…]} (direct OR embedded in prose) →
+ * the calls; null → plain conversational text (free-chat / final reply).
+ */
+function parseBrainReply(raw: string): BrainToolCall[] | null {
+  const cleaned = raw.trim()
+  if (!cleaned) return null
+  const tryParse = (s: string): BrainToolCall[] | null => {
+    try {
+      const obj = JSON.parse(s) as { tool_calls?: unknown }
+      if (obj && Array.isArray(obj.tool_calls)) {
+        const calls = obj.tool_calls
+          .filter(
+            (c): c is Record<string, unknown> =>
+              !!c && typeof c === 'object' && typeof (c as Record<string, unknown>).tool === 'string',
+          )
+          .map((c) => ({
+            tool: String(c.tool),
+            args: (c.args && typeof c.args === 'object' && !Array.isArray(c.args) ? (c.args as Record<string, unknown>) : {}) as Record<string, unknown>,
+          }))
+        if (calls.length > 0) return calls
+      }
+    } catch {
+      /* not JSON → text */
+    }
+    return null
+  }
+  const direct = tryParse(cleaned.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim())
+  if (direct) return direct
+  // the model wrapped the JSON in prose — extract the {…} block
+  const m = cleaned.match(/\{\s*"tool_calls"/)
+  if (m && m.index !== undefined) {
+    const end = cleaned.lastIndexOf('}')
+    if (end > m.index) {
+      const embedded = tryParse(cleaned.slice(m.index, end + 1))
+      if (embedded) return embedded
+    }
+  }
+  return null
+}
+
+/** Brain write-tools → the harness executor contract (opType + intent fields).
+ * Arg names are TOLERANT: models spell the same arg differently across calls
+ * ({customer} / {customerName} / {name}…) — the loop self-corrects much better
+ * when the first spelling already lands. */
+const brainArgStr = (a: Record<string, unknown>, ...keys: string[]): string | undefined => {
+  for (const k of keys) {
+    const v = a[k]
+    if (typeof v === 'string' && v.trim()) return v.trim()
+    if (typeof v === 'number' && v > 0) return String(v)
+  }
+  return undefined
+}
+const brainArgNum = (a: Record<string, unknown>, ...keys: string[]): number | undefined => {
+  for (const k of keys) {
+    const v = a[k]
+    if (typeof v === 'number' && v > 0) return v
+    if (typeof v === 'string' && v.trim() && Number(v) > 0) return Number(v)
+  }
+  return undefined
+}
+
+const BRAIN_WRITE_TOOLS: Record<
+  string,
+  { opType: OpType; fields: (a: Record<string, unknown>) => Record<string, unknown> }
+> = {
+  record_sale: {
+    opType: 'sale',
+    fields: (a) => ({
+      itemName: brainArgStr(a, 'item', 'itemName'),
+      qty: brainArgNum(a, 'qty', 'quantity', 'count'),
+      unit: brainArgStr(a, 'unit'),
+      customerName: brainArgStr(a, 'customerName', 'customer', 'client', 'name'),
+      paid: brainArgNum(a, 'paid', 'cash', 'paidAmount'),
+      // the user's OWN stated price («بعت بـ٩٠») — wins over the catalog
+      amount: brainArgNum(a, 'price', 'total', 'amount', 'statedPrice'),
+    }),
+  },
+  record_purchase: {
+    opType: 'purchase',
+    fields: (a) => ({
+      itemName: brainArgStr(a, 'item', 'itemName'),
+      qty: brainArgNum(a, 'qty', 'quantity', 'count'),
+      unit: brainArgStr(a, 'unit'),
+      supplierName: brainArgStr(a, 'supplierName', 'supplier', 'vendor', 'name'),
+      paid: brainArgNum(a, 'paid', 'cash', 'paidAmount'),
+    }),
+  },
+  record_collection: {
+    opType: 'collection',
+    fields: (a) => ({ customerName: brainArgStr(a, 'customerName', 'customer', 'client', 'name'), amount: brainArgNum(a, 'amount', 'paid', 'value', 'total') }),
+  },
+  record_payment: {
+    opType: 'payment',
+    fields: (a) => ({ supplierName: brainArgStr(a, 'supplierName', 'supplier', 'vendor', 'name'), amount: brainArgNum(a, 'amount', 'paid', 'value', 'total') }),
+  },
+  record_expense: {
+    opType: 'expense',
+    fields: (a) => ({ label: brainArgStr(a, 'reason', 'label', 'description', 'note'), amount: brainArgNum(a, 'amount', 'value', 'cost', 'total') }),
+  },
+  register_member: {
+    opType: 'membership',
+    fields: (a) => ({ name: brainArgStr(a, 'name', 'memberName'), plan: brainArgStr(a, 'plan'), months: brainArgNum(a, 'months') }),
+  },
+  record_attendance: { opType: 'attendance', fields: (a) => ({ name: brainArgStr(a, 'name', 'memberName') }) },
+}
+
+/** Arabic step label + icon for a brain tool call (thinking timeline UX). */
+function brainStepLabel(call: BrainToolCall): { label: string; icon: ThinkingStep['icon'] } {
+  if (call.tool === 'memory_save') return { label: 'بحفظ في ذاكرتي', icon: 'verify' }
+  if (call.tool === 'memory_forget') return { label: 'بامسح من ذاكرتي', icon: 'verify' }
+  const w = BRAIN_WRITE_TOOLS[call.tool]
+  if (w) return { label: `بجهّز مسودة: ${TYPE_AR[w.opType] ?? w.opType}`, icon: 'plan' }
+  return { label: `بجيب: ${TOOL_LABEL_AR[call.tool] ?? call.tool}`, icon: 'search' }
+}
+
+/** Promised-payment clause: «هيديني الباقي يوم الجمعة» → «يوم الجمعة» (normalized text). */
+const PROMISE_RE =
+  /(هيديني|هيدفع|هتدي|هتدفع|هيسلم|هتسلم|هيوفى|هيرجع)[^،.\n]{0,40}?((?:يوم\s|نهار\s)?(?:الجمعه|السبت|الاحد|الاتنين|التلات|الاربع|الخميس)|بكره|بعد بكره|الشهر الجاي|الاسبوع الجاي|اخر الشهر)/
+function extractPromiseDay(text: string): string | null {
+  const m = normalizeAr(text).match(PROMISE_RE)
+  return m ? m[2].trim() : null
 }
 
 // ---------------------------------------------------------------------------
@@ -1574,6 +1726,318 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       actions: researchActions,
     }
   }
+
+  // ---- PASS 0Ω: THE BRAIN LOOP (R17 — «العقل الحقيقي») ----
+  // The whole ERP rides on ONE system prompt (buildAgentSystemPrompt) and the
+  // MODEL itself decides: plain-text reply (free chat — أي موضوع، حتى برا
+  // الشغل) OR {"tool_calls":[…]} (one or many — model-driven task
+  // decomposition: it splits the request, picks the right tools, and compact
+  // results loop back until it writes the final reply). A failure BEFORE any
+  // tool executes falls through to the proven PASS 1 pipeline below; AFTER
+  // tools ran the turn always finishes here (deterministic composed reply on
+  // mid-loop LLM death) — the fallback path NEVER re-executes tools, so there
+  // are no double drafts, ever.
+  const runBrainTurn = async (): Promise<TurnResult | null> => {
+    let executedAnyTool = false
+    let modelSavedMemory = false
+    const brainFacts: VerifyFact[] = []
+    const allCards: ResultCardDTO[] = []
+    const usedTools: string[] = []
+    let draftCard: ActionCardDTO | null = null
+    let draftOpId: string | undefined
+    let anyDraft = false
+    const replyParts: string[] = []
+    const resultsForModel: Record<string, unknown>[] = []
+    let rounds = 0
+
+    // dynamic thinking timeline: understand(done) + mem + [tool steps…] + verify + reply
+    const toolSteps: ThinkingStep[] = []
+    const syncSteps = () => {
+      steps.length = 0
+      steps.push(
+        { label: 'بفهم طلبك', detail: 'عقلي بيقري طلبك وبيقرر بنفسي الأدوات المناسبة', state: 'done', icon: 'understand' },
+        ...memStep,
+        ...toolSteps,
+        { label: 'بتحقق من الأرقام', detail: 'الأرقام من السجل بس — مفيش تخمين', state: 'pending', icon: 'verify' },
+        { label: 'بجهّز الرد', detail: '', state: 'pending', icon: 'plan' },
+      )
+      pushThinking()
+    }
+    syncSteps()
+
+    /** execute ONE model-issued tool call — never throws, always reports back */
+    const execBrainCall = async (call: BrainToolCall): Promise<void> => {
+      executedAnyTool = true
+      const { label, icon } = brainStepLabel(call)
+      const argBits = Object.values(call.args)
+        .filter((x) => x !== undefined && x !== null && String(x) !== '')
+        .map(String)
+        .slice(0, 3)
+        .join('، ')
+      const step: ThinkingStep = { label, detail: argBits ? argBits.slice(0, 60) : 'بنفّذها', state: 'active', icon }
+      toolSteps.push(step)
+      syncSteps()
+      emit({ event: 'step', label, state: 'active' })
+      try {
+        // ---- READ tools (R0 — direct, safe) ----
+        if (READ_TOOLS.has(call.tool)) {
+          const subCards = await runReadTool(call.tool as ReadTool, business.id, call.args)
+          allCards.push(...subCards)
+          emit({ event: 'cards', cards: allCards })
+          usedTools.push(call.tool)
+          brainFacts.push(...factsFromCards(subCards))
+          meta.notesJotted += jotFactsFromCards(
+            { businessId: business.id, userId: user.id, conversationId: ctx.conversationId },
+            subCards,
+          )
+          const summary = subCards
+            .map((c) => {
+              if (c.kind === 'kv') return `${c.title}: ${c.rows.slice(0, 3).map((f) => `${f.label}=${f.value}`).join('، ')}`
+              if (c.kind === 'table') return `${c.title}: ${toArabicNum(c.rows.length)} صف`
+              if (c.kind === 'sources') return `${c.title}: ${toArabicNum(c.sources.length)} مصدر`
+              return c.title
+            })
+            .join('؛ ')
+          step.detail = summary.slice(0, 90) || 'رجعت ببيانات'
+          resultsForModel.push({ tool: call.tool, ok: true, result: subCards })
+          replyParts.push(deterministicReadReply(subCards))
+          await trackUsage(business.id, user.id, 'tool', call.tool)
+          return
+        }
+        // ---- WRITE tools → drafts (R2/R3 — NEVER auto-executed) ----
+        const w = BRAIN_WRITE_TOOLS[call.tool]
+        if (w) {
+          if (!canDraft(user.role, w.opType)) {
+            step.detail = `محتاجة صلاحية أعلى من ${roleTitle(user)}`
+            resultsForModel.push({ tool: call.tool, ok: false, error: `صلاحية ${user.name} مش بتسمح بعملية ${TYPE_AR[w.opType] ?? w.opType}` })
+            replyParts.push(`عملية ${TYPE_AR[w.opType] ?? w.opType} محتاجة صلاحية أعلى — مش من اختصاصك.`)
+            return
+          }
+          const resolved = await resolveWrite({ ...ctx, text }, { intent: 'write', opType: w.opType, fields: w.fields(call.args) }, emit, memCtx)
+          if (!resolved.ok) {
+            step.detail = `ناقص: ${resolved.missing ?? ''}`
+            resultsForModel.push({
+              tool: call.tool,
+              ok: false,
+              error: `${resolved.failMessage ?? resolved.missing ?? 'ناقصة بيانات'} — العملية دي ماتسجلتش خالص، ولازم تقول للمستخدم كده بصراحة في ردك`,
+            })
+            replyParts.push(`طلب ناقص بيانات: ${resolved.failMessage ?? resolved.missing ?? ''}`)
+            return
+          }
+          const idem = `${business.id}:${user.id}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
+          const draft = await createDraft({
+            businessId: business.id,
+            userId: user.id,
+            type: resolved.opType,
+            summary: resolved.summary,
+            payload: resolved.payload,
+            conversationId: ctx.conversationId,
+            idempotencyKey: idem,
+          })
+          if (!anyDraft) {
+            // the SSE contract has ONE draft-card slot per message — the first
+            // draft owns it; later drafts live in the journal + reply text
+            anyDraft = true
+            draftOpId = draft.id
+            draftCard = { ...resolved.card, ref: draft.ref, opId: draft.id }
+            emit({ event: 'card', card: draftCard })
+          }
+          brainFacts.push(...[...resolved.card.fields, ...resolved.card.effects].map((f) => ({ label: f.label, value: f.value })))
+          void jotNote({
+            businessId: business.id,
+            userId: user.id,
+            conversationId: ctx.conversationId,
+            kind: 'todo',
+            text: `مسودة ${draft.ref} (${TYPE_AR[resolved.opType] ?? resolved.opType}): ${resolved.summary} — مستنية اعتماد`,
+            source: 'draft',
+          })
+          meta.notesJotted++
+          step.detail = resolved.summary.slice(0, 90)
+          // R17 «مهمة مجدولة» safety net: a credit sale (آجل) + a PROMISED day
+          // in the message («هيديني الباقي يوم الجمعة») → the promise lands on
+          // the long-term memory EVEN IF the model forgot to call memory_save
+          // itself. The model's own memory_save (if any) always wins — this is
+          // the deterministic net, not the competitor.
+          if (w.opType === 'sale' && !modelSavedMemory) {
+            const p = resolved.payload as { total?: number; paid?: number; customerName?: string }
+            const due = typeof p.total === 'number' && typeof p.paid === 'number' ? p.total - p.paid : null
+            const party = typeof p.customerName === 'string' ? p.customerName.trim() : ''
+            const day = extractPromiseDay(text)
+            if (due != null && due > 0 && party && day) {
+              const memText = `${party} — الموعد المتفق عليه: باقي ${egp(due)} ${day}`.slice(0, 200)
+              const memNorm = normalizeAr(memText)
+              const dup = memories.some((m) => normalizeAr(m.text) === memNorm)
+              if (!dup) {
+                await db.agentMemory.create({
+                  data: { businessId: business.id, userId: user.id, kind: 'fact', category: 'promises', text: memText, confidence: 85 },
+                })
+              }
+              step.detail = `${step.detail} + سجلت الموعد (${day})`
+              replyParts.push(`وسجلت في ذاكرتي الموعد: ${memText}`)
+            }
+          }
+          resultsForModel.push({ tool: call.tool, ok: true, ref: draft.ref, summary: resolved.summary, note: 'مسودة مستنية اعتماد — مبتنفذش لوحدها' })
+          replyParts.push(`جهزت مسودة «${TYPE_AR[resolved.opType] ?? resolved.opType}» (${draft.ref}): ${resolved.summary} — مستنية اعتمادك.`)
+          await trackUsage(business.id, user.id, 'tool', resolved.opType)
+          return
+        }
+        // ---- memory_save (the model's own long-term learning tool) ----
+        if (call.tool === 'memory_save') {
+          const memText = String(call.args.text ?? '').trim().slice(0, 200)
+          if (memText.length < 3) {
+            resultsForModel.push({ tool: 'memory_save', ok: false, error: 'نص فاضي' })
+            return
+          }
+          const memNorm = normalizeAr(memText)
+          const isRule = isRuleText(memNorm)
+          const dup = memories.some((m) => normalizeAr(m.text) === memNorm)
+          if (!dup) {
+            await db.agentMemory.create({
+              data: {
+                businessId: business.id,
+                userId: user.id,
+                kind: isRule ? 'rule' : 'preference',
+                category: isRule ? ruleCategory(memNorm) : preferenceCategory(memNorm),
+                text: memText,
+                confidence: 80,
+              },
+            })
+          }
+          step.detail = dup ? 'موجودة أصلًا — من غير تكرار' : memText.slice(0, 60)
+          resultsForModel.push({ tool: 'memory_save', ok: true, saved: true, duplicate: dup })
+          replyParts.push(dup ? `دي محفوظة عندي أصلًا ✅ — «${memText}»` : `اتحفظت في ذاكرتي ✅ — «${memText}»`)
+          modelSavedMemory = true
+          return
+        }
+        // ---- memory_forget ----
+        if (call.tool === 'memory_forget') {
+          const q = String(call.args.query ?? call.args.text ?? '').trim()
+          const target = findMemoryByReference(q, memories)
+          if (target) {
+            await db.agentMemory.update({ where: { id: target.id }, data: { active: false, updatedAt: new Date() } })
+            step.detail = target.text.slice(0, 60)
+            resultsForModel.push({ tool: 'memory_forget', ok: true, forgotten: target.text.slice(0, 80) })
+            replyParts.push(`اتمسحت من ذاكرتي ✅ — «${target.text.slice(0, 100)}»`)
+          } else {
+            step.detail = 'ملقيتش حاجة بالشكل ده'
+            resultsForModel.push({ tool: 'memory_forget', ok: false, error: 'ملقيتش حاجة بالشكل ده' })
+            replyParts.push('ملقيتش في ذاكرتي حاجة بالشكل ده 🤔')
+          }
+          return
+        }
+        // ---- unknown tool ----
+        resultsForModel.push({ tool: call.tool, ok: false, error: 'أداة غير معروفة' })
+        step.detail = 'أداة مش معروفة — تجاهلتها'
+      } catch (err) {
+        console.error('[brain] tool exec failed:', call.tool, err)
+        step.detail = 'مشكلة في التنفيذ — كمّلت'
+        resultsForModel.push({ tool: call.tool, ok: false, error: 'فشل تنفيذ الأداة' })
+      } finally {
+        step.state = 'done'
+        syncSteps()
+        emit({ event: 'step', label, state: 'done' })
+      }
+    }
+
+    // ---------- the loop: model ⇄ tools until a final text reply ----------
+    let finalText = ''
+    try {
+      const snapshot = await getSnapshot(business)
+      const baseBrain = buildAgentSystemPrompt({ business, user, items, customers, suppliers, memories, snapshot, history: ctx.history })
+      const brainSystem = notesSection ? `${baseBrain}\n\n${notesSection}` : baseBrain
+      const convo: LLMMessage[] = [
+        { role: 'system', content: brainSystem },
+        { role: 'user', content: text },
+      ]
+      let raw = await completeChat(model, convo)
+      let calls = parseBrainReply(raw)
+      let totalCalls = 0
+      while (calls && totalCalls < 6) {
+        rounds++
+        convo.push({ role: 'assistant', content: raw.slice(0, 1200) })
+        for (const call of calls.slice(0, 4)) {
+          await execBrainCall(call)
+          totalCalls++
+        }
+        const last = totalCalls >= 6 || rounds >= 3
+        convo.push({
+          role: 'user',
+          content: `نتايج الأدوات (JSON):\n${JSON.stringify(resultsForModel.slice(-4)).slice(0, 2400)}\n\n${
+            last
+              ? 'اكتب ردك النهائي للمستخدم دلوقتي كنص عادي بلا JSON خالص.'
+              : 'قرر بنفسك: لو محتاج أدوات تانية رد بـ JSON بنفس الشكل، ولو خلصت اكتب ردك النهائي كنص عادي.'
+          }`,
+        })
+        raw = await completeChat(model, convo)
+        calls = parseBrainReply(raw)
+      }
+      finalText = calls ? '' : raw.trim() // cap reached with pending calls → compose deterministic
+      // GLM-on-Arabic glitch: stray CJK ideographs/kana sometimes leak into
+      // Arabic replies («هت 影响 على») — strip them deterministically (the
+      // brain's language is Arabic/English only, never Chinese/Japanese).
+      finalText = finalText
+        .replace(/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]+/g, '')
+        .replace(/ {2,}/g, ' ')
+        .trim()
+    } catch (err) {
+      console.error('[brain] loop failed → fallback ladder:', err)
+      if (!executedAnyTool) return null // clean bail-out — PASS 1 re-handles the turn
+      finalText = '' // tools ran → finish here, deterministically
+    }
+
+    // ---------- final reply: verify BEFORE streaming, then pace it ----------
+    if (!finalText.trim()) {
+      meta.fallback = true
+      if (replyParts.length === 0) {
+        if (!executedAnyTool) return null
+        finalText = 'عملت اللي قدرت عليه من طلبك — الباقي في الكروت تحت.'
+      } else {
+        finalText = replyParts.map((p, i) => `${AR_ORDINALS[i]}، ${p}`).join('\n\n')
+      }
+    }
+    meta.kind = usedTools.length > 0 || anyDraft ? 'chat' : 'advisory'
+    const brainVerified = verifyReply(finalText, brainFacts)
+    const verifiedText = brainVerified.text
+    const vi = 1 + memStep.length + toolSteps.length
+    if (steps[vi]) {
+      steps[vi].state = 'done'
+      steps[vi].detail =
+        brainFacts.length > 0
+          ? brainVerified.verified.status === 'corrected'
+            ? 'لقيت رقم مش مطابق — اتصلح قبل ما يوصلك'
+            : 'اتأكدت الأرقام من السجل'
+          : 'مفيش أرقام سجل في الرد ده'
+    }
+    if (steps[vi + 1]) steps[vi + 1].state = 'done'
+    pushThinking()
+    await streamDeterministic(verifiedText, emit, REPLY_PACING_BUDGET_MS)
+
+    // ---------- deep-link actions (draft first, then tools) ----------
+    const merged = new Map<string, ChatActionDTO>()
+    if (anyDraft) merged.set('journal', DRAFT_ACTIONS[0])
+    for (const t of usedTools) {
+      for (const a of TOOL_ACTIONS[t] ?? []) {
+        if (!merged.has(a.view)) merged.set(a.view, a)
+      }
+    }
+    const brainActions = [...merged.values()].slice(0, 3)
+    if (brainActions.length > 0) emit({ event: 'actions', actions: brainActions })
+
+    await bumpMemoryUsage(memCtx.referencedIds)
+    return {
+      replyText: verifiedText,
+      card: draftCard,
+      cards: allCards.length > 0 ? allCards : null,
+      thinking: steps,
+      modelLabel,
+      opId: draftOpId,
+      actions: brainActions.length > 0 ? brainActions : null,
+      verified: brainVerified.verified,
+    }
+  }
+
+  const brainTurn = await runBrainTurn()
+  if (brainTurn) return brainTurn
 
   // ---- PASS 1: Understand (LLM with deterministic multi-split + rule fallback) ----
   let llmRaws: RawIntentJson[] = []

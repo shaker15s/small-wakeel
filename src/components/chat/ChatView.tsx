@@ -783,7 +783,14 @@ function ModelPicker({
         </Button>
       </PopoverTrigger>
 
-      <PopoverContent align="end" className="w-64 rounded-xl p-0" dir="rtl">
+      <PopoverContent
+        align="end"
+        // R17 fix: long provider lists overflow small screens with no way to
+        // scroll («القايمة بتاعت الموديلات مش بتفتح كاملة ومبقدرش اسطرول») —
+        // cap the height and make the list itself scrollable.
+        className="max-h-[70vh] w-64 overflow-y-auto scroll-warm rounded-xl p-0"
+        dir="rtl"
+      >
         <div className="p-1.5">
           <p className="px-2.5 pb-1 pt-1.5 text-[11px] font-semibold text-muted-foreground">
             الموديلات الداخلية
