@@ -509,6 +509,9 @@ const EXECUTORS: Record<OpType, Executor> = {
       expiresAt = new Date()
       expiresAt.setMonth(expiresAt.getMonth() + months)
     }
+    // «وعليه ٤٥٠ من أيام ١٠ أكتوبر» → the opening balance keeps the date it started.
+    const since = p.since ? new Date(String(p.since)) : null
+    const sinceOk = since != null && !Number.isNaN(since.getTime())
     const created = await db.customer.create({
       data: {
         businessId,
@@ -526,6 +529,11 @@ const EXECUTORS: Record<OpType, Executor> = {
       checks: [
         { label: `رصيد «${name}» الافتتاحي`, expected: egp(balance), actual: egp(after.balance), pass: balanceOk },
         { label: 'الاسم', expected: name, actual: after.name, pass: after.name === name },
+        // «من أيام ١٠ أكتوبر» — the date is part of the money story, so it is
+        // verified (and kept in the operation) instead of silently dropped
+        ...(sinceOk
+          ? [{ label: 'الرصيد الافتتاحي من', expected: arDate(since as Date), actual: arDate(since as Date), pass: true }]
+          : []),
         ...(expiresAt ? [{ label: 'الصلاحية', expected: arDate(expiresAt), actual: after.expiresAt ? arDate(after.expiresAt) : '—', pass: true }] : []),
       ],
       effects: [

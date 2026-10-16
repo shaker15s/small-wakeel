@@ -166,7 +166,16 @@ function detect(text: string): { kind: "write" | "read" | "chat"; opType?: strin
   const price = priceClause ? toNum(priceClause[1]) : undefined;
   const qty = unitNum ? toNum(unitNum[1]) : price != null ? 1 : numbers[0];
   const amount = price ?? (priceClause ? undefined : numbers[1] ?? numbers[0]);
-  const nameMatch = text.match(/(?:من|لـ|ل|لأ|الى|إلى|على)\s+([^،,.؟?\d]+)$/) ?? text.match(/^(?:ضيف|اضف)\s+([^\s،,]+)/);
+  // A new party: the NAME comes right after «ضيف/اضف» and stops at the first
+  // qualifier («من اللي عليهم فلوس» · «وعليه ٤٥٠»), never the whole sentence.
+  const addMatch = text.match(/^(?:ضيف|اضف|اضيف)\s+(?:لي\s+)?(?:عميل(?:ه)?|عضو|مورد(?:ين)?|زبون|راجل|ست|حاج)?\s*(.+)$/);
+  const addName = addMatch
+    ? addMatch[1]
+        .split(/\s+(?:كمان|من\s+اللي|من\s+الذين|اللي\s+عليهم|اللي\s+علينا|وعليه|وعليها|عليه|عليها|وبيدفع|بيحاسب|لحد|عشان|من\s+ايام|من\s+أيام|من\s+تاريخ)\s+/)[0]
+        .replace(/[،,؟?].*$/, "")
+        .trim()
+    : undefined;
+  const nameMatch = addName ? [addName, addName] : (text.match(/(?:من|لـ|ل|لأ|الى|إلى|على)\s+([^،,.؟?\d]+)$/) ?? text.match(/^(?:ضيف|اضف)\s+([^\s،,]+)/));
   const itemMatch = text.match(/(?:بعت|بيع|اشتريت|شرا|جبت)\s+[\d٠-٩.]*\s*[^\s]*\s*([^،,]+?)(?:\s+(?:لـ|ل|لأ|من|بـ)|$)/);
   // a QUESTION about an operation is a READ (unless it is clearly an instruction)
   if (write && !isQuestion) {

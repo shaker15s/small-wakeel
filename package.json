@@ -24,7 +24,8 @@
     "typecheck": "tsc --noEmit",
     "sweep": "bun scripts/user-sweep.ts",
     "smoke": "bun scripts/api-smoke.ts",
-    "db:prune-lexicon": "bun scripts/db-prune-lexicon.ts"
+    "db:prune-lexicon": "bun scripts/db-prune-lexicon.ts",
+    "accept": "bun scripts/accept-ahmed.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.15.15",

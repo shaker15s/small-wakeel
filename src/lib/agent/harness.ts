@@ -53,6 +53,7 @@ import type { VerticalDef } from '@/lib/verticals'
 import { egp, qty as fmtQty, arDate } from '@/lib/format'
 import { arUnit, getVertical } from '@/lib/verticals'
 import { wordBoundedAt, convertToBaseUnit, matchEntity, normalizeAr, parseQuantity, toWesternDigits, unitToCode } from './arabic'
+import { parseSinceClause } from './since'
 import { createDraft } from '@/lib/domain/executors'
 import { auditDraft } from '@/lib/domain/audit'
 import { getCatalog } from './catalog'
@@ -418,6 +419,7 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
       ...(parsed?.phone ? { phone: parsed.phone } : {}),
       ...(parsed?.plan ? { plan: parsed.plan } : {}),
       ...(parsed?.months ? { months: parsed.months } : {}),
+      ...(parsed?.since ? { since: parsed.since } : {}),
     }
     return { intent: 'write', opType, fields }
   }
@@ -859,9 +861,24 @@ export function isCannedReply(text: string): boolean {
   return /(تحب نعمل ايه|تحب نجرب|مفيش عمليه محدده|تحت امرك يا فندم|مش لاقي حاجه محدده|قوليلي ايه اللي محتاجه|مفيش عمليه واضحه)/.test(t)
 }
 
-/** Exported for tests: the «spoken reply ↔ its cards» contract. */
-export function replyGroundsCards(text: string, cards: ResultCardDTO[]): boolean {
+/**
+ * Exported for tests: the «spoken reply ↔ its cards» contract.
+ *
+ * `question` (optional) is what the OWNER asked. Evidence that only echoes the
+ * question is not evidence: «مصطفى الجزار 9215 عليه كام؟» was answered with
+ * «أكيد … وفيها أرقام زي 9215» and the check passed because the 9215 came from
+ * the name the owner himself typed. A reply must add the CARD's information.
+ */
+export function replyGroundsCards(text: string, cards: ResultCardDTO[], question = ''): boolean {
   const t = toWesternDigits(normalizeAr(text))
+  const q = toWesternDigits(normalizeAr(question))
+  const questionedNums = new Set((q.match(/\d[\d.,]*/g) ?? []).map((n) => n.replace(/[.,]/g, '')))
+  const questionedWords = new Set(
+    q
+      .split(/[^\p{L}\p{N}]+/u)
+      .filter((w) => w.length >= 4)
+      .map((w) => w.replace(/^(ال|و)/, '')),
+  )
   const keys: string[] = []
   for (const c of cards.slice(0, 2)) {
     keys.push(c.title)
@@ -874,7 +891,10 @@ export function replyGroundsCards(text: string, cards: ResultCardDTO[]): boolean
   const norm = keys.map((k) => toWesternDigits(normalizeAr(k))).join(' ')
   const replyNums = new Set(t.match(/\d[\d.,]*/g) ?? [])
   for (const num of norm.match(/\d[\d.,]*/g) ?? []) {
-    if (num.replace(/[.,]/g, '').length >= 2 && replyNums.has(num)) return true
+    if (num.replace(/[.,]/g, '').length < 2) continue
+    if (!replyNums.has(num)) continue
+    if (questionedNums.has(num.replace(/[.,]/g, ''))) continue // the owner's own number
+    return true
   }
   // ---- VERDICT RULE: a card that says «ملقيتش» / «مفيش» IS the answer ----
   // Live R29: «أحمد عليه كام؟» returned a «ملقيتش عميل بالاسم» card while the
@@ -912,7 +932,7 @@ export function replyGroundsCards(text: string, cards: ResultCardDTO[]): boolean
   return t
     .split(/[^\p{L}\p{N}]+/u)
     .map((w) => w.replace(/^(ال|و)/, ''))
-    .some((w) => w.length >= 4 && !GENERIC.has(w) && shared.has(w))
+    .some((w) => w.length >= 4 && !GENERIC.has(w) && shared.has(w) && !questionedWords.has(w))
 }
 
 /** Deterministic numbered multi-intent reply — answers EVERY sub-request, no LLM. */
@@ -1064,7 +1084,7 @@ function fieldsToCard(ref: string, type: OpType, risk: Risk, summary: string, fi
  * to grow the ledger, and a wrong name/amount here corrupts real accounting.
  * Runs on normalizeAr'd text (Arabic-Indic digits already folded to western).
  */
-function parsePartyAdd(rawNorm: string): { name: string; balance?: number; phone?: string; plan?: string; months?: number; kind: 'customer' | 'supplier' } | null {
+function parsePartyAdd(rawNorm: string): { name: string; balance?: number; phone?: string; plan?: string; months?: number; since?: string; kind: 'customer' | 'supplier' } | null {
   const norm = toWesternDigits(rawNorm)
   const m = norm.match(/(?:^|\s)(?:ضيف|اضف|اضيف|ضف|سجل)\s+(?:لي\s+|ليا\s+)?(?:عميل(?:ه)?\s+|مورد\s+|موردين\s+|عضو\s+|زبون\s+)?(.+)$/)
   if (!m) return null
@@ -1080,7 +1100,18 @@ function parsePartyAdd(rawNorm: string): { name: string; balance?: number; phone
   const plan = norm.match(/(?:اشتراك|باقه|خطه)\s+([^\s،,؟?]{2,20})/)?.[1]
   const months = Number(norm.match(/([0-9]{1,2})\s*(?:شهر|شهور)/)?.[1] ?? 0) || undefined
   if (name.length < 2 || name.length > 40) return null
-  return { name, balance, ...(phone ? { phone } : {}), ...(plan ? { plan } : {}), ...(months ? { months } : {}), kind: /مورد/.test(norm) ? 'supplier' : 'customer' }
+  // «وعليه ٤٥٠ من أيام ١٠ أكتوبر» — the debt is OLD; the date must survive the
+  // draft, not silently become today (request-3 acceptance test).
+  const since = parseSinceClause(norm)
+  return {
+    name,
+    balance,
+    ...(phone ? { phone } : {}),
+    ...(plan ? { plan } : {}),
+    ...(months ? { months } : {}),
+    ...(since ? { since: since.toISOString() } : {}),
+    kind: /مورد/.test(norm) ? 'supplier' : 'customer',
+  }
 }
 
 function matchReverseSellAmount(normWestern: string): number | null {
@@ -1624,8 +1655,17 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
       const partyAr = isCustomer ? 'عميل' : 'مورد'
       const explicit = String(f.name ?? f.customerName ?? f.supplierName ?? '').trim()
       const scanned = parsePartyAdd(norm)
-      // the LLM's own extraction wins; the deterministic scan is the safety net
-      const name = (explicit.length >= 2 ? explicit : scanned?.name ?? '').trim()
+      // A model field that is really a SENTENCE is not a name: «ضيف مصطفى الجزار
+      // من اللي عليهم فلوس وعليه ٤٥٠ …» came back with name = «اللي عليهم فلوس
+      // وعليه ٤٥٠ من أيام ١٠ أكتوبر» (live R29 acceptance run) and would have
+      // created a party with that name. The deterministic phrase parser knows the
+      // grammar, so it wins whenever the explicit field looks sentence-shaped.
+      const looksLikeSentence = (x: string) =>
+        /[0-9]/.test(x) ||
+        /(وعليه|وعليها|عليه|عليها|علينا|مديونيت|رصيده|رصيدها|من اللي|اللي عليهم|اللي علينا|كمان|بيدفع|بيحاسب|جنيه|اللي ليه|اللي ليا)/.test(x) ||
+        x.split(/\s+/).length > 4
+      const explicitOk = explicit.length >= 2 && !looksLikeSentence(explicit)
+      const name = (explicitOk ? explicit : scanned?.name ?? '').trim()
       if (name.length < 2) {
         return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'الاسم', failMessage: `اسم ال${partyAr} إيه؟` }
       }
@@ -1649,12 +1689,23 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
       const phone = typeof f.phone === 'string' ? f.phone.trim() : scanned?.phone
       const plan = typeof f.plan === 'string' ? f.plan.trim() : scanned?.plan
       const months = typeof f.months === 'number' ? f.months : scanned?.months
-      const payload = { name, balance, ...(phone ? { phone } : {}), ...(plan ? { plan } : {}), ...(months ? { months } : {}) }
+      const sinceRaw = typeof f.since === 'string' ? f.since : scanned?.since
+      const since = sinceRaw ? new Date(sinceRaw) : null
+      const payload = {
+        name,
+        balance,
+        ...(phone ? { phone } : {}),
+        ...(plan ? { plan } : {}),
+        ...(months ? { months } : {}),
+        ...(since && !Number.isNaN(since.getTime()) ? { since: since.toISOString() } : {}),
+      }
       const risk = computeRisk(type, balance)
+      const dueSince = since && !Number.isNaN(since.getTime()) ? arDate(since) : null
       const summary = `${isCustomer ? 'عميل جديد' : 'مورد جديد'}: ${name}${balance > 0 ? ` — ${isCustomer ? 'عليه' : 'علينا'} ${egp(balance)}` : ''}`
       const card = fieldsToCard('', type, risk, summary, [
         { label: isCustomer ? 'العميل' : 'المورد', value: name },
         { label: isCustomer ? 'عليه (افتتاحي)' : 'علينا (افتتاحي)', value: egp(balance) },
+        ...(dueSince ? [{ label: 'مستحقة من', value: dueSince }] : []),
         ...(phone ? [{ label: 'التليفون', value: phone }] : []),
         ...(plan ? [{ label: 'الاشتراك', value: `${plan}${months ? ` — ${fmtQty(months)} شهر` : ''}` }] : []),
         ...(balanceEgp == null
@@ -1913,6 +1964,8 @@ const BRAIN_WRITE_TOOLS: Record<
       balance: brainArgNum(a, 'balance', 'amount', 'debt', 'opening'),
       plan: brainArgStr(a, 'plan'),
       months: brainArgNum(a, 'months'),
+      // «من أيام كذا» — the opening balance keeps its own date
+      since: brainArgStr(a, 'since', 'sinceDate', 'owedSince', 'from'),
     }),
   },
   add_customer: {
@@ -1923,6 +1976,8 @@ const BRAIN_WRITE_TOOLS: Record<
       balance: brainArgNum(a, 'balance', 'amount', 'debt', 'opening'),
       plan: brainArgStr(a, 'plan'),
       months: brainArgNum(a, 'months'),
+      // «من أيام كذا» — the opening balance keeps its own date
+      since: brainArgStr(a, 'since', 'sinceDate', 'owedSince', 'from'),
     }),
   },
   register_supplier: {
@@ -3052,7 +3107,11 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         finalText = brainDraftContract
         meta.fallback = true
       }
-    } else if (finalText.trim() && allCards.length > 0 && (isCannedReply(finalText) || !replyGroundsCards(finalText, allCards))) {
+    } else if (
+      finalText.trim() &&
+      allCards.length > 0 &&
+      (isCannedReply(finalText) || !replyGroundsCards(finalText, [allCards[0]], text))
+    ) {
       finalText = deterministicReadReply(allCards)
       meta.fallback = true
     }
@@ -3591,7 +3650,12 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       console.error('[harness] read reply stream failed → deterministic read reply:', err)
       meta.fallback = true
     }
-    const grounded = collected.trim().length > 0 && !isCannedReply(collected) && replyGroundsCards(collected, cards)
+    // Grounding is checked against the PRIMARY card (cards[0]) — the one that
+    // answers the question. A reply that quotes a number from a SIDE card while
+    // the asked card says something else is not an answer (live R29: a customer
+    // file question was answered with «وفيها أرقام زي ٩٨١٥» from another card).
+    const grounded =
+      collected.trim().length > 0 && !isCannedReply(collected) && replyGroundsCards(collected, [cards[0]], text)
     if (!grounded) {
       if (collected.trim().length > 0) meta.fallback = true
       replyText = deterministicReadReply(cards)

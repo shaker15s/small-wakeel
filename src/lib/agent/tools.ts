@@ -650,6 +650,22 @@ export async function runReadTool(
       const collections = mine.filter((op) => op.type === 'collection')
       const avgCollection =
         collections.length > 0 ? Math.round(collections.reduce((s2, o) => s2 + opAmount(o.payload), 0) / collections.length) : 0
+      // «ضيف أحمد وعليه ٤٥٠ من أيام ١٠ أكتوبر» — the opening balance's own date is
+      // read back from the customer_add operation, so the owner sees WHEN the debt
+      // started (not just the amount).
+      const addOp = mine.find((op) => op.type === 'customer_add' || op.type === 'supplier_add')
+      let sinceLabel: string | null = null
+      if (addOp) {
+        try {
+          const pj = JSON.parse(addOp.payload) as { since?: string }
+          if (pj.since) {
+            const d = new Date(pj.since)
+            if (!Number.isNaN(d.getTime())) sinceLabel = arDate(d)
+          }
+        } catch {
+          /* payload not JSON — the balance is still shown */
+        }
+      }
       const gapDays =
         collections.length >= 2
           ? Math.round(
@@ -667,6 +683,7 @@ export async function runReadTool(
             { label: 'آخر تحصيل', value: collections[0] ? `${egp(opAmount(collections[0].payload))} — ${arDate(collections[0].createdAt)}` : 'مفيش' },
             { label: 'متوسط التحصيل', value: avgCollection > 0 ? egp(avgCollection) : '—' },
             { label: 'بيسدد كل', value: gapDays != null ? `${gapDays} يوم تقريبًا` : 'مفيش بيانات كفاية' },
+            ...(sinceLabel ? [{ label: 'الرصيد الافتتاحي من', value: sinceLabel }] : []),
             ...(found.phone ? [{ label: 'التليفون', value: found.phone }] : []),
           ],
         },

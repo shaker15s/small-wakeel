@@ -315,7 +315,7 @@ ${isGym ? '- get_member_status({name}) → حالة عضو (الخطة/الان�
 - record_collection({customerName, amount}) → تحصيل من عميل (الجنيه)
 - record_payment({supplierName, amount}) → سداد لمورد (الجنيه)
 - record_expense({reason, amount}) → مصروف من الخزنة (الجنيه)
-- register_customer({name, phone?, balance?}) → عميل جديد في السجل (balance = المديونية الافتتاحية بالجنيه لو هو قالها، وسيبها فاضية لو مش عارف). لو الاسم موجود بالفعل هتفشل بأمان ومش هتلمس رصيده.
+- register_customer({name, phone?, balance?, since?}) → عميل جديد في السجل (balance = المديونية الافتتاحية بالجنيه لو هو قالها، وسيبها فاضية لو مش عارف · since = تاريخ بداية المديونية لو قال «من أيام/من تاريخ …» بالشكل YYYY-MM-DD). لو الاسم موجود بالفعل هتفشل بأمان ومش هتلمس رصيده.
 - register_supplier({name, phone?, balance?}) → مورد جديد في السجل
 ${isGym ? "- register_member({name, plan?, months?}) → اشتراك/تجديد عضوية (السعر من خطة الجيم المسجلة)\n- record_attendance({name}) → حضور عضو النهاردة\n" : ''}الذاكرة (بتتعلم منها):
 - memory_save({text}) → احفظ حاجة دايمة عن ${user.name} أو قانون للمحل — ومواعيد الوعود برضو: لو عميل قال «هيدفع الباقي يوم الجمعة» سجلها هنا زي ما قالت بالظبط.
