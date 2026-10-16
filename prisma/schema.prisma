@@ -1,0 +1,210 @@
+// وكيل (Wakil) — Prisma schema
+// Money is ALWAYS integer piastres (1 EGP = 100 piastres). Never floats.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Business {
+  id             String   @id @default(cuid())
+  name           String
+  type           String // supermarket | gym | pharmacy | attar
+  currency       String   @default("EGP")
+  timezone       String   @default("Africa/Cairo")
+  openingCash    Int      @default(0) // piastres
+  opSeq          Int      @default(0)
+  createdAt      DateTime @default(now())
+
+  users          User[]
+  items          Item[]
+  customers      Customer[]
+  suppliers      Supplier[]
+  operations     Operation[]
+  cashEntries    CashEntry[]
+  auditEvents    AuditEvent[]
+  conversations  Conversation[]
+  scheduledTasks ScheduledTask[]
+  memories       AgentMemory[]
+  settings       AgentSettings?
+}
+
+model User {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name       String
+  role       String // owner | cashier | reception | supervisor
+  title      String? // job title in Arabic
+  createdAt  DateTime @default(now())
+}
+
+model Item {
+  id                String    @id @default(cuid())
+  businessId        String
+  business          Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name              String
+  aliases           String    @default("") // comma-separated alt names
+  unit              String // piece | kg | gram | liter | milli | box | strip | capsule | session
+  category          String    @default("")
+  costPrice         Int       @default(0) // piastres per unit
+  sellPrice         Int       @default(0) // piastres per unit
+  stockQty          Int       @default(0) // in base unit (gram for attar, etc.)
+  lowStockThreshold Int       @default(0)
+  batchNo           String? // pharmacy
+  expiresAt         DateTime? // pharmacy
+  createdAt         DateTime  @default(now())
+}
+
+model Customer {
+  id         String    @id @default(cuid())
+  businessId String
+  business   Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name       String
+  phone      String?
+  balance    Int       @default(0) // + owes us; - credit
+  plan       String? // gym plan name
+  expiresAt  DateTime? // gym membership expiry
+  createdAt  DateTime  @default(now())
+}
+
+model Supplier {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name       String
+  phone      String?
+  balance    Int      @default(0) // + we owe them
+  createdAt  DateTime @default(now())
+}
+
+model Operation {
+  id             String    @id @default(cuid())
+  ref            String    @unique // WKL-1001
+  businessId     String
+  business       Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  type           String // sale | purchase | expense | collection | payment | stock_adjustment | membership | attendance | reversal
+  status         String // RECEIVED | AWAITING_APPROVAL | EXECUTING | SUCCEEDED | FAILED_SAFE | OUTCOME_UNKNOWN | CANCELLED
+  source         String    @default("chat") // chat | manual | task
+  userId         String
+  risk           String // R0 | R1 | R2 | R3 | R4
+  summary        String
+  payload        String // JSON — extracted fields
+  result         String? // JSON — verification + outcome
+  idempotencyKey String    @unique
+  conversationId String?
+  reversalOfRef  String?
+  reversedByRef  String?
+  reason         String?
+  failReason     String?
+  createdAt      DateTime  @default(now())
+  executedAt     DateTime?
+  decidedAt      DateTime?
+}
+
+model CashEntry {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  direction  String // in | out
+  amount     Int // piastres
+  reason     String
+  ref        String? // operation ref
+  createdAt  DateTime @default(now())
+}
+
+model AuditEvent {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  actor      String // userId or "agent"
+  action     String // operation.created | operation.approved | ...
+  ref        String?
+  detail     String // JSON
+  createdAt  DateTime @default(now())
+}
+
+model Conversation {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  userId     String
+  title      String   @default("محادثة جديدة")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  messages   Message[]
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           String // user | assistant
+  text           String
+  card           String? // JSON — draft action card
+  cards          String? // JSON — result cards (tables)
+  thinking       String? // agent visible thinking steps
+  modelLabel     String?
+  createdAt      DateTime     @default(now())
+}
+
+model ScheduledTask {
+  id             String    @id @default(cuid())
+  businessId     String
+  business       Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  userId         String
+  conversationId String?
+  title          String
+  tool           String
+  fields         String // JSON
+  whenLabel      String
+  scheduledFor   DateTime
+  recurrence     String? // daily | weekly | monthly
+  status         String    @default("pending") // pending | done | failed | cancelled
+  result         String?
+  failReason     String?
+  createdAt      DateTime  @default(now())
+  executedAt     DateTime?
+}
+
+model AgentMemory {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  userId     String
+  kind       String // fact | preference
+  text       String
+  createdAt  DateTime @default(now())
+}
+
+model AgentSettings {
+  id         String   @id @default(cuid())
+  businessId String   @unique
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  vertical   String // matches business type; behavior focus
+  tone       String   @default("friendly") // friendly | formal
+  updatedAt  DateTime @updatedAt
+}
+
+model ModelProvider {
+  id        String        @id @default(cuid())
+  name      String
+  baseUrl   String // e.g. http://localhost:3031/v1
+  apiKey    String
+  createdAt DateTime      @default(now())
+  models    ModelConfig[]
+}
+
+model ModelConfig {
+  id         String        @id @default(cuid())
+  providerId String
+  provider   ModelProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  remoteId   String // e.g. wakil-mock-deep
+  label      String // Arabic display label
+  tier       String // air | balanced | deep
+  enabled    Boolean       @default(true)
+}

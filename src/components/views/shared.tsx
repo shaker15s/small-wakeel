@@ -1,0 +1,360 @@
+'use client'
+
+// وكيل — shared plumbing for the 7 view screens.
+// NOTE: TYPE_AR/STATUS_AR are client-safe copies of the maps in lib/agent/tools.
+// Importing '@/lib/agent/tools' from a client component would drag Prisma into
+// the browser bundle (verified empirically — index-browser.js shim leaks into
+// the client chunk). Values are kept identical; see worklog deviation note.
+
+import type { LucideIcon } from 'lucide-react'
+import { AlertCircle, RefreshCw } from 'lucide-react'
+
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent } from '@/components/ui/card'
+import { Skeleton } from '@/components/ui/skeleton'
+import type { OpStatus, OpType, Risk } from '@/lib/types'
+import type { ViewKey } from '@/lib/store'
+import { VIEW_LABELS } from '@/lib/store'
+import { egp, egpPlain } from '@/lib/format'
+import { cn } from '@/lib/utils'
+
+// ---------------------------------------------------------------------------
+// Props contract
+// ---------------------------------------------------------------------------
+
+export interface ViewProps {
+  businessId: string
+  userId: string
+  onNavigate?: (v: ViewKey) => void
+}
+
+/** Parse an alert action `view` string into a safe ViewKey (null if unknown). */
+export function safeView(view?: string | null): ViewKey | null {
+  if (!view) return null
+  return view in VIEW_LABELS ? (view as ViewKey) : null
+}
+
+// ---------------------------------------------------------------------------
+// Arabic label maps (client-safe)
+// ---------------------------------------------------------------------------
+
+export const TYPE_AR: Record<OpType, string> = {
+  sale: 'بيع',
+  purchase: 'شرا',
+  expense: 'مصروف',
+  collection: 'تحصيل',
+  payment: 'سداد',
+  stock_adjustment: 'تسوية مخزون',
+  membership: 'اشتراك',
+  attendance: 'حضور',
+  reversal: 'عكس عملية',
+}
+
+export const STATUS_AR: Record<OpStatus, string> = {
+  RECEIVED: 'مستلمة',
+  AWAITING_APPROVAL: 'مستنية اعتماد',
+  EXECUTING: 'بتتنفذ',
+  SUCCEEDED: 'تم — موثّق ومتحقق',
+  FAILED_SAFE: 'فشلت بأمان',
+  OUTCOME_UNKNOWN: 'نتيجة غير محسومة',
+  CANCELLED: 'ملغاة',
+}
+
+export const RISK_AR: Record<Risk, string> = {
+  R0: 'آمنة',
+  R1: 'بسيطة',
+  R2: 'محتاجة اعتماد',
+  R3: 'حساسة',
+  R4: 'ممنوعة',
+}
+
+export const TIER_AR: Record<string, string> = {
+  air: 'خفيف',
+  balanced: 'متوازن',
+  deep: 'عميق',
+}
+
+export const TASK_STATUS_AR: Record<string, string> = {
+  pending: 'مستنية',
+  done: 'تمت',
+  failed: 'فشلت',
+  cancelled: 'ملغاة',
+}
+
+/** Read tools the tasks API accepts (must match READ_TOOLS in api/tasks/route.ts). */
+export const READ_TOOL_AR: Record<string, string> = {
+  get_daily_summary: 'ملخص اليوم',
+  get_cash_position: 'وضع الخزنة',
+  list_low_stock: 'المخزون الناقص',
+  list_expiring: 'الأصناف قربتخلص',
+  list_receivables: 'مديونيات العملاء',
+  list_payables: 'مستحقات الموردين',
+  get_activity_history: 'آخر الحركات',
+}
+
+export const RECURRENCE_AR: Record<string, string> = {
+  daily: 'يومي',
+  weekly: 'أسبوعي',
+  monthly: 'شهري',
+}
+
+export const arNum = (n: number): string => new Intl.NumberFormat('ar-EG').format(n)
+
+// ---------------------------------------------------------------------------
+// Money
+// ---------------------------------------------------------------------------
+
+export function Money({
+  value,
+  plain = false,
+  className,
+}: {
+  value: number
+  plain?: boolean
+  className?: string
+}) {
+  return (
+    <span className={cn('num tabular-nums', className)}>
+      {plain ? egpPlain(value) : egp(value)}
+    </span>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Badges
+// ---------------------------------------------------------------------------
+
+const RISK_TONE: Record<Risk, string> = {
+  R0: 'bg-secondary text-secondary-foreground',
+  R1: 'bg-wakil-teal/10 text-wakil-teal',
+  R2: 'bg-wakil-amber/15 text-wakil-amber',
+  R3: 'bg-destructive/10 text-destructive',
+  R4: 'bg-destructive text-white',
+}
+
+export function RiskBadge({ risk, withLabel = false }: { risk: Risk; withLabel?: boolean }) {
+  return (
+    <Badge
+      className={cn('font-mono text-[10px]', RISK_TONE[risk])}
+      title={`درجة الخطورة: ${RISK_AR[risk] ?? risk}`}
+    >
+      {risk}
+      {withLabel ? ` · ${RISK_AR[risk]}` : null}
+    </Badge>
+  )
+}
+
+export const STATUS_TONE: Record<OpStatus, string> = {
+  SUCCEEDED: 'border-wakil-teal/25 bg-wakil-teal/10 text-wakil-teal',
+  AWAITING_APPROVAL: 'border-wakil-amber/30 bg-wakil-amber/10 text-wakil-amber',
+  EXECUTING: 'border-wakil-navy/25 bg-wakil-navy/10 text-wakil-navy',
+  FAILED_SAFE: 'border-destructive/25 bg-destructive/10 text-destructive',
+  OUTCOME_UNKNOWN: 'border-wakil-amber/30 bg-wakil-amber/10 text-wakil-amber',
+  CANCELLED: 'border-border bg-muted text-muted-foreground',
+  RECEIVED: 'border-border bg-muted text-muted-foreground',
+}
+
+export function StatusBadge({ status }: { status: OpStatus }) {
+  return (
+    <Badge variant="outline" className={cn('text-[10px]', STATUS_TONE[status])}>
+      {STATUS_AR[status]}
+    </Badge>
+  )
+}
+
+export function TypeBadge({ type }: { type: OpType }) {
+  return <Badge variant="secondary" className="text-[10px]">{TYPE_AR[type]}</Badge>
+}
+
+export function TierBadge({ tier }: { tier: string }) {
+  const tone =
+    tier === 'air'
+      ? 'bg-wakil-amber/10 text-wakil-amber'
+      : tier === 'deep'
+        ? 'bg-wakil-teal/10 text-wakil-teal'
+        : 'bg-wakil-navy/10 text-wakil-navy'
+  return <Badge className={cn('text-[10px]', tone)}>{TIER_AR[tier] ?? tier}</Badge>
+}
+
+// ---------------------------------------------------------------------------
+// KPI card — fixed h-24 so loading skeletons never shift the layout
+// ---------------------------------------------------------------------------
+
+export type KpiTone = 'teal' | 'amber' | 'navy' | 'red' | 'muted'
+
+const KPI_ICON_BG: Record<KpiTone, string> = {
+  teal: 'bg-wakil-teal/10',
+  amber: 'bg-wakil-amber/10',
+  navy: 'bg-wakil-navy/10',
+  red: 'bg-destructive/10',
+  muted: 'bg-muted',
+}
+
+const KPI_TONE_TEXT: Record<KpiTone, string> = {
+  teal: 'text-wakil-teal',
+  amber: 'text-wakil-amber',
+  navy: 'text-wakil-navy',
+  red: 'text-destructive',
+  muted: 'text-muted-foreground',
+}
+
+export function KpiCard({
+  label,
+  value,
+  icon: Icon,
+  tone = 'navy',
+  title,
+}: {
+  label: string
+  value: React.ReactNode
+  icon: LucideIcon
+  tone?: KpiTone
+  title?: string
+}) {
+  return (
+    <div
+      className="card-enter flex h-24 flex-col justify-between rounded-xl border bg-card p-4 shadow-sm"
+      title={title}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-medium text-muted-foreground">{label}</span>
+        <span
+          className={cn(
+            'flex size-7 shrink-0 items-center justify-center rounded-lg',
+            KPI_ICON_BG[tone],
+          )}
+        >
+          <Icon className={cn('size-4', KPI_TONE_TEXT[tone])} aria-hidden />
+        </span>
+      </div>
+      <div
+        className={cn(
+          'num truncate text-xl font-bold leading-none tabular-nums',
+          KPI_TONE_TEXT[tone],
+        )}
+      >
+        {value}
+      </div>
+    </div>
+  )
+}
+
+export function LoadingKpis({ count = 4 }: { count?: number }) {
+  return (
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4" aria-busy="true" aria-label="بيتحمّل">
+      {Array.from({ length: count }).map((_, i) => (
+        <Skeleton key={i} className="h-24 rounded-xl" />
+      ))}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Error / empty states — never blank, always friendly Arabic
+// ---------------------------------------------------------------------------
+
+export function ErrorState({
+  message,
+  onRetry,
+}: {
+  message?: string
+  onRetry?: () => void
+}) {
+  return (
+    <Card className="border-destructive/30">
+      <CardContent className="flex flex-col items-center gap-3 py-8 text-center">
+        <span className="flex size-11 items-center justify-center rounded-full bg-destructive/10 text-destructive">
+          <AlertCircle className="size-5" aria-hidden />
+        </span>
+        <div className="space-y-1">
+          <p className="font-semibold">مش قادرين نجيب البيانات</p>
+          <p className="text-sm text-muted-foreground">{message ?? 'حصلت مشكلة في الاتصال'}</p>
+        </div>
+        {onRetry && (
+          <Button variant="outline" size="sm" onClick={onRetry} className="min-h-10">
+            <RefreshCw aria-hidden /> جرّب تاني
+          </Button>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+export function EmptyState({
+  icon: Icon,
+  title = 'مفيش لحد دلوقتي',
+  hint,
+  className,
+}: {
+  icon: LucideIcon
+  title?: string
+  hint?: string
+  className?: string
+}) {
+  return (
+    <div
+      className={cn(
+        'flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed bg-muted/30 px-4 py-8 text-center',
+        className,
+      )}
+    >
+      <span className="flex size-11 items-center justify-center rounded-full bg-accent text-wakil-amber">
+        <Icon className="size-5" aria-hidden />
+      </span>
+      <p className="text-sm font-medium">{title}</p>
+      {hint && <p className="max-w-xs text-xs leading-relaxed text-muted-foreground">{hint}</p>}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Section card — titled block used across views
+// ---------------------------------------------------------------------------
+
+export function SectionCard({
+  title,
+  icon: Icon,
+  action,
+  children,
+  className,
+}: {
+  title: string
+  icon?: LucideIcon
+  action?: React.ReactNode
+  children: React.ReactNode
+  className?: string
+}) {
+  return (
+    <section className={cn('card-enter rounded-xl border bg-card shadow-sm', className)}>
+      <div className="flex items-center justify-between gap-2 border-b px-4 py-3 sm:px-5">
+        <div className="flex min-w-0 items-center gap-2">
+          {Icon && <Icon className="size-4 shrink-0 text-wakil-amber" aria-hidden />}
+          <h2 className="truncate text-sm font-semibold">{title}</h2>
+        </div>
+        {action}
+      </div>
+      <div className="p-4 sm:p-5">{children}</div>
+    </section>
+  )
+}
+
+export function ViewHeader({
+  title,
+  subtitle,
+  action,
+}: {
+  title: string
+  subtitle?: string
+  action?: React.ReactNode
+}) {
+  return (
+    <header className="flex flex-wrap items-end justify-between gap-3">
+      <div className="min-w-0">
+        <h1 className="text-xl font-bold sm:text-2xl">{title}</h1>
+        {subtitle && <p className="mt-1 text-sm text-muted-foreground">{subtitle}</p>}
+      </div>
+      {action}
+    </header>
+  )
+}

@@ -1,0 +1,243 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-wakil-amber: var(--wakil-amber);
+  --color-wakil-amber-soft: var(--wakil-amber-soft);
+  --color-wakil-navy: var(--wakil-navy);
+  --color-wakil-teal: var(--wakil-teal);
+  --color-wakil-paper: var(--wakil-paper);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+/* وكيل design system — «ثقة هادئة، لا استعراض تقني»
+   Deep navy primary + warm amber accent on warm paper. Light + dark. */
+:root {
+  --radius: 0.75rem;
+  --background: #faf7f1; /* warm paper */
+  --foreground: #1c2b3a;
+  --card: #ffffff;
+  --card-foreground: #1c2b3a;
+  --popover: #ffffff;
+  --popover-foreground: #1c2b3a;
+  --primary: #1f3a5f; /* deep navy */
+  --primary-foreground: #f8fafc;
+  --secondary: #f1ece2;
+  --secondary-foreground: #2c3e50;
+  --muted: #f3efe6;
+  --muted-foreground: #75706a;
+  --accent: #fdf3e3; /* soft amber tint */
+  --accent-foreground: #7c4a12;
+  --destructive: #c0392b;
+  --border: #e7e0d2;
+  --input: #e7e0d2;
+  --ring: #b8873a;
+  --chart-1: #1f3a5f;
+  --chart-2: #c2762a;
+  --chart-3: #2e7d6b;
+  --chart-4: #8d6e63;
+  --chart-5: #b08552;
+  --sidebar: #ffffff;
+  --sidebar-foreground: #1c2b3a;
+  --sidebar-primary: #1f3a5f;
+  --sidebar-primary-foreground: #f8fafc;
+  --sidebar-accent: #f3efe6;
+  --sidebar-accent-foreground: #1f3a5f;
+  --sidebar-border: #e7e0d2;
+  --sidebar-ring: #b8873a;
+  --wakil-amber: #c2762a;
+  --wakil-amber-soft: #f5e3c8;
+  --wakil-navy: #1f3a5f;
+  --wakil-teal: #2e7d6b;
+  --wakil-paper: #faf7f1;
+  --success: #2e7d6b;
+  --warning: #b8873a;
+}
+
+.dark {
+  --background: #0f1a2b; /* deep navy ink */
+  --foreground: #e8e4da;
+  --card: #16243a;
+  --card-foreground: #e8e4da;
+  --popover: #16243a;
+  --popover-foreground: #e8e4da;
+  --primary: #d9b57c; /* soft gold for dark mode CTAs */
+  --primary-foreground: #131f30;
+  --secondary: #1f3049;
+  --secondary-foreground: #e8e4da;
+  --muted: #1f3049;
+  --muted-foreground: #9aa3ad;
+  --accent: #2a2416;
+  --accent-foreground: #e3c98f;
+  --destructive: #e0654f;
+  --border: #243650;
+  --input: #243650;
+  --ring: #d9b57c;
+  --chart-1: #7ea6d9;
+  --chart-2: #d9a05c;
+  --chart-3: #5cb99a;
+  --chart-4: #a1887f;
+  --chart-5: #c4a484;
+  --sidebar: #131f30;
+  --sidebar-foreground: #e8e4da;
+  --sidebar-primary: #d9b57c;
+  --sidebar-primary-foreground: #131f30;
+  --sidebar-accent: #1f3049;
+  --sidebar-accent-foreground: #e8e4da;
+  --sidebar-border: #243650;
+  --sidebar-ring: #d9b57c;
+  --wakil-amber: #d9a05c;
+  --wakil-amber-soft: #3a2f1c;
+  --wakil-navy: #7ea6d9;
+  --wakil-teal: #5cb99a;
+  --wakil-paper: #0f1a2b;
+  --success: #5cb99a;
+  --warning: #d9a05c;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    direction: rtl;
+    scroll-behavior: smooth;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "tnum" 1; /* tabular numbers for money */
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection {
+    background: var(--wakil-amber-soft);
+    color: var(--accent-foreground);
+  }
+}
+
+@layer utilities {
+  /* numbers always LTR inside RTL text */
+  .num {
+    direction: ltr;
+    unicode-bidi: embed;
+    display: inline-block;
+  }
+  .card-enter {
+    animation: card-enter 200ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+  }
+  .press {
+    transition: transform 110ms ease, box-shadow 110ms ease, background-color 110ms ease;
+  }
+  .press:active {
+    transform: scale(0.97);
+  }
+  /* custom scrollbar — thin, warm */
+  .scroll-warm {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  .scroll-warm::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scroll-warm::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 999px;
+  }
+  .scroll-warm::-webkit-scrollbar-thumb:hover {
+    background: var(--muted-foreground);
+  }
+  .scroll-warm::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@keyframes card-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes thinking-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
+@keyframes antenna-wave {
+  0%, 100% { transform: rotate(-8deg); }
+  50% { transform: rotate(8deg); }
+}
+
+.thinking-dot {
+  animation: thinking-pulse 1.4s ease-in-out infinite;
+}
+.thinking-dot:nth-child(2) { animation-delay: 0.2s; }
+.thinking-dot:nth-child(3) { animation-delay: 0.4s; }
+
+.avatar-antenna-active {
+  animation: antenna-wave 1s ease-in-out infinite;
+  transform-origin: bottom center;
+}
+
+/* streaming caret — the حرف بحرف cursor */
+.stream-caret::after {
+  content: "▌";
+  color: var(--wakil-amber);
+  animation: thinking-pulse 0.8s ease-in-out infinite;
+  margin-inline-start: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

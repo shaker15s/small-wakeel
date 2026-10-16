@@ -1,0 +1,57 @@
+// وكيل — risk ladder + role permissions. The model can NEVER lower a risk level
+// or grant itself an approval; this is enforced server-side only.
+
+import type { OpType, Risk } from '../types'
+
+/** Amount thresholds (piastres) that bump an operation to R3. */
+export const R3_AMOUNT_THRESHOLD = 1_000_000 // 10,000 EGP
+
+const BASE_RISK: Record<OpType, Risk> = {
+  sale: 'R2',
+  purchase: 'R2',
+  expense: 'R2',
+  collection: 'R2',
+  payment: 'R2',
+  stock_adjustment: 'R3',
+  membership: 'R2',
+  attendance: 'R1',
+  reversal: 'R3',
+}
+
+export function computeRisk(type: OpType, totalPiastres?: number): Risk {
+  let risk = BASE_RISK[type] ?? 'R2'
+  if (risk === 'R2' && totalPiastres != null && totalPiastres >= R3_AMOUNT_THRESHOLD) risk = 'R3'
+  return risk
+}
+
+export const RISK_META: Record<Risk, { label: string; color: string; hint: string }> = {
+  R0: { label: 'قراءة فقط', color: 'text-emerald-700 bg-emerald-50 border-emerald-200', hint: 'مش بتحرك أي فلوس' },
+  R1: { label: 'أثر بسيط', color: 'text-emerald-700 bg-emerald-50 border-emerald-200', hint: 'تسجيل بسيط بلافلوس' },
+  R2: { label: 'حركة مالية', color: 'text-amber-700 bg-amber-50 border-amber-300', hint: 'بتحرّك فلوس أو مخزون — محتاجة اعتماد' },
+  R3: { label: 'عملية حساسة', color: 'text-red-700 bg-red-50 border-red-300', hint: 'تعديل حساس محتاج اعتماد وسبب إلزامي' },
+  R4: { label: 'خارج النطاق', color: 'text-red-800 bg-red-100 border-red-400', hint: 'مش متاحة للوكيل في المرحلة دي' },
+}
+
+/** Who may DRAFT each type (agent acts on behalf of the user). */
+const DRAFT_ALLOWED: Record<string, string[]> = {
+  sale: ['owner', 'cashier', 'supervisor'],
+  purchase: ['owner', 'supervisor'],
+  expense: ['owner', 'supervisor'],
+  collection: ['owner', 'cashier', 'supervisor', 'reception'],
+  payment: ['owner', 'supervisor'],
+  stock_adjustment: ['owner', 'supervisor'],
+  membership: ['owner', 'supervisor', 'reception'],
+  attendance: ['owner', 'supervisor', 'reception'],
+  reversal: ['owner', 'supervisor'],
+}
+
+/** Who may APPROVE (decide) a draft. */
+export function canApprove(role: string, risk: Risk): boolean {
+  if (risk === 'R3') return role === 'owner' || role === 'supervisor'
+  if (risk === 'R2' || risk === 'R1') return role === 'owner' || role === 'supervisor' || role === 'cashier' || role === 'reception'
+  return false
+}
+
+export function canDraft(role: string, type: OpType): boolean {
+  return DRAFT_ALLOWED[type]?.includes(role) ?? false
+}

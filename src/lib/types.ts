@@ -1,0 +1,246 @@
+// وكيل — shared type contracts
+
+export type Vertical = 'supermarket' | 'gym' | 'pharmacy' | 'attar'
+export type Role = 'owner' | 'cashier' | 'reception' | 'supervisor'
+export type Risk = 'R0' | 'R1' | 'R2' | 'R3' | 'R4'
+export type OpStatus =
+  | 'RECEIVED'
+  | 'AWAITING_APPROVAL'
+  | 'EXECUTING'
+  | 'SUCCEEDED'
+  | 'FAILED_SAFE'
+  | 'OUTCOME_UNKNOWN'
+  | 'CANCELLED'
+
+export type OpType =
+  | 'sale'
+  | 'purchase'
+  | 'expense'
+  | 'collection'
+  | 'payment'
+  | 'stock_adjustment'
+  | 'membership'
+  | 'attendance'
+  | 'reversal'
+
+export interface BusinessLite {
+  id: string
+  name: string
+  type: Vertical
+  users: UserLite[]
+}
+export interface UserLite {
+  id: string
+  name: string
+  role: Role
+  title?: string | null
+}
+
+export interface ItemDTO {
+  id: string
+  name: string
+  aliases: string
+  unit: string
+  category: string
+  costPrice: number // piastres
+  sellPrice: number
+  stockQty: number
+  lowStockThreshold: number
+  batchNo?: string | null
+  expiresAt?: string | null
+  daysToExpiry?: number | null
+  valueAtCost?: number
+}
+
+export interface CustomerDTO {
+  id: string
+  name: string
+  phone?: string | null
+  balance: number
+  plan?: string | null
+  expiresAt?: string | null
+  daysLeft?: number | null
+}
+export interface SupplierDTO {
+  id: string
+  name: string
+  phone?: string | null
+  balance: number
+}
+
+export interface OperationDTO {
+  id: string
+  ref: string
+  type: OpType
+  status: OpStatus
+  source: string
+  risk: Risk
+  summary: string
+  payload: Record<string, unknown>
+  result?: Record<string, unknown> | null
+  userId: string
+  userName?: string
+  reason?: string | null
+  failReason?: string | null
+  createdAt: string
+  executedAt?: string | null
+  decidedAt?: string | null
+  reversalOfRef?: string | null
+  reversedByRef?: string | null
+}
+
+export interface AlertDTO {
+  level: 'info' | 'warning' | 'danger'
+  text: string
+  action?: { label: string; view?: string }
+}
+
+export interface OverviewDTO {
+  cash: { opening: number; in: number; out: number; net: number }
+  today: {
+    sales: number
+    purchases: number
+    expenses: number
+    collections: number
+    payments: number
+    opsCount: number
+  }
+  pendingOps: OperationDTO[]
+  lowStock: ItemDTO[]
+  expiring: ItemDTO[]
+  receivables: CustomerDTO[]
+  payables: SupplierDTO[]
+  recentOps: OperationDTO[]
+  alerts: AlertDTO[]
+}
+
+export interface MessageDTO {
+  id: string
+  role: 'user' | 'assistant'
+  text: string
+  card?: ActionCardDTO | null
+  cards?: ResultCardDTO[] | null
+  thinking?: ThinkingStep[] | null
+  modelLabel?: string | null
+  /** post-execution outcome synced from the operation's current state */
+  outcome?: CardOutcomeDTO | null
+  createdAt: string
+}
+
+export interface CardOutcomeDTO {
+  ok: boolean
+  checks: { label: string; expected: string; actual: string; pass: boolean }[]
+  effects: { label: string; value: string; tone: string }[]
+  failReason?: string
+}
+
+export interface ActionCardDTO {
+  kind: 'draft'
+  opId?: string
+  ref: string
+  type: OpType
+  risk: Risk
+  title: string
+  summary: string
+  fields: { label: string; value: string; hint?: string }[]
+  effects: { label: string; value: string; tone?: 'good' | 'bad' | 'neutral' }[]
+  status: OpStatus
+  dangerNote?: string
+}
+
+export type ResultCardDTO =
+  | {
+      kind: 'table'
+      title: string
+      columns: { key: string; label: string; align?: 'start' | 'end' }[]
+      rows: Record<string, string>[]
+      footer?: { label: string; value: string }[]
+    }
+  | { kind: 'kv'; title: string; rows: { label: string; value: string }[] }
+  | { kind: 'text'; title: string; body: string }
+
+export interface ThinkingStep {
+  label: string // e.g. «بفهم الطلب»
+  detail: string
+  state: 'done' | 'active' | 'pending'
+  icon?: 'understand' | 'search' | 'plan' | 'execute' | 'verify'
+}
+
+export interface BootstrapDTO {
+  businesses: BusinessLite[]
+  providers: ProviderDTO[]
+}
+
+export interface ProviderDTO {
+  id: string
+  name: string
+  baseUrl: string
+  models: ModelConfigDTO[]
+}
+export interface ModelConfigDTO {
+  id: string
+  remoteId: string
+  label: string
+  tier: 'air' | 'balanced' | 'deep'
+  enabled: boolean
+}
+
+export interface ScheduledTaskDTO {
+  id: string
+  title: string
+  tool: string
+  fields: Record<string, unknown>
+  whenLabel: string
+  scheduledFor: string
+  recurrence?: string | null
+  status: 'pending' | 'done' | 'failed' | 'cancelled'
+  result?: string | null
+  failReason?: string | null
+  executedAt?: string | null
+  createdAt: string
+}
+
+export interface MemoryDTO {
+  id: string
+  kind: 'fact' | 'preference'
+  text: string
+  createdAt: string
+}
+
+export interface ReportsDTO {
+  range: '7d' | '30d'
+  daily: { date: string; sales: number; purchases: number; expenses: number; collections: number; payments: number }[]
+  totals: { sales: number; purchases: number; expenses: number; collections: number; payments: number; net: number }
+  topItems: { name: string; qty: number; revenue: number }[]
+  byType: { type: string; count: number; amount: number }[]
+}
+
+// SSE chat stream events (POST /api/chat)
+export type ChatStreamEvent =
+  | { event: 'start'; conversationId: string; messageId: string }
+  | { event: 'thinking'; steps: ThinkingStep[] }
+  | { event: 'step'; label: string; state: 'active' | 'done' }
+  | { event: 'card'; card: ActionCardDTO }
+  | { event: 'cards'; cards: ResultCardDTO[] }
+  | { event: 'delta'; text: string }
+  | { event: 'done'; messageId: string; modelLabel: string }
+  | { event: 'error'; message: string }
+
+export interface ChatTurn {
+  id: string
+  role: 'user' | 'assistant'
+  text: string
+  card?: ActionCardDTO | null
+  cards?: ResultCardDTO[] | null
+  thinking?: ThinkingStep[] | null
+  modelLabel?: string | null
+  createdAt: string
+  streaming?: boolean
+  /** post-execution verification shown inside the action card */
+  outcome?: {
+    ok: boolean
+    checks: { label: string; expected: string; actual: string; pass: boolean }[]
+    effects: { label: string; value: string; tone: string }[]
+    failReason?: string
+  }
+}
