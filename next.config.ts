@@ -54,8 +54,28 @@ function buildCsp(): string {
   ].join("; ")
 }
 
+/**
+ * Dev-server origins that may load Next's dev resources (HMR, /_next/*).
+ *
+ * Next 16 blocks cross-origin dev-resource requests by default, which silently
+ * broke the hosted preview: the page loaded but HMR/asset requests from
+ * `https://<port>-<sandbox>.e2b.app` were refused («Blocked cross-origin request
+ * to Next.js dev resource /_next/hmr»). The preview host is dynamic, so the
+ * wildcard pattern is required. Production builds ignore this option entirely.
+ */
+function allowedDevOrigins(): string[] {
+  const fromEnv = (process.env.WAKIL_DEV_ORIGINS ?? "")
+    .split(",")
+    .map((o) => o.trim())
+    .filter(Boolean);
+  return ["*.e2b.app", "*.preview.app", ...fromEnv];
+}
+
 const nextConfig: NextConfig = {
   output: "standalone",
+  // Hosted-preview support: without this, Next 16 refuses HMR/dev-asset loads
+  // coming from the sandbox proxy host and the live preview misbehaves.
+  ...(isDev ? { allowedDevOrigins: allowedDevOrigins() } : {}),
   // Type errors FAIL the build. They were silenced before
   // (`ignoreBuildErrors: true`), which is how broken code reached production.
   // (Next 16 dropped the built-in `eslint` build step — `bun run lint` owns it.)

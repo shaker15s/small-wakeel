@@ -101,8 +101,9 @@ Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/SECURITY.md](docs
 2. **Intent** — LLM structured extraction with a deterministic Arabic rule ladder as the safety net (`ruleBasedIntent`), plus a compound-intent splitter for «بعت واشتريت».
 3. **Grounding** — the intent is resolved against the **real** catalog (names, aliases, units, prices). Unknown entities trigger a clarifying question, never a guessed write.
 4. **Draft or read** — writes become a card with server-computed numbers; reads run the tool registry.
-5. **Verification** — after execution the executor re-reads the rows and returns `checks[]`; the reply only reports numbers that passed.
-6. **Telemetry** — every turn writes a `UsageEvent` (latency, TTFT, tokens, fallback) → `GET /api/usage`.
+5. **Self-critique («تأمل وكيل»)** — *before* the draft is written, a deterministic auditor checks it against your own ledger: price vs. the median of the last 5 same-type operations, quantity vs. the recorded shelf, possible duplicates in the last 10 minutes, collections larger than the debt, expense spikes. The findings ride on the card (severity-coloured, with the real numbers), lower a visible **confidence** score, and a dangerous one escalates the draft to **R3** — approval then needs a written reason.
+6. **Verification** — after execution the executor re-reads the rows and returns `checks[]`; the reply only reports numbers that passed.
+7. **Telemetry & timing** — every turn writes a `UsageEvent` (latency, TTFT, tokens, fallback) → `GET /api/usage`, and the thinking trace carries a **measured duration per pass** (understanding, tools, verification, composing) so slowness is diagnosable instead of felt.
 
 ---
 
@@ -117,10 +118,12 @@ Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/SECURITY.md](docs
 - Deep research reports (plan → gather from your own ledger → web → cited synthesis → self-check).
 - «ورقة وكيل» scratchpad notes, «أدوات بتاعتك» custom web sources/webhooks, quick commands, model picker with live capability probing.
 - Reports (7d/30d), suggestions, radar alerts, global search, JSON export, catalog restore.
+- A self-critiquing agent: every draft arrives with the doubts it found and how confident it is — the owner decides with the objection in front of him, not after the money moved.
 
 **For the engineer**
 - Strict TypeScript, zod at every boundary, ESLint clean, no dead code or unused dependency.
-- Real tests: 61 unit tests, integration tests against a copy of the real DB, 10 golden-dataset evals of the Arabic pipeline.
+- Real tests: 127 tests across 14 files (unit + integration against a throwaway copy of the real DB) and 10 golden-dataset evals of the Arabic pipeline; `bun test` is proven not to touch the demo data (`bunfig.toml` preload + `tests/helpers/preload.ts`).
+- Speed is measured, not claimed: a 5-second catalog cache with write-through invalidation and hit/miss stats on `GET /api/health`; unreachable providers fail fast instead of burning the retry budget (7 s → ~0.1 s in the live preview).
 - Engine-free Prisma setup for offline/air-gapped installs (`scripts/db-sync.ts`, `scripts/prisma-generate.sh`).
 - Additive-only migrations, indexed query paths, `no-store` on all API responses, CSP + security headers.
 

@@ -13,6 +13,7 @@ import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { guard } from '../_lib/guard'
 import { schedulerStatus } from '@/lib/scheduler'
+import { catalogCacheStats } from '@/lib/agent/catalog'
 import { BUILTIN_MODELS } from '@/lib/agent/llm'
 import pkg from '../../../../package.json'
 
@@ -76,6 +77,7 @@ export async function GET(req: Request) {
     runtime: { node: process.version, env: process.env.NODE_ENV ?? 'development' },
     db: { ok: dbOk, latencyMs: dbLatencyMs, error: dbError, counts },
     scheduler: schedulerStatus(),
+    catalog: catalogCacheStats(),
     models,
     security: {
       accessTokenRequired: Boolean(process.env.WAKIL_ACCESS_TOKEN?.trim()),

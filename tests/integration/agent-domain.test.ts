@@ -8,33 +8,25 @@
 //   • the atomic approve claim (concurrent approvals execute exactly once)
 //   • tenant isolation (a user from another business can never act on ours)
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { copyFileSync, mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { testDb } from '../helpers/test-db'
 
-let tmpDir: string
-let dbFile: string
  
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let db: any
- 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let executors: any
- 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let auth: any
 
 beforeAll(async () => {
-  tmpDir = mkdtempSync(join(tmpdir(), 'wakil-test-'))
-  dbFile = join(tmpDir, 'custom.db')
-  copyFileSync(join(process.cwd(), 'db', 'custom.db'), dbFile)
-  process.env.DATABASE_URL = `file:${dbFile}`
-  // Import AFTER the env var is set: src/lib/db.ts is a module singleton.
-  db = (await import('../../src/lib/db')).db
+  db = await testDb()
+  // Import AFTER the shared test DB is wired up: src/lib/db is a module singleton.
   executors = await import('../../src/lib/domain/executors')
   auth = await import('../../src/lib/security/auth')
 })
 
 afterAll(async () => {
   await db?.$disconnect?.()
-  if (tmpDir) rmSync(tmpDir, { recursive: true, force: true })
 })
 
 describe('integration.executors', () => {

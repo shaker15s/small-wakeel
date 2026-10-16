@@ -162,6 +162,10 @@ export interface ActionCardDTO {
   effects: { label: string; value: string; tone?: 'good' | 'bad' | 'neutral' }[]
   status: OpStatus
   dangerNote?: string
+  /** Self-critique findings shown BEFORE the owner approves. */
+  audit?: AuditFindingDTO[]
+  /** 0..100 — deterministic confidence derived from the audit. */
+  confidence?: number
 }
 
 export type ResultCardDTO =
@@ -176,11 +180,21 @@ export type ResultCardDTO =
   | { kind: 'text'; title: string; body: string }
   | { kind: 'sources'; title: string; sources: SourceDTO[] }
 
+/** «تأمل وكيل» — one deterministic finding about a draft. */
+export interface AuditFindingDTO {
+  code: 'price_anomaly' | 'oversell' | 'duplicate' | 'overpay' | 'expense_spike' | 'unknown_entity'
+  severity: 'info' | 'warn' | 'danger'
+  message: string
+  detail?: string
+}
+
 export interface ThinkingStep {
   label: string // e.g. «بفهم الطلب»
   detail: string
   state: 'done' | 'active' | 'pending'
   icon?: 'understand' | 'search' | 'plan' | 'execute' | 'verify' | 'research' | 'note'
+  /** Measured wall-clock cost of this pass (ms) — the «سرعة» signal. */
+  ms?: number
 }
 
 // ---------------------------------------------------------------------------

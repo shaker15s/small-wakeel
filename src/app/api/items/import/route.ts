@@ -17,6 +17,7 @@
 import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { normalizeAr, toWesternDigits } from '@/lib/agent/arabic'
+import { invalidateCatalog } from '@/lib/agent/catalog'
 import { mapCsv, parseFlexibleDate, parseFlexibleNumber } from '@/lib/csv'
 import { guard } from '../../_lib/guard'
 import { badRequest, notFound, serverError } from '../../_lib/http'
@@ -167,6 +168,8 @@ export async function POST(req: Request) {
       ...toCreate.map((data) => db.item.create({ data: { businessId, ...data } })),
       ...toUpdate.map((u) => db.item.update({ where: { id: u.id }, data: u.data })),
     ])
+
+    invalidateCatalog(businessId)
 
     await db.auditEvent.create({
       data: {

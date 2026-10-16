@@ -214,8 +214,9 @@ export function CommandPalette() {
                         aria-selected={active}
                         onMouseEnter={() => setCursor(index)}
                         onClick={() => choose(hit)}
+                        style={{ ['--stagger' as string]: Math.min(index, 8) }}
                         className={cn(
-                          'flex w-full items-center gap-3 rounded-lg px-3 py-2 text-start transition-colors',
+                          'tap enter-rise flex w-full items-center gap-3 rounded-lg px-3 py-2 text-start',
                           active ? 'bg-accent text-accent-foreground' : 'hover:bg-muted/60',
                         )}
                       >

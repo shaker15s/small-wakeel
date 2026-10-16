@@ -5,6 +5,7 @@
 import type { Item, Operation, Prisma } from '@prisma/client'
 import { db } from '@/lib/db'
 import type { OpType } from '@/lib/types'
+import { invalidateCatalog } from '@/lib/agent/catalog'
 import { arUnit } from '@/lib/verticals'
 import { egp, qty as fmtQty, arDate } from '@/lib/format'
 import { computeRisk } from './risk'
@@ -128,6 +129,9 @@ export async function executeOperation(opId: string, decidedBy: string): Promise
       where: { id: opId },
       data: { status: 'SUCCEEDED', result: JSON.stringify(outcome), executedAt: new Date() },
     })
+    // The catalog just changed (stock/balances). Drop the 5-second cache so the
+    // owner's very next message sees the post-sale numbers.
+    invalidateCatalog(op.businessId)
     await audit(op.businessId, decidedBy, 'operation.succeeded', op.ref, { checks: outcome.checks.length })
   }
   return { op: await db.operation.findUniqueOrThrow({ where: { id: opId } }), outcome }

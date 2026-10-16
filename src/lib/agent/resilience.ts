@@ -26,6 +26,28 @@ function isTransient(err: unknown): boolean {
   )
 }
 
+/**
+ * Connection-level failures: the socket never reached the provider.
+ *
+ * WHY this is separate from «transient»: a refused connection cannot be waited
+ * out. In the live preview a dead provider cost the owner 7 seconds of
+ * «بفهم طلبك» — three retries with 0ms/800ms/2500ms backoff against a port
+ * nobody is listening on — before the fallback ladder was even consulted.
+ * Unreachable hosts now fail FAST (one attempt, no backoff) so the ladder can
+ * move to a healthy model in milliseconds.
+ */
+function unreachableCode(err: unknown): string {
+  const e = err as { code?: string; cause?: { code?: string } } | null
+  return e?.cause?.code ?? e?.code ?? ''
+}
+
+export function isUnreachable(err: unknown): boolean {
+  const code = unreachableCode(err)
+  if (code && ['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH'].includes(code)) return true
+  const msg = err instanceof Error ? `${err.message} ${(err.cause as Error | undefined)?.message ?? ''}` : String(err ?? '')
+  return /ECONNREFUSED|ENOTFOUND|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH/i.test(msg)
+}
+
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
 export interface RetryOpts {
@@ -62,6 +84,8 @@ export async function withRetry<T>(fn: () => Promise<T>, opts: RetryOpts = {}): 
       return await fn()
     } catch (err) {
       lastErr = err
+      // dead host → straight to the model ladder (no backoff, no second attempt)
+      if (isUnreachable(err)) break
       if (!isTransient(err)) break // deterministic failure — don't retry
     }
   }

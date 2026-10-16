@@ -54,6 +54,9 @@ import { egp, qty as fmtQty, arDate } from '@/lib/format'
 import { arUnit, getVertical } from '@/lib/verticals'
 import { convertToBaseUnit, matchEntity, normalizeAr, parseQuantity, toWesternDigits, unitToCode } from './arabic'
 import { createDraft } from '@/lib/domain/executors'
+import { auditDraft } from '@/lib/domain/audit'
+import { getCatalog } from './catalog'
+import type { AuditFindingDTO } from '@/lib/types'
 import { canDraft, computeRisk, RISK_META } from '@/lib/domain/risk'
 import { completeChat, llmHealth, modelLabelFor, resolveModel, streamChat, type LLMMessage } from './llm'
 import { RESEARCH_TRIGGER_RE, isActionableIntent, runDeepResearch } from './research'
@@ -744,6 +747,63 @@ interface ResolvedWrite {
  * to a name-word counts, so an item brand like «قهوة أحمد» never becomes a
  * customer — the ل/من marker is what marks the ROLE.
  */
+/**
+ * Remove an ITEM'S OWN NAME from a sentence before quantity/unit parsing.
+ *
+ * WHY (R27 accuracy fix): a catalog name routinely carries a package size —
+ * «ديتول مطهر 750 مل», «شاي العروسة 250 جرام». If the quantity parser reads the
+ * whole sentence, that size becomes the USER'S measurement: qty=750, unit=milli,
+ * which either inflates the sale 750× or trips the unit-compatibility guard and
+ * refuses a perfectly ordinary sale. The item name is identity, not measurement.
+ *
+ * Both sides are westernised so «٧٥٠ مل» in a message matches a «750 مل» name.
+ * Tokens shorter than 4 characters are skipped — «مل»/«كيلو» alone are units,
+ * never names (stripping them would eat the user's real measurement).
+ */
+/**
+ * A human, code-free «which unit?» question.
+ *
+ * The old text leaked internal unit codes into the owner's chat
+ * («الوحدة «box» مش متوافقة مع وحدة جبنة رومي كيلو (كيلو)») — accurate and
+ * useless. Say it the way the shop says it, and give an example of the answer.
+ */
+function unitQuestionText(item: { name: string; unit: string }, rawUnit: string): string {
+  const it = arUnit(item.unit)
+  const heard = arUnit(rawUnit)
+  const heardPart = heard && heard !== it ? ` سمعت «${heard}» — بس ده مش بيتقاس بيه.` : ''
+  return `«${item.name}» بيتقاس بالـ${it} — قولي الكمية بالـ${it} وأنا أحسبها لك.${heardPart}`
+}
+
+/**
+ * Units that NAME A COUNT rather than a measurement.
+ *
+ * «٢ علبة فول» for an item the catalog counts in pieces is the same request in
+ * shop Arabic — a container word on a counted item is a count, not a unit
+ * conflict, and refusing it («الوحدة مش متوافقة») makes the agent useless for
+ * everyday speech. Measured items (كيلو/جرام/لتر) keep the strict conversion,
+ * because «علبة شاي» genuinely has to be disambiguated by the user.
+ */
+const COUNT_UNITS = new Set(['piece', 'box', 'strip', 'capsule', 'session'])
+
+/** Convert a quantity to the item's base unit, tolerating container wording. */
+function baseQtyFor(qty: number, fromUnit: string, item: { unit: string }): number | null {
+  const direct = convertToBaseUnit(qty, fromUnit, item.unit)
+  if (direct != null) return direct
+  if (COUNT_UNITS.has(fromUnit) && COUNT_UNITS.has(item.unit)) return qty
+  return null
+}
+
+function stripItemName(text: string, item: { name: string; aliases?: string | null }): string {
+  let out = toWesternDigits(text)
+  const names = [item.name, ...(item.aliases ? item.aliases.split(',').map((a) => a.trim()) : [])]
+  for (const n of names) {
+    const norm = toWesternDigits(normalizeAr(n))
+    if (norm.length < 4) continue
+    if (out.includes(norm)) out = out.split(norm).join(' ')
+  }
+  return out
+}
+
 function findPartyMention<T extends { name: string }>(
   text: string,
   parties: T[],
@@ -865,7 +925,9 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
         for (const h of hits) {
           if (taken.some(([s, e]) => h.at < e && h.at + h.token.length > s)) continue
           taken.push([h.at, h.at + h.token.length])
-          const q = parseQuantity(seg, null)
+          // the matched name is stripped first: «٢ لبن كرتونة جهينة ١ لتر» must
+          // not read the «١ لتر» package size as the requested unit/qty
+          const q = parseQuantity(stripItemName(seg, h.item), null)
           const prev = byItem.get(h.item.id)
           byItem.set(h.item.id, {
             item: h.item,
@@ -882,16 +944,17 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
         const issues: string[] = []
         for (const { item, qty, unit } of byItem.values()) {
           const rawUnit = unit ?? item.unit // default = the item's own canonical unit
-          const baseQty = convertToBaseUnit(qty ?? 1, rawUnit, item.unit)
+          const baseQty = baseQtyFor(qty ?? 1, rawUnit, item)
           if (baseQty == null || !(baseQty > 0)) {
-            issues.push(`الوحدة «${rawUnit}» مش متوافقة مع وحدة ${item.name} (${arUnit(item.unit)})`)
+            issues.push(unitQuestionText(item, rawUnit))
             continue
           }
           const qtyN = Math.round(baseQty * 1000) / 1000
-          if (type === 'sale' && qtyN > item.stockQty) {
-            issues.push(`المتاح من ${item.name} ${fmtQty(item.stockQty, arUnit(item.unit))} بس — انت طلبت ${fmtQty(qtyN, arUnit(item.unit))}`)
-            continue
-          }
+          // R27: a sale bigger than the recorded shelf is DRAFTED, not refused —
+          // the shelf count is usually stale and the owner must still be able to
+          // record what actually happened. «تأمل وكيل» already flags it as an
+          // oversell finding (and escalates to R3 when there is nothing on the
+          // shelf at all), so the doubt reaches the human instead of the bin.
           const unitPrice = type === 'sale' ? item.sellPrice : item.costPrice
           lines.push({ item, qty: qtyN, unitPrice, total: Math.round(qtyN * unitPrice) })
         }
@@ -965,7 +1028,7 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
       if (reverseAmountEgp != null) {
         // scanText already has the money clause stripped, so ANY number still
         // left in it is a real weight («بعت 100 جرام كركديه بـ20 جنيه» → qty wins)
-        const qtyAfterStrip = parseQuantity(scanText, null).qty
+        const qtyAfterStrip = parseQuantity(stripItemName(scanText, item), null).qty
         const digitsAfterStrip = /[0-9]/.test(scanText)
         // The LLM tends to echo the money as qty — only a qty that ALSO has a
         // real number left in the stripped text (or a word-number like نص) counts
@@ -1037,7 +1100,8 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
       // («بع لبن» = one unit of the item's own canonical kind — the cashier's shorthand)
       // (when a reverse-sell amount was detected but a real qty survived the
       // strip, the normal path runs — the explicit weight is the ground truth)
-      const textQ = parseQuantity(reverseAmountEgp != null ? scanText : textNoPaid, null)
+      // the item's own name is stripped from the scan text (see stripItemName)
+      const textQ = parseQuantity(stripItemName(reverseAmountEgp != null ? scanText : textNoPaid, item), null)
       const llmQty = typeof f.qty === 'number' && f.qty > 0 ? f.qty : null
       // reverse-sell candidate: an LLM qty equal to the money is the echo — drop it
       const qtySource = reverseAmountEgp != null && llmQty === reverseAmountEgp ? null : llmQty
@@ -1045,12 +1109,23 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
       if (qty <= 0) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'الكمية', failMessage: 'الكمية قد إيه بالظبط؟' }
       // Unit: LLM → mention → text word → the item's OWN canonical unit (الافتراضي)
       const rawUnit = unitToCode(f.unit as string) ?? mentioned?.unit ?? unitToCode(textQ.unit) ?? item.unit
-      const baseQty = convertToBaseUnit(qty, rawUnit, item.unit)
-      if (baseQty == null || !(baseQty > 0)) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, failMessage: `الوحدة «${rawUnit}» مش متوافقة مع وحدة ${item.name} (${arUnit(item.unit)})` }
-      const qtyN = Math.round(baseQty * 1000) / 1000
-      if (type === 'sale' && qtyN > item.stockQty) {
-        return { ok: false, opType: type, payload: {}, summary: '', card: null as never, failMessage: `المتاح من ${item.name} ${fmtQty(item.stockQty, arUnit(item.unit))} بس — انت طلبت ${fmtQty(qtyN, arUnit(item.unit))}` }
+      const baseQty = baseQtyFor(qty, rawUnit, item)
+      if (baseQty == null || !(baseQty > 0)) {
+        return {
+          ok: false,
+          opType: type,
+          payload: {},
+          summary: '',
+          card: null as never,
+          missing: 'الوحدة',
+          failMessage: unitQuestionText(item, rawUnit),
+        }
       }
+      const qtyN = Math.round(baseQty * 1000) / 1000
+      // R27: overselling the recorded shelf no longer aborts the draft. See the
+      // multi-line path above — «تأمل وكيل» carries the finding (and the R3
+      // escalation when the shelf is empty), so a stale count can be corrected
+      // by recording reality instead of by refusing the sale.
       // Total from REAL price
       const unitPrice = type === 'sale' ? item.sellPrice : item.costPrice
       let total = Math.round(qtyN * unitPrice)
@@ -1645,6 +1720,8 @@ interface TurnMeta {
   kind: 'chat' | 'advisory' | 'research'
   fallback: boolean
   notesJotted: number
+  /** Turn start (ms epoch) — the baseline for per-pass timing. */
+  startedAt: number
 }
 
 /**
@@ -1659,7 +1736,7 @@ export async function runAgentTurn(ctx: TurnContext, emit: TurnEmit): Promise<Tu
   const t0 = Date.now()
   let ttftMs: number | null = null
   let sawFirstToken = false
-  const meta: TurnMeta = { kind: 'chat', fallback: false, notesJotted: 0 }
+  const meta: TurnMeta = { kind: 'chat', fallback: false, notesJotted: 0, startedAt: t0 }
   llmHealth.retried = false
   llmHealth.fellBack = false
   const trackedEmit: TurnEmit = (ev) => {
@@ -1699,6 +1776,49 @@ export async function runAgentTurn(ctx: TurnContext, emit: TurnEmit): Promise<Tu
   return result
 }
 
+/**
+ * «تأمل وكيل» — the reflective pass that runs before every draft is created.
+ *
+ * Deterministic on purpose: the same system that produced the numbers cannot be
+ * trusted to grade them, so the audit is arithmetic against the ledger (price
+ * history, stock, balances, duplicate window, expense baseline). Findings are
+ * (a) shown on the card before the owner approves, (b) written to the audit
+ * trail, and (c) able to escalate a draft to R3 when the arithmetic says the
+ * draft deserves a second pair of eyes.
+ */
+async function reflectOnDraft(args: {
+  businessId: string
+  userId: string
+  type: OpType
+  summary: string
+  payload: Record<string, unknown>
+}): Promise<{ findings: AuditFindingDTO[]; confidence: number; risk?: string; ms: number }> {
+  const result = await auditDraft(args)
+  if (result.findings.length > 0) {
+    try {
+      await db.auditEvent.create({
+        data: {
+          businessId: args.businessId,
+          actor: args.userId,
+          action: 'draft.audit',
+          ref: null,
+          detail: JSON.stringify({
+            type: args.type,
+            summary: args.summary,
+            confidence: result.confidence,
+            findings: result.findings,
+          }),
+        },
+      })
+    } catch (err) {
+      // the trail is best-effort: never block a draft because logging failed
+      console.error('[audit] trail write failed:', err)
+    }
+  }
+  const danger = result.findings.some((f) => f.severity === 'danger')
+  return { findings: result.findings, confidence: result.confidence, risk: danger ? 'R3' : undefined, ms: result.ms }
+}
+
 async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMeta): Promise<TurnResult> {
   const { business, user, text } = ctx
   const v = getVertical(business.type)
@@ -1708,10 +1828,10 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   // Load context once (memories raised to 8; pending ops count for the persona;
   // R15: «ورقة وكيل» scratchpad notes for prompt injection; R16: «أدوات
   // بتاعتك» the owner's own tools — one prompt line so the agent knows them)
-  const [items, customers, suppliers, memories, pendingCount, notesSection, userTools] = await Promise.all([
-    db.item.findMany({ where: { businessId: business.id } }),
-    db.customer.findMany({ where: { businessId: business.id } }),
-    db.supplier.findMany({ where: { businessId: business.id } }),
+  // Catalog comes from the 5-second cache (invalidated on every committed
+  // write); memories/notes/tools stay live because they change mid-conversation.
+  const { items, customers, suppliers } = await getCatalog(business.id)
+  const [memories, pendingCount, notesSection, userTools] = await Promise.all([
     db.agentMemory.findMany({ where: { businessId: business.id, userId: user.id, active: true }, orderBy: { createdAt: 'desc' }, take: 12 }),
     db.operation.count({ where: { businessId: business.id, status: 'AWAITING_APPROVAL' } }),
     notesContext(ctx.conversationId),
@@ -1749,9 +1869,16 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   ]
   const IDX = { understand: 0, search: 1 + memStep.length, verify: 2 + memStep.length, reply: 3 + memStep.length }
   const pushThinking = () => emit({ event: 'thinking', steps: steps.map((s) => ({ ...s })) })
+  // «سرعة»: each of the four main passes is timed. `passClock` advances as the
+  // passes complete, so the trace shows where the milliseconds actually go
+  // (understanding, grounding, arithmetic, composing) instead of a vague total.
+  let passClock = meta.startedAt
   const done = (i: number, detail?: string) => {
     if (steps[i]) {
+      const now = Date.now()
       steps[i].state = 'done'
+      steps[i].ms = Math.max(0, now - passClock)
+      passClock = now
       if (detail) steps[i].detail = detail
     }
     pushThinking()
@@ -1955,15 +2082,47 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     const executedSigs = new Set<string>()
 
     // dynamic thinking timeline: understand(done) + mem + [tool steps…] + verify + reply
+    //
+    // «سرعة»: the brain path is the one a real model actually runs, so its
+    // timeline carries the same measured milliseconds as the deterministic
+    // pipeline — understanding (how long the model took to decide), each tool
+    // round, the verification pass, and the composing/streaming pass. Kept in
+    // local state because `syncSteps()` rebuilds the array on every tool round.
     const toolSteps: ThinkingStep[] = []
+    let brainClock = Date.now()
+    let understandMs: number | undefined
+    let verifyMs: number | undefined
+    let replyMs: number | undefined
+    /** freeze the «understood the request» pass at its true length */
+    const stampUnderstand = () => {
+      if (understandMs === undefined) understandMs = Math.max(0, Date.now() - brainClock)
+    }
     const syncSteps = () => {
       steps.length = 0
       steps.push(
-        { label: 'بفهم طلبك', detail: 'عقلي بيقري طلبك وبيقرر بنفسي الأدوات المناسبة', state: 'done', icon: 'understand' },
+        {
+          label: 'بفهم طلبك',
+          detail: 'عقلي بيقري طلبك وبيقرر بنفسي الأدوات المناسبة',
+          state: 'done',
+          icon: 'understand',
+          ms: understandMs,
+        },
         ...memStep,
         ...toolSteps,
-        { label: 'بتحقق من الأرقام', detail: 'الأرقام من السجل بس — مفيش تخمين', state: 'pending', icon: 'verify' },
-        { label: 'بجهّز الرد', detail: '', state: 'pending', icon: 'plan' },
+        {
+          label: 'بتحقق من الأرقام',
+          detail: 'الأرقام من السجل بس — مفيش تخمين',
+          state: verifyMs === undefined ? 'pending' : 'done',
+          icon: 'verify',
+          ms: verifyMs,
+        },
+        {
+          label: 'بجهّز الرد',
+          detail: '',
+          state: replyMs === undefined ? 'pending' : 'done',
+          icon: 'plan',
+          ms: replyMs,
+        },
       )
       pushThinking()
     }
@@ -1988,8 +2147,11 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         .join('، ')
       const step: ThinkingStep = { label, detail: argBits ? argBits.slice(0, 60) : 'بنفّذها', state: 'active', icon }
       toolSteps.push(step)
+      // the decision is over the moment the first action starts
+      stampUnderstand()
       syncSteps()
       emit({ event: 'step', label, state: 'active' })
+      const toolClock = Date.now()
       try {
         // ---- READ tools (R0 — direct, safe) ----
         if (READ_TOOLS.has(call.tool)) {
@@ -2037,7 +2199,15 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             return
           }
           const idem = `${business.id}:${user.id}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
+          const reflection = await reflectOnDraft({
+            businessId: business.id,
+            userId: user.id,
+            type: resolved.opType,
+            summary: resolved.summary,
+            payload: resolved.payload as unknown as Record<string, unknown>,
+          })
           const draft = await createDraft({
+            risk: reflection.risk,
             businessId: business.id,
             userId: user.id,
             type: resolved.opType,
@@ -2051,7 +2221,13 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             // draft owns it; later drafts live in the journal + reply text
             anyDraft = true
             draftOpId = draft.id
-            draftCard = { ...resolved.card, ref: draft.ref, opId: draft.id }
+            draftCard = {
+              ...resolved.card,
+              ref: draft.ref,
+              opId: draft.id,
+              audit: reflection.findings,
+              confidence: reflection.confidence,
+            }
             emit({ event: 'card', card: draftCard })
           }
           brainFacts.push(...[...resolved.card.fields, ...resolved.card.effects].map((f) => ({ label: f.label, value: f.value })))
@@ -2237,6 +2413,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         resultsForModel.push({ tool: call.tool, ok: false, error: 'فشل تنفيذ الأداة' })
       } finally {
         step.state = 'done'
+        step.ms = Math.max(0, Date.now() - toolClock)
         syncSteps()
         emit({ event: 'step', label, state: 'done' })
       }
@@ -2315,11 +2492,14 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       }
     }
     meta.kind = usedTools.length > 0 || anyDraft ? 'chat' : 'advisory'
+    stampUnderstand()
+    const verifyClock = Date.now()
     const brainVerified = verifyReply(finalText, brainFacts)
     const verifiedText = brainVerified.text
     const vi = 1 + memStep.length + toolSteps.length
     if (steps[vi]) {
       steps[vi].state = 'done'
+      steps[vi].ms = Math.max(0, Date.now() - verifyClock)
       steps[vi].detail =
         brainFacts.length > 0
           ? brainVerified.verified.status === 'corrected'
@@ -2327,9 +2507,19 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             : 'اتأكدت الأرقام من السجل'
           : 'مفيش أرقام سجل في الرد ده'
     }
+    verifyMs = steps[vi]?.ms
     if (steps[vi + 1]) steps[vi + 1].state = 'done'
     pushThinking()
+    const replyClock = Date.now()
     await streamDeterministic(verifiedText, emit, REPLY_PACING_BUDGET_MS)
+    // final trace: the composing pass gets its real duration only after the
+    // last character left the wire — the UI then shows where the time went.
+    replyMs = Math.max(0, Date.now() - replyClock)
+    if (steps[vi + 1]) {
+      steps[vi + 1].ms = replyMs
+      steps[vi + 1].state = 'done'
+    }
+    pushThinking()
 
     // ---------- deep-link actions (draft first, then tools) ----------
     const merged = new Map<string, ChatActionDTO>()
@@ -2400,8 +2590,19 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   } else if (detSubs.length === 1 && detSubs[0].intent === 'write' && llmSingle?.intent === 'read') {
     // leading READ + trailing write the LLM caught («ملخص اليوم وبعت 10 عود»)
     subs = [detSubs[0], { intent: 'write', opType: llmSingle.opType, fields: llmSingle.fields, sourceText: text }]
-  } else if (!llmSingle) {
-    llmSingle = ruleBasedIntent(text, business.type)
+  } else {
+    // «موثوقية» — a clear write instruction must never be downgraded to
+    // chit-chat just because the model answered with prose: a flaky provider,
+    // a garbled JSON block or a small model that ignored the schema must not
+    // cost the owner his sale. The deterministic ladder is the LAST word on
+    // «this is a sale»; the model is the first word (its write reads still win).
+    const rule = ruleBasedIntent(text, business.type)
+    const ruleIsWrite = rule.intent === 'write' && !!rule.opType && VALID_OP_TYPES.has(rule.opType)
+    if (ruleIsWrite && llmSingle?.intent !== 'write') {
+      llmSingle = rule
+    } else if (!llmSingle) {
+      llmSingle = rule
+    }
   }
 
   // ---- PASS 2+3: Act ----
@@ -2497,7 +2698,15 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           continue
         }
         const idem = `${business.id}:${user.id}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
+        const reflection = await reflectOnDraft({
+          businessId: business.id,
+          userId: user.id,
+          type: resolved.opType,
+          summary: resolved.summary,
+          payload: resolved.payload as unknown as Record<string, unknown>,
+        })
         const draft = await createDraft({
+          risk: reflection.risk,
           businessId: business.id,
           userId: user.id,
           type: resolved.opType,
@@ -2510,7 +2719,13 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           // the SSE contract has ONE draft-card slot per message — the first
           // draft owns it; later drafts stay in the journal + reply text
           opId = draft.id
-          card = { ...resolved.card, ref: draft.ref, opId: draft.id }
+          card = {
+            ...resolved.card,
+            ref: draft.ref,
+            opId: draft.id,
+            audit: reflection.findings,
+            confidence: reflection.confidence,
+          }
           emit({ event: 'card', card })
         }
         anyDraft = true
@@ -2624,7 +2839,20 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         done(IDX.verify, `حسبت الإجمالي من السعر الحقيقي: ${resolved.summary}`)
         emit({ event: 'step', label: `بجهّز مسودة ${TYPE_AR[resolved.opType]}`, state: 'active' })
         const idem = `${business.id}:${user.id}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
+        // «تأمل» — self-critique BEFORE the draft exists, so the card carries
+        // the doubt (and a dangerous draft can be escalated to R3).
+        const reflection = await reflectOnDraft({
+          businessId: business.id,
+          userId: user.id,
+          type: resolved.opType,
+          summary: resolved.summary,
+          payload: resolved.payload as unknown as Record<string, unknown>,
+        })
+        if (reflection.findings.length > 0) {
+          emit({ event: 'step', label: `راجعت المسودة من سجلك — ${reflection.findings.length} ملاحظة`, state: 'done' })
+        }
         const draft = await createDraft({
+          risk: reflection.risk,
           businessId: business.id,
           userId: user.id,
           type: resolved.opType,
@@ -2634,11 +2862,22 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           idempotencyKey: idem,
         })
         opId = draft.id
-        card = { ...resolved.card, ref: draft.ref, opId: draft.id }
+        card = {
+          ...resolved.card,
+          ref: draft.ref,
+          opId: draft.id,
+          audit: reflection.findings,
+          confidence: reflection.confidence,
+        }
         emit({ event: 'card', card })
         emit({ event: 'step', label: `بجهّز مسودة ${TYPE_AR[resolved.opType]}`, state: 'done' })
-        situation = `اتعملت مسودة عملة رقم ${draft.ref} (${resolved.summary}) مستنية اعتماد المستخدم. درجة الخطورة ${draft.risk}. مفيش حاجة اتنفذت في الخزنة أو المخزون لسه.${resolved.card.dangerNote ? ` وفيها تحذير مهم: ${resolved.card.dangerNote}` : ''}`
-        replyInstruction = `اكتب تأكيد قصير إن المسودة جاهزة بالأرقام الصح وإنها مستنية اعتماده${draft.risk === 'R3' ? '، وذكّره إنها عملية حساسة محتاجة سبب' : ''}.${resolved.card.dangerNote ? ' واقفل بتحذير القانون اللي ظهر في المسودة.' : ''} خليك مختصر.`
+        const auditLine =
+          reflection.findings.length > 0
+            ? ` و«تأمل وكيل» لقى ${reflection.findings.length} ملاحظة لازم تتنقل للمستخدم: ${reflection.findings.map((f) => `${f.message}${f.detail ? ` (${f.detail})` : ''}`).join(' · ')}.`
+            : ''
+        const escalated = reflection.risk === 'R3' && (resolved.card.risk !== 'R3')
+        situation = `اتعملت مسودة عملة رقم ${draft.ref} (${resolved.summary}) مستنية اعتماد المستخدم. درجة الخطورة ${draft.risk}${escalated ? ' (اترفعت لـR3 بسبب ملاحظة «تأمل وكيل»)' : ''}. مفيش حاجة اتنفذت في الخزنة أو المخزون لسه.${resolved.card.dangerNote ? ` وفيها تحذير مهم: ${resolved.card.dangerNote}` : ''}${auditLine}`
+        replyInstruction = `اكتب تأكيد قصير إن المسودة جاهزة بالأرقام الصح وإنها مستنية اعتماده${draft.risk === 'R3' ? '، وذكّره إنها عملية حساسة محتاجة سبب' : ''}.${resolved.card.dangerNote ? ' واقفل بتحذير القانون اللي ظهر في المسودة.' : ''}${reflection.findings.length > 0 ? ' ونبّه بصراحة على ملاحظات «تأمل وكيل» واحدة واحدة وبأرقامها — متخبيهاش ومتقلقش المستخدم زياده عن اللزوم.' : ''} خليك مختصر.`
         // Multi-item drafts with lines that could NOT be drafted — NEVER silent:
         // the reply must explicitly name them and why.
         if (resolved.issues && resolved.issues.length > 0) {

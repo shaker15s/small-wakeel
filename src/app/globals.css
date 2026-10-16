@@ -643,3 +643,134 @@
     transition: none !important;
   }
 }
+
+/* ============================================================
+   R27 — «حِسّ» motion layer: tokens, micro-interactions, a11y guards
+   ============================================================
+   Design intent: motion should explain the interface, never decorate it.
+     • one source of truth for durations/easings (no magic numbers in JSX)
+     • every interactive element answers a press within 100ms (perceived speed)
+     • entrance animations are short and staggered, so a long list reads as a
+       sequence instead of a wall
+     • prefers-reduced-motion turns the whole layer off (accessibility, and
+       it keeps the app usable on old Android devices that stutter) */
+
+:root {
+  --dur-1: 110ms;   /* press / hover feedback */
+  --dur-2: 200ms;   /* content settle */
+  --dur-3: 340ms;   /* entrance / sheets */
+  --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out-soft: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* press feedback: the whole hit area acknowledges the tap */
+.tap {
+  transition:
+    transform var(--dur-1) var(--ease-spring),
+    box-shadow var(--dur-2) var(--ease-out-quint),
+    background-color var(--dur-1) linear;
+  will-change: transform;
+}
+.tap:active {
+  transform: scale(0.972);
+}
+
+/* hover lift for cards (desktop only — touch devices skip it) */
+@media (hover: hover) {
+  .lift {
+    transition:
+      transform var(--dur-2) var(--ease-out-quint),
+      box-shadow var(--dur-2) var(--ease-out-quint);
+  }
+  .lift:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 14px 32px -18px rgb(15 26 43 / 0.35);
+  }
+}
+
+/* staggered entrance — set --stagger (0,1,2…) on siblings */
+.enter-rise {
+  animation: enter-rise var(--dur-3) var(--ease-out-quint) backwards;
+  animation-delay: calc(var(--stagger, 0) * 40ms);
+}
+@keyframes enter-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.995);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* audit findings arrive one by one (they carry different weights) */
+.finding-enter {
+  animation: finding-enter var(--dur-2) var(--ease-out-quint) backwards;
+}
+@keyframes finding-enter {
+  from {
+    opacity: 0;
+    transform: translateX(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* confidence meter — width animates from 0 so the number reads as a measurement */
+.confidence-track {
+  display: block;
+  overflow: hidden;
+  border-radius: 9999px;
+  background: color-mix(in oklab, var(--foreground) 12%, transparent);
+}
+.confidence-fill {
+  display: block;
+  height: 100%;
+  width: var(--confidence, 0%);
+  border-radius: 9999px;
+  animation: confidence-grow 520ms var(--ease-out-quint) backwards;
+}
+@keyframes confidence-grow {
+  from {
+    width: 0%;
+  }
+}
+
+/* per-pass timing chip in the thinking trace */
+.ms-chip {
+  background: color-mix(in oklab, var(--foreground) 6%, transparent);
+}
+
+/* a dangerous draft breathes for attention — subtly, once every 2.4s */
+.attention {
+  animation: attention 2400ms var(--ease-in-out-soft) infinite;
+}
+@keyframes attention {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--destructive) 0%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 4px color-mix(in oklab, var(--destructive) 14%, transparent);
+  }
+}
+
+/* reduced motion: kill the layer, keep the states */
+@media (prefers-reduced-motion: reduce) {
+  .tap,
+  .lift,
+  .enter-rise,
+  .finding-enter,
+  .confidence-fill,
+  .attention {
+    animation: none !important;
+    transition: none !important;
+    transform: none !important;
+  }
+  .confidence-fill {
+    width: var(--confidence, 0%);
+  }
+}
