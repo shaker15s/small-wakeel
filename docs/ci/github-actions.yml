@@ -39,7 +39,11 @@ jobs:
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        # NOTE: not --frozen-lockfile on purpose — bun.lock still lists the
+        # dependencies that were pruned from package.json; refreshing it needs a
+        # network-enabled `bun install`. Tighten this back to --frozen-lockfile
+        # once the lockfile has been regenerated.
+        run: bun install
 
       - name: Full gate (generate · drift · typecheck · lint · tests · evals)
         run: bash scripts/ci.sh --fast

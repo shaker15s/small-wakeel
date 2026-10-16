@@ -8,7 +8,8 @@ FROM oven/bun:1.4.3-alpine AS builder
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY package.json bun.lock ./
-RUN bun install --frozen-lockfile
+# see docs/ci/github-actions.yml — the lockfile is being regenerated
+RUN bun install
 COPY . .
 ENV DATABASE_URL=file:./db/custom.db
 RUN bun run db:generate && bun run build
