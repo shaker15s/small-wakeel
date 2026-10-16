@@ -220,6 +220,34 @@ export interface NoteDTO {
   createdAt: string
 }
 
+// R16 — «أدوات بتاعتك»: user-extensible tools the agent actually uses
+// (web sources scoped to a site + read-only, SSRF-guarded webhooks).
+
+/** A tool the shop owner added himself — the deep-research pipeline runs it. */
+export interface CustomToolDTO {
+  id: string
+  name: string
+  kind: 'web_source' | 'webhook'
+  /** per-kind shape (only the fields relevant to `kind` are filled) */
+  config: {
+    /** web_source: hostname only, no scheme (e.g. drogal.com) */
+    site?: string
+    /** web_source: optional search-term template (defaults to the question) */
+    queryTemplate?: string
+    /** webhook: full http(s) URL */
+    url?: string
+    /** webhook: GET | POST (default GET) */
+    method?: string
+    /** webhook: optional JSON body template */
+    bodyTemplate?: string
+    /** webhook: optional free-text note */
+    note?: string
+  }
+  active: boolean
+  usageCount: number
+  lastUsedAt?: string
+}
+
 export interface BootstrapDTO {
   businesses: BusinessLite[]
   providers: ProviderDTO[]

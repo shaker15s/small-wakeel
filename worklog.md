@@ -530,3 +530,36 @@ Stage Summary:
 - «تحديث النخبة» (R15) COMPLETE & browser-verified: وكيل is now a REAL employee — researches with a plan (OpenAI Deep Research pattern), jots on his own paper (Claude Code TODO pattern), verifies every number before display and ADMITS when he can't (Reflexion), retries with graduated backoff + circuit breakers (production reliability ladder), learns from corrections (reflection), and every turn is measured (latency/ttft/tokens/fallback telemetry).
 - The external-evaluator audit (injection refused, XSS inert, data intact, RTL/dark/390px clean, zero console errors) + 4/4 findings fixed and re-verified.
 - Remaining candidates for R16: sector packs depth (FEFO/attar blends), offline queue, prefix-cache measurement, user-extensible tool registry, WhatsApp loop.
+
+---
+Task ID: R16-a
+Agent: R16-a (user tools registry) — implementation completed; orchestrator logging on its behalf (agent hit a context deadline AFTER finishing all files + running its own 3 E2E research tests, before writing its worklog entry)
+
+Task: «أدوات بتاعتك» — the user-extensible tool registry (the answer to «كلود عنده tools/skills»): the shop owner adds HIS OWN tools (site-scoped web sources + SSRF-guarded read-only webhooks) and the deep-research pipeline actually RUNS them as visible steps.
+
+Work Log (as verified by orchestrator):
+- prisma/schema.prisma: NEW CustomTool{id, businessId, userId, name, kind(web_source|webhook), config(JSON string), active, usageCount, lastUsedAt} + Business/User relations. PUSHED; dev server restarted cleanly after push (no stale-Prisma hang).
+- src/lib/agent/userTools.ts (NEW): parseToolConfig (defensive), activeTools (never throws), userToolsPromptLine (byte-identical prompt when no tools), runUserTool — web_source runs a site-scoped z-ai web_search (backend only) with a graceful «الموقع رجّع صفر نتايج» on empty-result 422s; webhook = SSRF-guarded (loopback/private/link-local/metadata + IPv6 ULA all blocked unless ALLOW_LOCAL_WEBHOOKS=1), 8s AbortController cap, redirect:'error', response is READ AS DATA ONLY (truncated 2000 chars — never executed, never auto-triggers actions), usageCount++/lastUsedAt telemetry (fire-and-forget).
+- src/app/api/tools/route.ts (NEW): GET (active only, businessId+userId ownership pair validated) / POST (name 2-60, kind whitelist, hostname cleaning — a pasted «https://drogal.com/منظفات» normalizes to drogal.com, webhook URL+method+JSON-body validation, 8-active cap with friendly Arabic error) / PATCH (toggle with cap re-check + edits) / DELETE (hard delete, same pattern as /api/quick-commands). Envelope + Arabic error style matches the app.
+- src/lib/agent/research.ts (additive): gather phase 2.5 — active user tools (max 3 per run) run SEQUENTIALLY: step «أداة بتاعتك: X — بجربها» (existing 'research' icon — no type changes), sources merged into the research sources array (max 5/tool), jotNote citation under the tool's own name, graceful «ما ردتش — كمّلت من غيرها» on failure (a dead tool never breaks the turn); userToolsPromptLine injected into the synthesis prompt.
+- src/lib/types.ts (additive): CustomToolDTO. src/lib/store.ts: QUERY_KEYS.tools. src/lib/api.ts: api.tools + add/update/delete.
+- src/components/views/MemoryView.tsx: NEW «أدوات بتاعتك» section — header «زي الـskills: أضف مصادر أو أوامر يقولك عليها وكيل وقت البحث», add-dialog (name / kind Select with explanations / site+queryTemplate or url+method+bodyTemplate per kind, inline Arabic validation), rows with kind chips (مصدر ويب rose / أمر خارجي navy) + «استخدمها وكيل ١ مرة» Arabic-Indic usage counter + relative last-used + active Switch + confirm-delete, skeleton/empty states.
+
+Stage Summary:
+- Delivered end-to-end: tsc app-scope CLEAN, lint CLEAN, /api/tools 200 live, table pushed. The subagent's own 3 E2E research runs (18:49-18:54) each produced full cited reports pre-deadline; orchestrator re-verified the whole loop post-deadline (see round-16-ceo).
+
+---
+Task ID: round-16-ceo (orchestrator)
+Agent: Z.ai Code (orchestrator/CEO)
+Task: R16 verification + a REAL routing bug found by adversarial re-test and fixed (research requests were hijacked into shop rules).
+
+Work Log:
+- VERIFIED R16-a after the subagent's context deadline: tsc CLEAN, lint CLEAN, /api/tools 200 live (table exists), MemoryView section renders, add dialog works, pasted-URL normalization works, tool CRUD works.
+- FOUND + FIXED a real routing bug: «ادرسلي أسعار المنظفات في السوق وقولي لو في فرصة توفير» was HIJACKED by extractRuleRequest into a saved SHOP RULE (PASS 0b rule-save runs BEFORE PASS 0d research) — root cause: «وقولي» contains the consequence substring «قول» and «لو في فرصة» matches condition «لو» → isRuleText true → deterministic rule-save reply in 1 second: research never ran, the owner's tool was never used, and garbage polluted the demo memory. FIX (memory.ts): extractRuleRequest now yields to research imperatives via a deliberately NARROW local regex (ادرس|ابحث|حلل|قارن|دراسه|استراتيجيه|مقارنه) — weak trigger words («سوق», «ليه») are intentionally excluded so a REAL rule containing them («أي حاجة من السوق العتيق متزودش فيها آجل») still saves; explicit «احفظ/خليك فاكر» still wins (extractSaveRequest runs first in the ?? chain). Verified 6/6 routing cases (research messages → null, real rules → saved). Deleted the garbage rule the bug had saved.
+- E2E re-verified POST-FIX: the exact same message now runs the FULL research pipeline — thinking steps show «أداة بتاعتك: أسعار المنظفات من موقع دروجال — بجربها» (site-scoped search actually executed, honest «رجّع صفر نتايج للسؤال ده» graceful path), 7 research steps, 8 sources, report + verified badge, tool usageCount=1 + lastUsedAt persisted, UI shows «استخدمها وكيل ١ مرة» + «آخر استخدام النهاردة». agent-browser errors EMPTY, zero console errors, dev.log free of user-facing failures (only the SDK's internal 422 «No search results available» logging for the empty scoped query — handled gracefully by design).
+- Final: page reload clean, GET / 200, temp diagnostic scripts removed.
+
+Stage Summary:
+- R16-a COMPLETE + browser-verified: وكيل now has its own answer to «كلود عنده أدوات وسكيلز» — the OWNER can extend the agent himself (trusted sites as scoped research sources + read-only webhooks), and the agent actually USES them during deep research with visible steps, usage telemetry, and fail-safe behavior.
+- 1 real routing bug found via adversarial re-test and fixed surgically (research-before-rules precedence), 6/6 cases verified.
+- Next candidates (R16-b+): model-driven tool LOOP (LLM picks which tools to call instead of deterministic gather order), voice (ASR) + photo (VLM) ingestion, Excel/CSV inventory import, WhatsApp loop, proactive morning report, golden-dataset evals, sector packs depth (FEFO pharmacy / attar blends).

@@ -14,12 +14,14 @@ import {
   Heart,
   Info,
   Lightbulb,
+  Loader2,
   MessageCircle,
   Pencil,
   Plus,
   Power,
   ScrollText,
   Trash2,
+  Wrench,
 } from 'lucide-react'
 
 import { AgentAvatar } from '@/components/chat/AgentAvatar'
@@ -34,6 +36,9 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
 import {
   Dialog,
   DialogContent,
@@ -54,7 +59,7 @@ import { useToast } from '@/hooks/use-toast'
 import { api } from '@/lib/api'
 import { arDate } from '@/lib/format'
 import { QUERY_KEYS } from '@/lib/store'
-import type { MemoryDTO } from '@/lib/types'
+import type { CustomToolDTO, MemoryDTO } from '@/lib/types'
 import { cn } from '@/lib/utils'
 import { arNum, EmptyState, ErrorState, SectionCard, ViewProps } from './shared'
 
@@ -410,6 +415,9 @@ export default function MemoryView({ businessId, userId, onNavigate }: ViewProps
         علّم وكيل حاجة جديدة
       </button>
 
+      {/* — أدوات بتاعتك (R16) — the owner's own tools the agent actually uses — */}
+      <ToolsSection businessId={businessId} userId={userId} />
+
       {/* — edit dialog — */}
       <Dialog open={editing !== null} onOpenChange={(open) => !open && setEditing(null)}>
         <DialogContent className="max-w-md">
@@ -647,5 +655,488 @@ function MemorySkeleton() {
       <div className="skel h-28 rounded-xl" />
       <div className="skel h-24 rounded-xl" />
     </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// أدوات بتاعتك (R16) — the owner's own tools the agent ACTUALLY uses during
+// deep research (web sources + read-only webhooks). Same view idioms: kind
+// chips in wakil tokens, Arabic-Indic digits, relative time, confirm-delete.
+// ---------------------------------------------------------------------------
+
+type ToolKind = CustomToolDTO['kind']
+
+const TOOL_KIND_META: Record<ToolKind, { label: string; chip: string; option: string }> = {
+  web_source: {
+    label: 'مصدر ويب',
+    chip: 'bg-rose-500/10 text-rose-600 dark:text-rose-400',
+    option: 'مصدر ويب — يخلّي وكيل يدور جوه موقع معين وقت البحث',
+  },
+  webhook: {
+    label: 'أمر خارجي',
+    chip: 'bg-[var(--wakil-navy)]/10 text-[var(--wakil-navy)]',
+    option: 'أمر خارجي — يطلب من رابط API بيانات',
+  },
+}
+
+const TOOL_NAME_MAX = 60
+
+/** site sanity check (client-side pre-validation — the server re-validates). */
+function looksLikeSite(raw: string): boolean {
+  const site = raw
+    .trim()
+    .replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')
+    .split('/')[0]
+    .replace(/:\d+$/, '')
+  return /^[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$/i.test(site)
+}
+
+function isJsonOk(raw: string): boolean {
+  try {
+    JSON.parse(raw)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function ToolsSection({ businessId, userId }: { businessId: string; userId: string }) {
+  const { toast } = useToast()
+  const qc = useQueryClient()
+
+  const toolsQ = useQuery({
+    queryKey: QUERY_KEYS.tools(businessId, userId),
+    queryFn: () => api.tools(businessId, userId),
+  })
+  const tools = toolsQ.data ?? []
+
+  const invalidate = () => qc.invalidateQueries({ queryKey: QUERY_KEYS.tools(businessId, userId) })
+
+  // — add dialog state
+  const [addOpen, setAddOpen] = useState(false)
+  const [tName, setTName] = useState('')
+  const [tKind, setTKind] = useState<ToolKind>('web_source')
+  const [tSite, setTSite] = useState('')
+  const [tQuery, setTQuery] = useState('')
+  const [tUrl, setTUrl] = useState('')
+  const [tMethod, setTMethod] = useState<'GET' | 'POST'>('GET')
+  const [tBody, setTBody] = useState('')
+  const [addBusy, setAddBusy] = useState(false)
+
+  // — delete confirm state
+  const [deleting, setDeleting] = useState<CustomToolDTO | null>(null)
+  const [deleteBusy, setDeleteBusy] = useState(false)
+
+  // — live inline validation (Egyptian Arabic), computed — no extra state
+  const name = tName.trim()
+  const nameErr = name.length > 0 && name.length < 2 ? 'الاسم قصير أوي — حرفين على الأقل' : null
+  const siteVal = tSite.trim()
+  const siteErr =
+    tKind === 'web_source' && siteVal.length > 0 && !looksLikeSite(siteVal)
+      ? 'اكتبه زي drogal.com — من غير http'
+      : null
+  const urlVal = tUrl.trim()
+  const urlErr =
+    tKind === 'webhook' && urlVal.length > 0 && !/^https?:\/\/.+/i.test(urlVal)
+      ? 'لازم رابط كامل يبدأ بـ http أو https'
+      : null
+  const bodyVal = tBody.trim()
+  const bodyErr =
+    tKind === 'webhook' && tMethod === 'POST' && bodyVal.length > 0 && !isJsonOk(bodyVal)
+      ? 'الـbody لازم يكون JSON سليم — زي { }'
+      : null
+  const canSubmit =
+    !addBusy &&
+    name.length >= 2 &&
+    name.length <= TOOL_NAME_MAX &&
+    (tKind === 'web_source'
+      ? siteVal.length > 0 && !siteErr
+      : urlVal.length > 0 && !urlErr && !bodyErr)
+
+  const submitAdd = async () => {
+    if (!canSubmit) return
+    setAddBusy(true)
+    try {
+      await api.createTool({
+        businessId,
+        userId,
+        name,
+        kind: tKind,
+        config:
+          tKind === 'web_source'
+            ? { site: siteVal, ...(tQuery.trim() ? { queryTemplate: tQuery.trim() } : {}) }
+            : { url: urlVal, method: tMethod, ...(bodyVal ? { bodyTemplate: bodyVal } : {}) },
+      })
+      toast({ title: 'الأداة اتحفظت ✅', description: 'وكيل هيجربها بنفسه في البحث العميق الجاي' })
+      setAddOpen(false)
+      setTName('')
+      setTKind('web_source')
+      setTSite('')
+      setTQuery('')
+      setTUrl('')
+      setTMethod('GET')
+      setTBody('')
+      await invalidate()
+    } catch (err) {
+      toast({
+        title: 'الحفظ مانفذش',
+        description: err instanceof Error ? err.message : 'جرّب تاني',
+        variant: 'destructive',
+      })
+    } finally {
+      setAddBusy(false)
+    }
+  }
+
+  const toggleTool = async (t: CustomToolDTO) => {
+    try {
+      await api.updateTool(t.id, { active: !t.active })
+      toast({
+        title: t.active
+          ? 'وقفتها — وكيل مش هيستخدمها في البحث دلوقتي'
+          : 'رجعت شغالة — وكيل هيستخدمها تاني ✅',
+      })
+      await invalidate()
+    } catch (err) {
+      toast({
+        title: 'التغيير مانفذش',
+        description: err instanceof Error ? err.message : 'جرّب تاني',
+        variant: 'destructive',
+      })
+    }
+  }
+
+  const confirmDelete = async () => {
+    if (!deleting) return
+    setDeleteBusy(true)
+    try {
+      await api.deleteTool(deleting.id)
+      toast({ title: 'اتمسحت الأداة', description: deleting.name })
+      setDeleting(null)
+      await invalidate()
+    } catch (err) {
+      toast({
+        title: 'المسح مانفذش',
+        description: err instanceof Error ? err.message : 'جرّب تاني',
+        variant: 'destructive',
+      })
+    } finally {
+      setDeleteBusy(false)
+    }
+  }
+
+  return (
+    <SectionCard
+      title="أدوات بتاعتك"
+      subtitle="زي الـskills: أضف مصادر أو أوامر يقولك عليها وكيل وقت البحث"
+      icon={Wrench}
+      action={
+        <Button size="sm" className="min-h-11" onClick={() => setAddOpen(true)}>
+          <Plus className="size-4" aria-hidden /> أداة جديدة
+        </Button>
+      }
+      className="list-enter"
+    >
+      {toolsQ.isPending ? (
+        <div className="space-y-2.5" aria-busy="true" role="status" aria-label="بيتحمّل أدواتك">
+          <div className="skel h-16 rounded-xl" />
+          <div className="skel h-16 rounded-xl" />
+        </div>
+      ) : toolsQ.isError ? (
+        <p className="rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+          {toolsQ.error instanceof Error ? toolsQ.error.message : 'تعذر تحميل الأدوات'}{' '}
+          <button
+            type="button"
+            className="underline underline-offset-4 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            onClick={() => void toolsQ.refetch()}
+          >
+            جرّب تاني
+          </button>
+        </p>
+      ) : tools.length === 0 ? (
+        <EmptyState
+          icon={Wrench}
+          title="لسه مفيش أدوات"
+          hint="جرّب: أضف موقع بيبيع بضاعتك وخلي وكيل يقارن أسعار منه وقت البحث."
+        />
+      ) : (
+        <ul className="space-y-2.5">
+          {tools.map((t, i) => (
+            <ToolRow
+              key={t.id}
+              tool={t}
+              index={i}
+              busy={deleteBusy}
+              onToggle={() => void toggleTool(t)}
+              onDelete={() => setDeleting(t)}
+            />
+          ))}
+        </ul>
+      )}
+
+      {/* — add-tool dialog — */}
+      <Dialog open={addOpen} onOpenChange={setAddOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>أداة جديدة بتاعتك</DialogTitle>
+            <DialogDescription>
+              وكيل بيستخدم أدواتك بنفسه وقت البحث العميق — بيقرا النتايج بس، عمره ما بينفّذ حاجة منها.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="tool-name" className="text-xs">
+                اسم الأداة <span className="text-muted-foreground">(٦٠ حرف بالكثير)</span>
+              </Label>
+              <Input
+                id="tool-name"
+                value={tName}
+                onChange={(e) => setTName(e.target.value)}
+                placeholder="مثلاً: أسعار المنظفات من دروجال"
+                className="h-11"
+                maxLength={TOOL_NAME_MAX}
+                aria-invalid={nameErr ? true : undefined}
+              />
+              {nameErr && <p className="text-xs text-destructive">{nameErr}</p>}
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs">نوع الأداة</Label>
+              <Select value={tKind} onValueChange={(v) => setTKind(v as ToolKind)}>
+                <SelectTrigger size="sm" className="h-11 w-full" aria-label="نوع الأداة">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="web_source">{TOOL_KIND_META.web_source.option}</SelectItem>
+                  <SelectItem value="webhook">{TOOL_KIND_META.webhook.option}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {tKind === 'web_source' ? (
+              <>
+                <div className="space-y-1.5">
+                  <Label htmlFor="tool-site" className="text-xs">
+                    الموقع
+                  </Label>
+                  <Input
+                    id="tool-site"
+                    value={tSite}
+                    onChange={(e) => setTSite(e.target.value)}
+                    placeholder="drogal.com"
+                    className="h-11"
+                    dir="ltr"
+                    aria-invalid={siteErr ? true : undefined}
+                  />
+                  {siteErr && <p className="text-xs text-destructive">{siteErr}</p>}
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="tool-query" className="text-xs">
+                    كلمة البحث <span className="text-muted-foreground">(اختياري)</span>
+                  </Label>
+                  <Input
+                    id="tool-query"
+                    value={tQuery}
+                    onChange={(e) => setTQuery(e.target.value)}
+                    placeholder="أسعار المنظفات"
+                    className="h-11"
+                  />
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="space-y-1.5">
+                  <Label htmlFor="tool-url" className="text-xs">
+                    الرابط
+                  </Label>
+                  <Input
+                    id="tool-url"
+                    value={tUrl}
+                    onChange={(e) => setTUrl(e.target.value)}
+                    placeholder="https://example.com/api/prices"
+                    className="h-11"
+                    dir="ltr"
+                    aria-invalid={urlErr ? true : undefined}
+                  />
+                  {urlErr && <p className="text-xs text-destructive">{urlErr}</p>}
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs">الطريقة</Label>
+                  <Select value={tMethod} onValueChange={(v) => setTMethod(v === 'POST' ? 'POST' : 'GET')}>
+                    <SelectTrigger size="sm" className="h-11 w-40" aria-label="طريقة الطلب">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="GET">GET — بيانات بس</SelectItem>
+                      <SelectItem value="POST">POST — بـbody</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                {tMethod === 'POST' && (
+                  <div className="space-y-1.5">
+                    <Label htmlFor="tool-body" className="text-xs">
+                      الـbody <span className="text-muted-foreground">(اختياري — JSON)</span>
+                    </Label>
+                    <Textarea
+                      id="tool-body"
+                      value={tBody}
+                      onChange={(e) => setTBody(e.target.value)}
+                      placeholder="{ }"
+                      rows={3}
+                      className="resize-none font-mono"
+                      dir="ltr"
+                      aria-invalid={bodyErr ? true : undefined}
+                    />
+                    {bodyErr && <p className="text-xs text-destructive">{bodyErr}</p>}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" className="min-h-10" onClick={() => setAddOpen(false)} disabled={addBusy}>
+              إلغاء
+            </Button>
+            <Button className="min-h-11" disabled={!canSubmit} onClick={() => void submitAdd()}>
+              {addBusy ? (
+                <Loader2 className="size-4 animate-spin" aria-hidden />
+              ) : (
+                <Wrench className="size-4" aria-hidden />
+              )}
+              ضيف الأداة
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* — delete confirm — */}
+      <AlertDialog open={deleting !== null} onOpenChange={(open) => !open && setDeleting(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>امسح «{deleting?.name ?? ''}»؟</AlertDialogTitle>
+            <AlertDialogDescription>
+              وكيل مش هيشوف الأداة دي تاني وقت البحث — لو احتجتها تضيفها من الأول.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="min-h-10">لأ، سيبها</AlertDialogCancel>
+            <AlertDialogAction
+              className="min-h-10 bg-destructive text-white hover:bg-destructive/90"
+              onClick={() => void confirmDelete()}
+              disabled={deleteBusy}
+            >
+              {deleteBusy ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <Trash2 aria-hidden />}
+              امسحها
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </SectionCard>
+  )
+}
+
+function ToolRow({
+  tool: t,
+  index,
+  busy,
+  onToggle,
+  onDelete,
+}: {
+  tool: CustomToolDTO
+  index: number
+  busy: boolean
+  onToggle: () => void
+  onDelete: () => void
+}) {
+  const meta = TOOL_KIND_META[t.kind] ?? TOOL_KIND_META.web_source
+  const target = t.kind === 'web_source' ? t.config.site ?? '' : t.config.url ?? ''
+  return (
+    <li
+      className="chip-lift list-enter group flex items-start justify-between gap-2 rounded-xl border bg-card p-3.5 shadow-sm hover:border-wakil-amber/30"
+      style={{ animationDelay: `${Math.min(index, 10) * 40}ms` }}
+    >
+      <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+          <p className="truncate text-sm font-semibold">{t.name}</p>
+          <span className={cn('shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold', meta.chip)}>
+            {meta.label}
+          </span>
+        </div>
+        {target && (
+          <p dir="ltr" className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
+            {target}
+          </p>
+        )}
+        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11px] text-muted-foreground">
+          <span>
+            {t.usageCount > 0 ? (
+              <>
+                استخدمها وكيل <span className="num tabular-nums">{arNum(t.usageCount)}</span>{' '}
+                {t.usageCount === 1 ? 'مرة' : 'مرات'}
+              </>
+            ) : (
+              'لسه وكيل ما استخدمهاش'
+            )}
+          </span>
+          {t.lastUsedAt && <span>آخر استخدام {relTimeAr(t.lastUsedAt)}</span>}
+          {t.kind === 'web_source' && t.config.queryTemplate && (
+            <span title="كلمة البحث اللي وكيل بيستخدمها مع الموقع">بيدور على «{t.config.queryTemplate}»</span>
+          )}
+        </div>
+      </div>
+      <div className="flex shrink-0 items-center gap-1">
+        <SwitchHit
+          checked={t.active}
+          onToggle={onToggle}
+          ariaLabel={t.active ? `وقّف أداة ${t.name}` : `شغّل أداة ${t.name}`}
+          disabled={busy}
+        />
+        <button
+          type="button"
+          onClick={onDelete}
+          disabled={busy}
+          title="امسحها"
+          aria-label={`امسح أداة ${t.name} نهائيًا`}
+          className="focus-warm flex size-10 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50"
+        >
+          <Trash2 className="size-4" aria-hidden />
+        </button>
+      </div>
+    </li>
+  )
+}
+
+/** 44×44 hit-area switch — the visual Switch is pointer-events-none,
+ *  this wrapper carries the semantics and the touch target. */
+function SwitchHit({
+  checked,
+  onToggle,
+  ariaLabel,
+  disabled,
+}: {
+  checked: boolean
+  onToggle: (next: boolean) => void
+  ariaLabel: string
+  disabled?: boolean
+}) {
+  return (
+    <span
+      role="switch"
+      aria-checked={checked}
+      aria-label={ariaLabel}
+      tabIndex={disabled ? -1 : 0}
+      onClick={() => !disabled && onToggle(!checked)}
+      onKeyDown={(e) => {
+        if (disabled) return
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onToggle(!checked)
+        }
+      }}
+      className={cn(
+        'flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-md outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50',
+        disabled && 'cursor-not-allowed opacity-50',
+      )}
+    >
+      <Switch checked={checked} className="pointer-events-none" tabIndex={-1} />
+    </span>
   )
 }

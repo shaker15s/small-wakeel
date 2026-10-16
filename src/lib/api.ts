@@ -21,6 +21,7 @@ import type {
   NoteDTO,
   ResearchDTO,
   VerifyDTO,
+  CustomToolDTO,
 } from './types'
 
 async function get<T>(url: string): Promise<T> {
@@ -130,6 +131,14 @@ export const api = {
   // — ورقة وكيل (scratchpad notes — the agent writes, the UI reads only)
   notes: (businessId: string, conversationId: string) =>
     get<NoteDTO[]>(`/api/notes?businessId=${businessId}&conversationId=${conversationId}`),
+  // — أدوات بتاعتك (R16 — user-extensible tools the agent runs during deep research)
+  tools: (businessId: string, userId: string) =>
+    get<CustomToolDTO[]>(`/api/tools?businessId=${businessId}&userId=${userId}`),
+  createTool: (t: { businessId: string; userId: string; name: string; kind: string; config: Record<string, unknown> }) =>
+    post<CustomToolDTO>('/api/tools', t),
+  updateTool: (id: string, patchBody: { active?: boolean; name?: string; config?: Record<string, unknown> }) =>
+    patch<CustomToolDTO>('/api/tools', { id, ...patchBody }),
+  deleteTool: (id: string) => del(`/api/tools?id=${id}`),
 }
 
 // ---------------------------------------------------------------------------

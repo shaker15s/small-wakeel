@@ -16,6 +16,7 @@ import type { ResearchDTO, ResultCardDTO, SourceDTO, ThinkingStep, VerifyDTO } f
 import { completeChat, type LLMMessage, type ModelInfo } from './llm'
 import { runReadTool, type ReadTool } from './tools'
 import { jotNote } from './scratchpad'
+import { activeTools, runUserTool, userToolsPromptLine } from './userTools'
 import { factsFromCards, verifyWithJudge, type VerifyFact } from './verify'
 import { getVertical } from '@/lib/verticals'
 import { normalizeAr } from './arabic'
@@ -247,6 +248,50 @@ export async function runDeepResearch(p: DeepResearchParams): Promise<DeepResear
     stepsCount++
   }
 
+  // ---- 2.5) أدوات بتاعتك — the owner's own tools (R16), max 3 per run ----
+  // The shop owner's own sources/webhooks, run SEQUENTIALLY right after the
+  // internal gathers. A failed tool is a graceful step («ما ردتش — كمّلت من
+  // غيرها») — a dead tool must never break the research turn.
+  const tools = await activeTools(business.id)
+  for (const tool of tools.slice(0, 3)) {
+    const label = `أداة بتاعتك: ${tool.name} — بجربها`
+    const step: ThinkingStep = { label, detail: 'أداة خاصة أضافها صاحب الشغل بنفسه', state: 'active', icon: 'research' }
+    steps.push(step)
+    emit({ event: 'thinking', steps: steps.map((s) => ({ ...s })) })
+    emit({ event: 'step', label, state: 'active' })
+    try {
+      const r = await runUserTool(tool, p.text)
+      if (r.ok && r.sources && r.sources.length > 0) {
+        sources.push(...r.sources.slice(0, 5))
+        step.detail = r.summary
+        // paper&pen: the tool's results land on the scratchpad under ITS name
+        void jotNote({
+          businessId: business.id,
+          userId: user.id,
+          conversationId: p.conversationId,
+          kind: 'citation',
+          text: `أداة «${tool.name}»: ${r.summary} — ${r.sources.slice(0, 2).map((s) => s.title).join('؛ ')}`,
+          source: tool.name,
+        })
+        p.onJot?.()
+      } else if (r.ok) {
+        step.detail = r.summary // the tool responded but had nothing to show
+      } else {
+        // graceful failure — the turn continues with the other sources
+        step.label = `أداة ${tool.name} ما ردتش — كمّلت من غيرها`
+        step.detail = r.summary
+      }
+    } catch (e) {
+      console.error('[research] user tool failed (كمّلت من غيرها):', e)
+      step.label = `أداة ${tool.name} ما ردتش — كمّلت من غيرها`
+      step.detail = 'مشكلة في الأداة نفسها'
+    }
+    step.state = 'done'
+    emit({ event: 'thinking', steps: steps.map((s) => ({ ...s })) })
+    emit({ event: 'step', label: step.label, state: 'done' })
+    stepsCount++
+  }
+
   // ---- 3) WEB — max 2 queries × 5 results, NEVER fatal ----
   const webQueries = craftWebQueries(p.text, mentionedItem, v.label)
   const webSources: SourceDTO[] = []
@@ -302,7 +347,7 @@ export async function runDeepResearch(p: DeepResearchParams): Promise<DeepResear
   let llmFallback = false
   try {
     const messages: LLMMessage[] = [
-      { role: 'system', content: buildResearchPrompt({ business, user, question: p.text, plan, facts, sources, notesSection: p.notesSection ?? null }) },
+      { role: 'system', content: buildResearchPrompt({ business, user, question: p.text, plan, facts, sources, notesSection: p.notesSection ?? null, userToolsLine: userToolsPromptLine(tools) }) },
       { role: 'user', content: 'اكتب التقرير النهائي دلوقتي بناءً على البيانات والمصادر فوق — بالأقسام الثلاثة المطلوبة بالظبط.' },
     ]
     reportText = (await completeChat(p.model, messages)).trim()
@@ -348,8 +393,10 @@ function buildResearchPrompt(params: {
   facts: VerifyFact[]
   sources: SourceDTO[]
   notesSection: string | null
+  /** R16: «أدوات بتاعتك» — one compact line about the owner's own tools */
+  userToolsLine?: string
 }): string {
-  const { business, user, question, plan, facts, sources, notesSection } = params
+  const { business, user, question, plan, facts, sources, notesSection, userToolsLine } = params
   const v = getVertical(business.type)
   const sourceLines = sources
     .map((s, i) => {
@@ -358,6 +405,7 @@ function buildResearchPrompt(params: {
     })
     .join('\n')
   const notesBlock = notesSection ? `\n${notesSection}\n` : ''
+  const toolsBlock = userToolsLine ? `\n${userToolsLine}\n` : ''
   return `انت «وكيل» — موظف البحث والتحليل بتاع «${business.name}» (${v.label}). ${user.name} طلب منك بحث عميق في شغله.
 
 ## السؤال
@@ -369,8 +417,7 @@ ${plan.join('\n')}
 ${facts.map((f) => `- ${f.label}: ${f.value}`).join('\n') || '— مفيش بيانات داخلية للسؤال ده —'}
 
 ## المصادر (كل مصدر برقمه — لما تستشهد بيه في التحليل اكتب رقمه بين قوسين زي [١])
-${sourceLines || '— مفيش مصادر ويب —'}
-${notesBlock}
+${sourceLines || '— مفيش مصادر ويب —'}${toolsBlock}${notesBlock}
 ## المطلوب
 اكتب تقرير بالمصري بأقسام ثابتة بالعناوين دي بالظبط:
 ## الخلاصة

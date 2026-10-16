@@ -58,6 +58,7 @@ import { canDraft, computeRisk, RISK_META } from '@/lib/domain/risk'
 import { completeChat, llmHealth, modelLabelFor, resolveModel, streamChat, type LLMMessage } from './llm'
 import { RESEARCH_TRIGGER_RE, runDeepResearch } from './research'
 import { ensurePrismaFresh, jotFactsFromCards, jotNote, notesContext } from './scratchpad'
+import { activeTools, userToolsPromptLine } from './userTools'
 import { factsFromCards, verifyReply, type VerifyFact } from './verify'
 import { buildAdvisoryPrompt, buildReplyPrompt, buildSystemPrompt, roleTitle } from './prompt'
 import { READ_TOOLS, runReadTool, TYPE_AR, type ReadTool } from './tools'
@@ -1357,15 +1358,18 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   const modelLabel = modelLabelFor(model)
 
   // Load context once (memories raised to 8; pending ops count for the persona;
-  // R15: «ورقة وكيل» scratchpad notes for prompt injection)
-  const [items, customers, suppliers, memories, pendingCount, notesSection] = await Promise.all([
+  // R15: «ورقة وكيل» scratchpad notes for prompt injection; R16: «أدوات
+  // بتاعتك» the owner's own tools — one prompt line so the agent knows them)
+  const [items, customers, suppliers, memories, pendingCount, notesSection, userTools] = await Promise.all([
     db.item.findMany({ where: { businessId: business.id } }),
     db.customer.findMany({ where: { businessId: business.id } }),
     db.supplier.findMany({ where: { businessId: business.id } }),
     db.agentMemory.findMany({ where: { businessId: business.id, userId: user.id, active: true }, orderBy: { createdAt: 'desc' }, take: 12 }),
     db.operation.count({ where: { businessId: business.id, status: 'AWAITING_APPROVAL' } }),
     notesContext(ctx.conversationId),
+    activeTools(business.id),
   ])
+  const userToolsLine = userToolsPromptLine(userTools)
   const rules = memories.filter((m) => m.kind === 'rule')
   const memCtx: MemoryContext = {
     lexicon: parseLexicon(memories),
@@ -1575,7 +1579,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   let llmRaws: RawIntentJson[] = []
   let llmSingle: ExtractedIntent | null = null
   try {
-    const baseSystem = buildSystemPrompt({ business, user, items, customers, suppliers, memories: promptMemories, rules, history: ctx.history })
+    const baseSystem = buildSystemPrompt({ business, user, items, customers, suppliers, memories: promptMemories, rules, history: ctx.history, userToolsLine })
     // «ورقة وقلم» — the employee's OWN working notes ride along every prompt
     const system = notesSection ? `${baseSystem}\n\n${notesSection}` : baseSystem
     const raw = await completeChat(model, [

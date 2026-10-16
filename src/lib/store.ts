@@ -122,4 +122,6 @@ export const QUERY_KEYS = {
   quickCommands: (b: string) => ['quickCommands', b] as const,
   notes: (b: string, c: string) => ['notes', b, c] as const,
   radar: (b: string) => ['radar', b] as const,
+  /** R16 «أدوات بتاعتك» — the owner's own tools (web sources + webhooks) */
+  tools: (b: string, u: string) => ['tools', b, u] as const,
 }

@@ -88,6 +88,9 @@ export function buildSystemPrompt(params: {
   rules?: MemoryLike[]
   history: { role: string; text: string }[]
   catalogLimit?: number
+  /** R16 «أدوات بتاعتك» — one compact line about the owner's own tools
+   *  (empty/undefined → prompt stays byte-identical to the no-tools state). */
+  userToolsLine?: string
 }): string {
   const v = getVertical(params.business.type)
   const { business, user, items, customers, suppliers, memories, rules, history } = params
@@ -144,7 +147,7 @@ export function buildSystemPrompt(params: {
 ## الأدوات المتاحة
 قراءة: ${readToolsFor(business.type).join(' · ')}
 كتابة (بتتحول لمسودة محتاجة اعتماد): ${writeToolsFor(business.type).join(' · ')}
-${isGym ? '' : 'حساسة (R3): adjust_stock · reverse_operation'}
+${isGym ? '' : 'حساسة (R3): adjust_stock · reverse_operation'}${params.userToolsLine ? `\n${params.userToolsLine}` : ''}
 
 ## المطلوب منك دلوقتي
 رُدّ بـ JSON صافي (بلا أي نص خارج JSON) بالشكل ده:

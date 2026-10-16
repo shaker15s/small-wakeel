@@ -34,6 +34,7 @@ model Business {
   quickCommands  QuickCommand[]
   agentNotes     AgentNote[]
   settings       AgentSettings?
+  tools          CustomTool[] @relation("BusinessTools")
 }
 
 model User {
@@ -44,6 +45,7 @@ model User {
   role       String // owner | cashier | reception | supervisor
   title      String? // job title in Arabic
   createdAt  DateTime @default(now())
+  tools      CustomTool[] @relation("UserTools")
 }
 
 model Item {
@@ -284,4 +286,24 @@ model ModelConfig {
   tier         String // air | balanced | deep
   enabled      Boolean            @default(true)
   capabilities ProviderCapability?
+}
+
+// «أدوات بتاعتك» (R16) — user-extensible tools the AGENT actually uses:
+// the shop owner adds his own web sources / webhooks and the deep-research
+// pipeline runs them during the gather phase. Webhooks are READ-ONLY data
+// fetches (SSRF-guarded, never executed, never auto-trigger actions).
+model CustomTool {
+  id         String    @id @default(cuid())
+  businessId String
+  userId     String
+  name       String // e.g. «أسعار المنظفات من موقع دروجال»
+  kind       String // 'web_source' | 'webhook'
+  config     String // JSON string — shapes documented in src/lib/agent/userTools.ts
+  active     Boolean   @default(true)
+  usageCount Int       @default(0)
+  lastUsedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  business   Business  @relation("BusinessTools", fields: [businessId], references: [id], onDelete: Cascade)
+  user       User      @relation("UserTools", fields: [userId], references: [id], onDelete: Cascade)
 }

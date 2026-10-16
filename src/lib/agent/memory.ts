@@ -112,6 +112,12 @@ export function extractSaveRequest(text: string, norm: string): SaveRequest | nu
   return null
 }
 
+/** Strong research IMPERATIVES — asking the agent to GO STUDY something. Kept
+ * local & narrow (strong verbs only, no weak triggers like «سوق/ليه») so a real
+ * rule containing «سوق» («أي حاجة من السوق العتيق متزودش فيها آجل») is still
+ * saved as a rule, while «ادرسلي الأسعار وقولي…» routes to deep research. */
+const RESEARCH_IMPERATIVE_RE = /(ادرس|ابحث|حلل|قارن|دراسه|استراتيجيه|مقارنه)/
+
 /**
  * Detect a bare rule declaration without an explicit «احفظ»:
  * «لما أقولك أوجمنتين اكتبها على حساب الحاج عبد الفتاح بس متزودش عن 457».
@@ -120,6 +126,14 @@ export function extractSaveRequest(text: string, norm: string): SaveRequest | nu
  */
 export function extractRuleRequest(text: string, norm: string): SaveRequest | null {
   if (QUESTION_SHAPE_RE.test(norm)) return null
+  // R16 fix: a research request («ادرسلي أسعار المنظفات وقولي لو في فرصة
+  // توفير») carries «لو» (condition) + «وقولي» (→ «قول» consequence substring)
+  // and USED to be hijacked into a saved shop rule — killing the deep-research
+  // pass and the owner's tools with it. A research imperative means the owner
+  // is ASKING for work, not declaring a standing law; an explicit
+  // «احفظ/خليك فاكر» still wins because extractSaveRequest runs FIRST in the
+  // harness (?? chain) before this bare-rule detector.
+  if (RESEARCH_IMPERATIVE_RE.test(norm)) return null
   if (!isRuleText(norm) && !RULE_STANDALONE_RE.test(norm)) return null
   if (norm.length > 260) return null
   // A rule never contains an actual quantity-bearing sale command («بعت 5 …»)
