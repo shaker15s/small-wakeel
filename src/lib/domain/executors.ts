@@ -6,7 +6,7 @@ import type { Item, Operation } from '@prisma/client'
 import { db } from '@/lib/db'
 import type { OpType } from '@/lib/types'
 import { arUnit } from '@/lib/verticals'
-import { egp, qty as fmtQty } from '@/lib/format'
+import { egp, qty as fmtQty, arDate } from '@/lib/format'
 import { computeRisk } from './risk'
 
 export interface DraftFields {
@@ -157,6 +157,56 @@ async function cashNet(businessId: string): Promise<number> {
 
 const EXECUTORS: Record<OpType, Executor> = {
   async sale(businessId, ref, p) {
+    // Multi-line basket (chat drafts with 2+ items — one approval, one receipt)
+    const rawLines = Array.isArray(p.lines) ? (p.lines as Record<string, unknown>[]).filter((l) => l && typeof l === 'object') : []
+    if (rawLines.length > 0) {
+      type Res = { itemId: string; name: string; qty: number; unit: string; unitPrice: number; total: number; before: number }
+      const resolved: Res[] = []
+      for (const l of rawLines) {
+        const item = await db.item.findUnique({ where: { id: String(l.itemId) } })
+        if (!item) return { ok: false, checks: [], effects: [], failReason: 'الصنف مش موجود' }
+        const qty = Number(l.qty ?? 0)
+        if (!(qty > 0)) return { ok: false, checks: [], effects: [], failReason: `كمية ${item.name} لازم تكون أكبر من صفر` }
+        // Money from the LIVE item price — the payload is never trusted with money
+        const unitPrice = item.sellPrice
+        resolved.push({ itemId: item.id, name: item.name, qty, unit: item.unit, unitPrice, total: Math.round(qty * unitPrice), before: await stockBefore(item.id) })
+      }
+      for (const r of resolved) {
+        if (r.qty > r.before) {
+          return { ok: false, checks: [], effects: [], failReason: `الكمية المطلوبة من ${r.name} (${fmtQty(r.qty, arUnit(r.unit))}) أكبر من المتاح (${fmtQty(r.before, arUnit(r.unit))})` }
+        }
+      }
+      const total = resolved.reduce((s, r) => s + r.total, 0)
+      if (total <= 0) return { ok: false, checks: [], effects: [], failReason: 'الإجمالي لازم يكون أكبر من صفر' }
+      const paid = Math.min(Number(p.paid ?? total), total)
+      const remaining = total - paid
+      const customerId = p.customerId ? String(p.customerId) : null
+
+      await Promise.all([
+        ...resolved.map((r) => db.item.update({ where: { id: r.itemId }, data: { stockQty: { decrement: Math.round(r.qty) } } })),
+        db.cashEntry.create({ data: { businessId, direction: 'in', amount: paid, reason: `بيع — ${resolved.map((r) => r.name).join(' + ')}`, ref } }),
+        ...(customerId && remaining !== 0 ? [db.customer.update({ where: { id: customerId }, data: { balance: { increment: remaining } } })] : []),
+      ])
+
+      // Verification read-back — per line
+      const checks: { label: string; expected: string; actual: string; pass: boolean }[] = []
+      const effects: { label: string; value: string; tone: 'good' | 'bad' | 'neutral' }[] = []
+      let allOk = true
+      for (const r of resolved) {
+        const after = await stockBefore(r.itemId)
+        const pass = after === r.before - Math.round(r.qty)
+        allOk = allOk && pass
+        checks.push({ label: `مخزون ${r.name} نقص بالمقدار الصح`, expected: fmtQty(r.before - r.qty, arUnit(r.unit)), actual: fmtQty(after, arUnit(r.unit)), pass })
+        effects.push({ label: `مخزون ${r.name}`, value: `${fmtQty(r.before, arUnit(r.unit))} ← ${fmtQty(after, arUnit(r.unit))}`, tone: 'neutral' })
+      }
+      effects.push(
+        { label: 'خزنة (قبض)', value: egp(paid), tone: 'good' },
+        ...(remaining > 0 && customerId ? [{ label: 'رصيد العميل (آجل)', value: egp(remaining), tone: 'bad' as const }] : []),
+      )
+      return { ok: allOk, checks, effects }
+    }
+
+    // Single-line (legacy chat + seed shape)
     const itemId = String(p.itemId)
     const item = await db.item.findUnique({ where: { id: itemId } })
     if (!item) return { ok: false, checks: [], effects: [], failReason: 'الصنف مش موجود' }
@@ -197,6 +247,48 @@ const EXECUTORS: Record<OpType, Executor> = {
   },
 
   async purchase(businessId, ref, p) {
+    // Multi-line basket (chat drafts with 2+ items)
+    const rawLines = Array.isArray(p.lines) ? (p.lines as Record<string, unknown>[]).filter((l) => l && typeof l === 'object') : []
+    if (rawLines.length > 0) {
+      type Res = { itemId: string; name: string; qty: number; unit: string; unitPrice: number; total: number; before: number }
+      const resolved: Res[] = []
+      for (const l of rawLines) {
+        const item = await db.item.findUnique({ where: { id: String(l.itemId) } })
+        if (!item) return { ok: false, checks: [], effects: [], failReason: 'الصنف مش موجود' }
+        const qty = Number(l.qty ?? 0)
+        if (!(qty > 0)) return { ok: false, checks: [], effects: [], failReason: `كمية ${item.name} لازم تكون أكبر من صفر` }
+        const unitPrice = item.costPrice
+        resolved.push({ itemId: item.id, name: item.name, qty, unit: item.unit, unitPrice, total: Math.round(qty * unitPrice), before: await stockBefore(item.id) })
+      }
+      const total = resolved.reduce((s, r) => s + r.total, 0)
+      if (total <= 0) return { ok: false, checks: [], effects: [], failReason: 'الإجمالي لازم يكون أكبر من صفر' }
+      const paid = Math.min(Number(p.paid ?? total), total)
+      const remaining = total - paid
+      const supplierId = p.supplierId ? String(p.supplierId) : null
+
+      await Promise.all([
+        ...resolved.map((r) => db.item.update({ where: { id: r.itemId }, data: { stockQty: { increment: Math.round(r.qty) } } })),
+        db.cashEntry.create({ data: { businessId, direction: 'out', amount: paid, reason: `شرا — ${resolved.map((r) => r.name).join(' + ')}`, ref } }),
+        ...(supplierId && remaining !== 0 ? [db.supplier.update({ where: { id: supplierId }, data: { balance: { increment: remaining } } })] : []),
+      ])
+
+      const checks: { label: string; expected: string; actual: string; pass: boolean }[] = []
+      const effects: { label: string; value: string; tone: 'good' | 'bad' | 'neutral' }[] = []
+      let allOk = true
+      for (const r of resolved) {
+        const after = await stockBefore(r.itemId)
+        const pass = after === r.before + Math.round(r.qty)
+        allOk = allOk && pass
+        checks.push({ label: `مخزون ${r.name} زاد بالمقدار الصح`, expected: fmtQty(r.before + r.qty, arUnit(r.unit)), actual: fmtQty(after, arUnit(r.unit)), pass })
+        effects.push({ label: `مخزون ${r.name}`, value: `${fmtQty(r.before, arUnit(r.unit))} ← ${fmtQty(after, arUnit(r.unit))}`, tone: 'neutral' })
+      }
+      effects.push(
+        { label: 'خزنة (دفع)', value: egp(-paid), tone: 'bad' },
+        ...(remaining > 0 && supplierId ? [{ label: 'المستحق للمورد', value: egp(remaining), tone: 'bad' as const }] : []),
+      )
+      return { ok: allOk, checks, effects }
+    }
+
     const itemId = String(p.itemId)
     const item = await db.item.findUnique({ where: { id: itemId } })
     if (!item) return { ok: false, checks: [], effects: [], failReason: 'الصنف مش موجود' }
@@ -349,10 +441,10 @@ const EXECUTORS: Record<OpType, Executor> = {
     return {
       ok: after.expiresAt?.getTime() === newExpiry.getTime(),
       checks: [
-        { label: 'صلاحية الاشتراك اتمدت', expected: newExpiry.toISOString().slice(0, 10), actual: after.expiresAt?.toISOString().slice(0, 10) ?? '—', pass: after.expiresAt?.getTime() === newExpiry.getTime() },
+        { label: 'صلاحية الاشتراك اتمدت', expected: arDate(newExpiry), actual: after.expiresAt ? arDate(after.expiresAt) : '—', pass: after.expiresAt?.getTime() === newExpiry.getTime() },
       ],
       effects: [
-        { label: `اشتراك ${customer.name}`, value: `${plan} — لحد ${newExpiry.toISOString().slice(0, 10)}`, tone: 'good' },
+        { label: `اشتراك ${customer.name}`, value: `${plan} — لحد ${arDate(newExpiry)}`, tone: 'good' },
         { label: 'خزنة (قبض)', value: egp(paid), tone: 'good' },
         ...(remaining > 0 ? [{ label: 'باقي على العضو', value: egp(remaining), tone: 'bad' as const }] : []),
       ],
@@ -383,7 +475,13 @@ const EXECUTORS: Record<OpType, Executor> = {
     // Inverse effects
     switch (original.type as OpType) {
       case 'sale': {
-        if (op.itemId) await db.item.update({ where: { id: String(op.itemId) }, data: { stockQty: { increment: Math.round(Number(op.qty ?? 0)) } } })
+        // Multi-line basket: restore each line's stock
+        const lines = Array.isArray(op.lines) ? (op.lines as Record<string, unknown>[]).filter((l) => l && typeof l === 'object') : []
+        if (lines.length > 0) {
+          for (const l of lines) {
+            await db.item.update({ where: { id: String(l.itemId) }, data: { stockQty: { increment: Math.round(Number(l.qty ?? 0)) } } })
+          }
+        } else if (op.itemId) await db.item.update({ where: { id: String(op.itemId) }, data: { stockQty: { increment: Math.round(Number(op.qty ?? 0)) } } })
         if (op.paid) await db.cashEntry.create({ data: { businessId, direction: 'out', amount: Number(op.paid), reason: `عكس بيع ${originalRef}`, ref } })
         if (op.customerId && Number(op.total ?? 0) - Number(op.paid ?? 0) !== 0) {
           await db.customer.update({ where: { id: String(op.customerId) }, data: { balance: { decrement: Number(op.total) - Number(op.paid) } } })
@@ -391,7 +489,12 @@ const EXECUTORS: Record<OpType, Executor> = {
         break
       }
       case 'purchase': {
-        if (op.itemId) await db.item.update({ where: { id: String(op.itemId) }, data: { stockQty: { decrement: Math.round(Number(op.qty ?? 0)) } } })
+        const lines = Array.isArray(op.lines) ? (op.lines as Record<string, unknown>[]).filter((l) => l && typeof l === 'object') : []
+        if (lines.length > 0) {
+          for (const l of lines) {
+            await db.item.update({ where: { id: String(l.itemId) }, data: { stockQty: { decrement: Math.round(Number(l.qty ?? 0)) } } })
+          }
+        } else if (op.itemId) await db.item.update({ where: { id: String(op.itemId) }, data: { stockQty: { decrement: Math.round(Number(op.qty ?? 0)) } } })
         if (op.paid) await db.cashEntry.create({ data: { businessId, direction: 'in', amount: Number(op.paid), reason: `عكس شرا ${originalRef}`, ref } })
         if (op.supplierId && Number(op.total ?? 0) - Number(op.paid ?? 0) !== 0) {
           await db.supplier.update({ where: { id: String(op.supplierId) }, data: { balance: { decrement: Number(op.total) - Number(op.paid) } } })

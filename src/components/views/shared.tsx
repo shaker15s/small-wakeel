@@ -8,11 +8,12 @@
 
 import type { LucideIcon } from 'lucide-react'
 import { AlertCircle, RefreshCw } from 'lucide-react'
+import { motion, useReducedMotion } from 'framer-motion'
 
+import { AgentAvatar } from '@/components/chat/AgentAvatar'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
-import { Skeleton } from '@/components/ui/skeleton'
 import type { OpStatus, OpType, Risk } from '@/lib/types'
 import type { ViewKey } from '@/lib/store'
 import { VIEW_LABELS } from '@/lib/store'
@@ -205,23 +206,30 @@ export function KpiCard({
   icon: Icon,
   tone = 'navy',
   title,
+  index,
 }: {
   label: string
   value: React.ReactNode
   icon: LucideIcon
   tone?: KpiTone
   title?: string
+  /** position in the grid — staggers the enter animation by 40ms */
+  index?: number
 }) {
   return (
     <div
-      className="card-enter flex h-24 flex-col justify-between rounded-xl border bg-card p-4 shadow-sm"
+      className={cn(
+        'chip-lift group flex h-24 flex-col justify-between rounded-xl border bg-card p-4 shadow-sm',
+        index != null ? 'list-enter' : 'card-enter',
+      )}
+      style={index != null ? { animationDelay: `${index * 40}ms` } : undefined}
       title={title}
     >
       <div className="flex items-center justify-between gap-2">
         <span className="text-xs font-medium text-muted-foreground">{label}</span>
         <span
           className={cn(
-            'flex size-7 shrink-0 items-center justify-center rounded-lg',
+            'icon-wiggle flex size-7 shrink-0 items-center justify-center rounded-lg transition-transform duration-200 group-hover:scale-110',
             KPI_ICON_BG[tone],
           )}
         >
@@ -242,9 +250,9 @@ export function KpiCard({
 
 export function LoadingKpis({ count = 4 }: { count?: number }) {
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4" aria-busy="true" aria-label="بيتحمّل">
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4" aria-busy="true" aria-label="بيتحمّل">
       {Array.from({ length: count }).map((_, i) => (
-        <Skeleton key={i} className="h-24 rounded-xl" />
+        <div key={i} className="skel h-24 rounded-xl" />
       ))}
     </div>
   )
@@ -285,26 +293,57 @@ export function EmptyState({
   icon: Icon,
   title = 'مفيش لحد دلوقتي',
   hint,
+  mascot = false,
   className,
 }: {
   icon: LucideIcon
   title?: string
   hint?: string
+  /** render the وكيل mascot (idle) instead of the icon bubble */
+  mascot?: boolean
   className?: string
 }) {
+  const reduced = useReducedMotion()
   return (
-    <div
+    <motion.div
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.22, ease: 'easeOut' }}
       className={cn(
         'flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed bg-muted/30 px-4 py-8 text-center',
         className,
       )}
     >
-      <span className="flex size-11 items-center justify-center rounded-full bg-accent text-wakil-amber">
-        <Icon className="size-5" aria-hidden />
-      </span>
+      {mascot ? (
+        <MascotBubble />
+      ) : (
+        <motion.span
+          animate={reduced ? undefined : { y: [0, -3, 0] }}
+          transition={{ duration: 3, repeat: Infinity, ease: 'easeInOut' }}
+          className="flex size-11 items-center justify-center rounded-full bg-accent text-wakil-amber"
+        >
+          <Icon className="size-5" aria-hidden />
+        </motion.span>
+      )}
       <p className="text-sm font-medium">{title}</p>
-      {hint && <p className="max-w-xs text-xs leading-relaxed text-muted-foreground">{hint}</p>}
-    </div>
+      <p className="max-w-xs text-xs leading-relaxed text-muted-foreground">
+        {hint ?? 'قول لوكيل في المحادثة وهو يجهزهالك'}
+      </p>
+    </motion.div>
+  )
+}
+
+/** وكيل himself, idling in the empty state — a gentle float, no spin. */
+function MascotBubble() {
+  const reduced = useReducedMotion()
+  return (
+    <motion.span
+      animate={reduced ? undefined : { y: [0, -4, 0] }}
+      transition={{ duration: 2.6, repeat: Infinity, ease: 'easeInOut' }}
+      className="flex items-center justify-center rounded-full"
+    >
+      <AgentAvatar state="idle" size="sm" />
+    </motion.span>
   )
 }
 
@@ -312,29 +351,63 @@ export function EmptyState({
 // Section card — titled block used across views
 // ---------------------------------------------------------------------------
 
+const ACCENT_HAIRLINE: Record<Accent, string> = {
+  amber: 'from-wakil-amber/70',
+  teal: 'from-wakil-teal/70',
+  danger: 'from-destructive/70',
+}
+
+export type Accent = 'amber' | 'teal' | 'danger'
+
 export function SectionCard({
   title,
+  subtitle,
   icon: Icon,
   action,
+  accent,
   children,
   className,
 }: {
   title: string
+  /** optional muted line under the title (e.g. radar exclusivity note) */
+  subtitle?: string
   icon?: LucideIcon
   action?: React.ReactNode
+  /** optional gradient hairline on the card's top edge */
+  accent?: Accent
   children: React.ReactNode
   className?: string
 }) {
   return (
-    <section className={cn('card-enter rounded-xl border bg-card shadow-sm', className)}>
-      <div className="flex items-center justify-between gap-2 border-b px-4 py-3 sm:px-5">
-        <div className="flex min-w-0 items-center gap-2">
-          {Icon && <Icon className="size-4 shrink-0 text-wakil-amber" aria-hidden />}
-          <h2 className="truncate text-sm font-semibold">{title}</h2>
+    <section
+      className={cn(
+        'card-enter card-sheen rounded-xl border bg-card shadow-sm',
+        accent && 'relative overflow-hidden',
+        className,
+      )}
+    >
+      {accent && (
+        <span
+          aria-hidden
+          className={cn(
+            'pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-l to-transparent',
+            ACCENT_HAIRLINE[accent],
+          )}
+        />
+      )}
+      <div className="flex items-start justify-between gap-2 border-b px-4 py-3 sm:px-6">
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-2">
+            {Icon && <Icon className="size-4 shrink-0 text-wakil-amber" aria-hidden />}
+            <h2 className="truncate text-sm font-semibold">{title}</h2>
+          </div>
+          {subtitle && (
+            <p className="mt-0.5 ps-6 text-xs leading-relaxed text-muted-foreground">{subtitle}</p>
+          )}
         </div>
         {action}
       </div>
-      <div className="p-4 sm:p-5">{children}</div>
+      <div className="p-4 sm:p-6">{children}</div>
     </section>
   )
 }

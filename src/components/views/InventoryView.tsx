@@ -48,7 +48,12 @@ function ItemBadges({ it }: { it: ItemDTO }) {
   return (
     <span className="flex flex-wrap items-center gap-1">
       {isLow(it) && <Badge className="bg-wakil-amber/15 text-wakil-amber">ناقص</Badge>}
-      {exp === 'expired' && <Badge variant="destructive">منتهية</Badge>}
+      {exp === 'expired' && (
+        <Badge variant="destructive">
+          <span className="me-1 size-1.5 animate-pulse rounded-full bg-current" aria-hidden />
+          منتهية
+        </Badge>
+      )}
       {exp === 'soon' && <Badge className="bg-wakil-amber/15 text-wakil-amber">قربت</Badge>}
     </span>
   )
@@ -127,7 +132,7 @@ export default function InventoryView({ businessId }: ViewProps) {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="دوّر على صنف بالاسم أو اللقب..."
-            className="h-11 ps-9"
+            className="h-11 ps-9 focus-visible:border-wakil-amber/50 focus-visible:ring-wakil-amber/40"
             aria-label="بحث في المخزون"
             inputMode="search"
           />
@@ -190,7 +195,10 @@ export default function InventoryView({ businessId }: ViewProps) {
                   return (
                     <TableRow
                       key={it.id}
-                      className={cn(low && 'bg-wakil-amber-soft/50 hover:bg-wakil-amber-soft/60')}
+                      className={cn(
+                        'hover:bg-muted/40',
+                        low && 'bg-wakil-amber-soft/50 hover:bg-wakil-amber-soft/60',
+                      )}
                     >
                       <TableCell className="max-w-[220px] py-2.5">
                         <span className="flex flex-wrap items-center gap-1.5">
@@ -230,12 +238,13 @@ export default function InventoryView({ businessId }: ViewProps) {
 
           {/* كروت — موبايل */}
           <ul className="divide-y md:hidden" aria-label="قائمة الأصناف">
-            {filtered.map((it) => {
+            {filtered.map((it, i) => {
               const low = isLow(it)
               return (
                 <li
                   key={it.id}
-                  className={cn('space-y-2 p-4', low && 'bg-wakil-amber-soft/50')}
+                  className={cn('list-enter space-y-2 p-4', low && 'bg-wakil-amber-soft/50')}
+                  style={{ animationDelay: `${Math.min(i, 8) * 40}ms` }}
                 >
                   <div className="flex items-start justify-between gap-2">
                     <span className="flex min-w-0 flex-wrap items-center gap-1.5">

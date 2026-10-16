@@ -128,8 +128,14 @@ export function serializeMemory(m: AgentMemory): MemoryDTO {
   return {
     id: m.id,
     kind: m.kind as MemoryDTO['kind'],
+    category: m.category ?? 'general',
     text: m.text,
+    entityRef: m.entityRef ?? null,
+    confidence: m.confidence ?? 80,
+    usageCount: m.usageCount ?? 0,
+    active: m.active ?? true,
     createdAt: m.createdAt.toISOString(),
+    updatedAt: (m.updatedAt ?? m.createdAt).toISOString(),
   }
 }
 

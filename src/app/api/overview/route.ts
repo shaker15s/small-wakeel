@@ -181,6 +181,37 @@ export async function GET(req: Request) {
       })
     }
 
+    // — Gym: memberships expiring within 5 days or already expired (proactive)
+    if (business.type === 'gym') {
+      const endingMembers = customers
+        .filter((c) => c.expiresAt !== null)
+        .map((c) => ({ name: c.name, daysLeft: daysFromTodayCairo(c.expiresAt!) }))
+        .filter((m) => m.daysLeft <= 5)
+        .sort((a, b) => a.daysLeft - b.daysLeft)
+        .slice(0, 4)
+      for (const m of endingMembers) {
+        if (m.daysLeft < 0) {
+          alerts.push({
+            level: 'danger',
+            text: `اشتراك ${m.name} خلص من ${arNum(Math.abs(m.daysLeft))} يوم`,
+            action: { label: 'شوف الحسابات', view: 'accounts' },
+          })
+        } else if (m.daysLeft === 0) {
+          alerts.push({
+            level: 'warning',
+            text: `اشتراك ${m.name} آخر يوم النهاردة`,
+            action: { label: 'شوف الحسابات', view: 'accounts' },
+          })
+        } else {
+          alerts.push({
+            level: 'warning',
+            text: `اشتراك ${m.name} بيخلص بعد ${arNum(m.daysLeft)} يوم`,
+            action: { label: 'شوف الحسابات', view: 'accounts' },
+          })
+        }
+      }
+    }
+
     const dto: OverviewDTO = {
       cash,
       today,

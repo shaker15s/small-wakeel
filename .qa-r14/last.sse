@@ -1,0 +1,176 @@
+data: {"event":"start","conversationId":"cmvb502xc0073or3omzf5qje3","messageId":"cmvb5j73300efor3o87li7vuo"}
+
+data: {"event":"thinking","steps":[{"label":"بفهم طلبك","detail":"بحلل الجملة وأستخرج القصد والحقول","state":"active","icon":"understand"},{"label":"فتكرت من ذاكرتي","detail":"بحب افضل الخزنة قبل المغرب","state":"done","icon":"verify"},{"label":"بدوّر في سجلك","detail":"بدوّر على الأصناف والأسماء الحقيقية","state":"pending","icon":"search"},{"label":"بتحقق من الأرقام","detail":"بحسب من الأسعار الفعلية مش من دماغي","state":"pending","icon":"verify"},{"label":"بجهّز الرد","detail":"","state":"pending","icon":"plan"}]}
+
+data: {"event":"thinking","steps":[{"label":"بفهم طلبك","detail":"فهمت الطلب بالقواعد المحلية (الموديل مش متاح)","state":"done","icon":"understand"},{"label":"فتكرت من ذاكرتي","detail":"بحب افضل الخزنة قبل المغرب","state":"done","icon":"verify"},{"label":"بدوّر في سجلك","detail":"بدوّر على الأصناف والأسماء الحقيقية","state":"pending","icon":"search"},{"label":"بتحقق من الأرقام","detail":"بحسب من الأسعار الفعلية مش من دماغي","state":"pending","icon":"verify"},{"label":"بجهّز الرد","detail":"","state":"pending","icon":"plan"}]}
+
+data: {"event":"thinking","steps":[{"label":"بفهم طلبك","detail":"سؤال عن الشغل — بجمع سياقك الحقيقي","state":"done","icon":"understand"},{"label":"فتكرت من ذاكرتي","detail":"بحب افضل الخزنة قبل المغرب","state":"done","icon":"verify"},{"label":"بدوّر في سجلك","detail":"بدوّر على الأصناف والأسماء الحقيقية","state":"pending","icon":"search"},{"label":"بتحقق من الأرقام","detail":"بحسب من الأسعار الفعلية مش من دماغي","state":"pending","icon":"verify"},{"label":"بجهّز الرد","detail":"","state":"pending","icon":"plan"}]}
+
+data: {"event":"thinking","steps":[{"label":"بفهم طلبك","detail":"سؤال عن الشغل — بجمع سياقك الحقيقي","state":"done","icon":"understand"},{"label":"فتكرت من ذاكرتي","detail":"بحب افضل الخزنة قبل المغرب","state":"done","icon":"verify"},{"label":"بدوّر في سجلك","detail":"بجمع أرقام شغلك من السجل","state":"done","icon":"search"},{"label":"بتحقق من الأرقام","detail":"بحسب من الأسعار الفعلية مش من دماغي","state":"pending","icon":"verify"},{"label":"بجهّز الرد","detail":"","state":"pending","icon":"plan"}]}
+
+data: {"event":"thinking","steps":[{"label":"بفهم طلبك","detail":"سؤال عن الشغل — بجمع سياقك الحقيقي","state":"done","icon":"understand"},{"label":"فتكرت من ذاكرتي","detail":"بحب افضل الخزنة قبل المغرب","state":"done","icon":"verify"},{"label":"بدوّر في سجلك","detail":"بجمع أرقام شغلك من السجل","state":"done","icon":"search"},{"label":"بتحقق من الأرقام","detail":"الأرقام من قاعدة البيانات بس — مفيش تخمين","state":"done","icon":"verify"},{"label":"بجهّز الرد","detail":"","state":"pending","icon":"plan"}]}
+
+data: {"event":"delta","text":"مع"}
+
+data: {"event":"delta","text":"لش"}
+
+data: {"event":"delta","text":" ا"}
+
+data: {"event":"delta","text":"لن"}
+
+data: {"event":"delta","text":"ت "}
+
+data: {"event":"delta","text":"شك"}
+
+data: {"event":"delta","text":"له"}
+
+data: {"event":"delta","text":" ت"}
+
+data: {"event":"delta","text":"قي"}
+
+data: {"event":"delta","text":"ل "}
+
+data: {"event":"delta","text":"دل"}
+
+data: {"event":"delta","text":"وق"}
+
+data: {"event":"delta","text":"تي"}
+
+data: {"event":"delta","text":" \ud83d"}
+
+data: {"event":"delta","text":"\ude05 "}
+
+data: {"event":"delta","text":"— "}
+
+data: {"event":"delta","text":"سؤ"}
+
+data: {"event":"delta","text":"ال"}
+
+data: {"event":"delta","text":"ك "}
+
+data: {"event":"delta","text":"مه"}
+
+data: {"event":"delta","text":"م "}
+
+data: {"event":"delta","text":"وم"}
+
+data: {"event":"delta","text":"ش "}
+
+data: {"event":"delta","text":"هض"}
+
+data: {"event":"delta","text":"يع"}
+
+data: {"event":"delta","text":"ه."}
+
+data: {"event":"delta","text":" ج"}
+
+data: {"event":"delta","text":"رّ"}
+
+data: {"event":"delta","text":"ب "}
+
+data: {"event":"delta","text":"تب"}
+
+data: {"event":"delta","text":"عت"}
+
+data: {"event":"delta","text":"له"}
+
+data: {"event":"delta","text":" ت"}
+
+data: {"event":"delta","text":"ان"}
+
+data: {"event":"delta","text":"ي "}
+
+data: {"event":"delta","text":"بع"}
+
+data: {"event":"delta","text":"د "}
+
+data: {"event":"delta","text":"شو"}
+
+data: {"event":"delta","text":"ية"}
+
+data: {"event":"delta","text":"، "}
+
+data: {"event":"delta","text":"أو"}
+
+data: {"event":"delta","text":" ا"}
+
+data: {"event":"delta","text":"سأ"}
+
+data: {"event":"delta","text":"لن"}
+
+data: {"event":"delta","text":"ي "}
+
+data: {"event":"delta","text":"حا"}
+
+data: {"event":"delta","text":"جة"}
+
+data: {"event":"delta","text":" م"}
+
+data: {"event":"delta","text":"ن "}
+
+data: {"event":"delta","text":"ال"}
+
+data: {"event":"delta","text":"شغ"}
+
+data: {"event":"delta","text":"ل "}
+
+data: {"event":"delta","text":"زي"}
+
+data: {"event":"delta","text":": "}
+
+data: {"event":"delta","text":"«ب"}
+
+data: {"event":"delta","text":"عت"}
+
+data: {"event":"delta","text":" 1"}
+
+data: {"event":"delta","text":"0 "}
+
+data: {"event":"delta","text":"جر"}
+
+data: {"event":"delta","text":"ام"}
+
+data: {"event":"delta","text":" ع"}
+
+data: {"event":"delta","text":"ود"}
+
+data: {"event":"delta","text":" ك"}
+
+data: {"event":"delta","text":"مب"}
+
+data: {"event":"delta","text":"ود"}
+
+data: {"event":"delta","text":"ي»"}
+
+data: {"event":"delta","text":" ·"}
+
+data: {"event":"delta","text":" «"}
+
+data: {"event":"delta","text":"سج"}
+
+data: {"event":"delta","text":"ّل"}
+
+data: {"event":"delta","text":" ب"}
+
+data: {"event":"delta","text":"يع"}
+
+data: {"event":"delta","text":" ر"}
+
+data: {"event":"delta","text":"بع"}
+
+data: {"event":"delta","text":" ك"}
+
+data: {"event":"delta","text":"يل"}
+
+data: {"event":"delta","text":"و "}
+
+data: {"event":"delta","text":"كر"}
+
+data: {"event":"delta","text":"كد"}
+
+data: {"event":"delta","text":"يه"}
+
+data: {"event":"delta","text":"»."}
+
+data: {"event":"done","messageId":"cmvb5j80500ejor3obr7nl3pg","modelLabel":"عميق مفكّر · glm-4.6"}
+

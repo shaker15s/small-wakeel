@@ -2,21 +2,26 @@
 
 // وكيل — شاشة «اليوم»: لمحة سريعة عن الخزنة والمبيعات والتنبيهات والاعتمادات.
 
+import { useCallback, useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
 import {
   Activity,
   CalendarClock,
   CheckCircle2,
   ChevronLeft,
+  CircleAlert,
   Clock,
   Info,
+  Loader2,
   MessageSquare,
   PackageCheck,
   PackageSearch,
+  ShieldAlert,
   ShieldCheck,
   ShoppingCart,
   TriangleAlert,
   Wallet,
+  X,
 } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
@@ -25,7 +30,10 @@ import { api } from '@/lib/api'
 import { arDate, egp, qty as fmtQty } from '@/lib/format'
 import { arUnit } from '@/lib/verticals'
 import { QUERY_KEYS } from '@/lib/store'
-import { useQuery } from '@tanstack/react-query'
+import type { ViewKey } from '@/lib/store'
+import type { RadarInsightDTO } from '@/lib/types'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useToast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 import {
   EmptyState,
@@ -44,26 +52,65 @@ import {
 const ALERT_STYLE = {
   danger: {
     icon: TriangleAlert,
-    iconClass: 'text-destructive',
-    rowClass: 'border-destructive/40 bg-destructive/5',
+    circleClass: 'bg-destructive/10 text-destructive',
+    rowClass: 'border-destructive/40 bg-destructive/5 hover:bg-destructive/10',
   },
   warning: {
     icon: TriangleAlert,
-    iconClass: 'text-wakil-amber',
-    rowClass: 'border-wakil-amber/35 bg-accent/60',
+    circleClass: 'bg-wakil-amber/15 text-wakil-amber',
+    rowClass: 'border-wakil-amber/35 bg-accent/60 hover:bg-accent',
   },
   info: {
     icon: Info,
-    iconClass: 'text-wakil-navy',
-    rowClass: 'border-wakil-navy/25 bg-muted/40',
+    circleClass: 'bg-wakil-navy/10 text-wakil-navy',
+    rowClass: 'border-wakil-navy/25 bg-muted/40 hover:bg-muted/70',
   },
 } as const
 
 export default function TodayView({ businessId, userId, onNavigate }: ViewProps) {
+  const { toast } = useToast()
+  const queryClient = useQueryClient()
+  const [busyOpId, setBusyOpId] = useState<string | null>(null)
   const { data, isPending, isError, error, refetch } = useQuery({
     queryKey: QUERY_KEYS.overview(businessId, userId),
     queryFn: () => api.overview(businessId, userId),
   })
+
+  // Approve/reject straight from the Today card — ops that never went through
+  // chat (e.g. seeded drafts) used to deep-link to a chat with no card in it:
+  // a dead end. R3 keeps the chat link because it needs a documented reason
+  // (the chat flow collects it).
+  const decide = useCallback(
+    async (opId: string, action: 'approve' | 'reject', ref: string) => {
+      if (busyOpId) return
+      setBusyOpId(opId)
+      try {
+        const res = await api.confirmOperation(opId, action, userId)
+        toast({
+          title: action === 'approve' ? (res.outcome?.ok ? 'تم — موثّق ومتحقق' : 'العملية فشلت بأمان') : 'اتلغت المسودة',
+          description:
+            action === 'approve'
+              ? res.outcome?.ok
+                ? `${res.operation.ref} — ${res.operation.summary}`
+                : (res.outcome?.failReason ?? 'راجع التفاصيل في السجل')
+              : `${res.operation.ref} اتلغت بلا أي أثر`,
+          variant: action === 'approve' && !res.outcome?.ok ? 'destructive' : 'default',
+        })
+        void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.overview(businessId, userId) })
+        void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.operations(businessId) })
+        void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.items(businessId) })
+      } catch (err) {
+        toast({
+          title: action === 'approve' ? 'مشكلة في الاعتماد' : 'مشكلة',
+          description: err instanceof Error ? err.message : 'جرّب تاني',
+          variant: 'destructive',
+        })
+      } finally {
+        setBusyOpId(null)
+      }
+    },
+    [busyOpId, userId, businessId, toast, queryClient],
+  )
 
   if (isError) {
     return (
@@ -94,22 +141,25 @@ export default function TodayView({ businessId, userId, onNavigate }: ViewProps)
       {isPending || !data ? (
         <LoadingKpis />
       ) : (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4">
           <KpiCard
+            index={0}
             label="رصيد الخزنة"
             value={egp(data.cash.net)}
             icon={Wallet}
             tone={data.cash.net >= 0 ? 'teal' : 'red'}
             title={`افتتاحي ${egp(data.cash.opening)} — داخل ${egp(data.cash.in)} — خارج ${egp(data.cash.out)}`}
           />
-          <KpiCard label="مبيعات اليوم" value={egp(data.today.sales)} icon={ShoppingCart} tone="navy" />
+          <KpiCard index={1} label="مبيعات اليوم" value={egp(data.today.sales)} icon={ShoppingCart} tone="navy" />
           <KpiCard
+            index={2}
             label="عمليات اليوم"
             value={arNum(data.today.opsCount)}
             icon={Activity}
             tone="navy"
           />
           <KpiCard
+            index={3}
             label="مستنيات اعتماد"
             value={arNum(pendingOps.length)}
             icon={Clock}
@@ -117,6 +167,9 @@ export default function TodayView({ businessId, userId, onNavigate }: ViewProps)
           />
         </div>
       )}
+
+      {/* رادار الأمانة — صاحب المنشأة بس (سوبر باور) */}
+      <RadarDigest businessId={businessId} userId={userId} onNavigate={onNavigate} />
 
       {/* تنبيهات */}
       <SectionCard title="تنبيهات" icon={ShieldCheck}>
@@ -139,7 +192,15 @@ export default function TodayView({ businessId, userId, onNavigate }: ViewProps)
               const view = safeView(a.action?.view)
               const content = (
                 <>
-                  <Icon className={cn('size-4 shrink-0', style.iconClass)} aria-hidden />
+                  <span
+                    className={cn(
+                      'flex size-7 shrink-0 items-center justify-center rounded-full',
+                      style.circleClass,
+                      a.level === 'danger' && 'pulse-ring',
+                    )}
+                  >
+                    <Icon className="size-4" aria-hidden />
+                  </span>
                   <p className="min-w-0 flex-1 text-sm leading-relaxed">{a.text}</p>
                   {view && (
                     <>
@@ -152,13 +213,13 @@ export default function TodayView({ businessId, userId, onNavigate }: ViewProps)
                 </>
               )
               return (
-                <li key={i}>
+                <li key={i} className="list-enter" style={{ animationDelay: `${Math.min(i, 8) * 40}ms` }}>
                   {view ? (
                     <button
                       type="button"
                       onClick={() => onNavigate?.(view)}
                       className={cn(
-                        'press flex w-full items-center gap-2.5 rounded-lg border px-3 py-2.5 text-start',
+                        'press focus-warm flex w-full items-center gap-2.5 rounded-lg border px-3 py-2.5 text-start transition-colors',
                         style.rowClass,
                       )}
                     >
@@ -204,10 +265,11 @@ export default function TodayView({ businessId, userId, onNavigate }: ViewProps)
           />
         ) : (
           <ul className="space-y-2.5">
-            {pendingOps.map((op) => (
+            {pendingOps.map((op, i) => (
               <li
                 key={op.id}
-                className="card-enter rounded-xl border border-wakil-amber/30 bg-accent/50 p-3.5"
+                style={{ animationDelay: `${Math.min(i, 6) * 40}ms` }}
+                className="card-enter rounded-xl border border-wakil-amber/30 bg-accent/50 p-3.5 transition-colors hover:border-primary/30"
               >
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="num font-mono text-xs font-semibold text-muted-foreground">
@@ -221,14 +283,37 @@ export default function TodayView({ businessId, userId, onNavigate }: ViewProps)
                   <span className="text-xs text-muted-foreground">
                     {op.userName ?? '—'} · {op.risk === 'R3' ? 'محتاجة سبب موثق' : 'محتاجة اعتمادك'}
                   </span>
-                  {onNavigate && (
-                    <Button
-                      size="sm"
-                      className="min-h-10"
-                      onClick={() => onNavigate('chat')}
-                    >
-                      <MessageSquare aria-hidden /> راجعها في المحادثة
-                    </Button>
+                  {op.risk === 'R3' ? (
+                    onNavigate && (
+                      <Button size="sm" className="min-h-10" onClick={() => onNavigate('chat')}>
+                        <MessageSquare aria-hidden /> راجعها في المحادثة
+                      </Button>
+                    )
+                  ) : (
+                    <div className="flex items-center gap-1.5">
+                      <Button
+                        size="sm"
+                        className="min-h-10"
+                        disabled={busyOpId === op.id}
+                        onClick={() => void decide(op.id, 'approve', op.ref)}
+                      >
+                        {busyOpId === op.id ? (
+                          <Loader2 className="animate-spin" aria-hidden />
+                        ) : (
+                          <ShieldCheck aria-hidden />
+                        )}
+                        اعتماد
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="min-h-10"
+                        disabled={busyOpId === op.id}
+                        onClick={() => void decide(op.id, 'reject', op.ref)}
+                      >
+                        <X aria-hidden /> رفض
+                      </Button>
+                    </div>
                   )}
                 </div>
               </li>
@@ -326,5 +411,165 @@ function CountChip({ count }: { count: number }) {
     <span className="num rounded-full bg-wakil-amber/15 px-2.5 py-0.5 text-xs font-semibold text-wakil-amber tabular-nums">
       {arNum(count)}
     </span>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// رادار الأمانة — owner-only fraud radar digest (superpower feature).
+// Endpoint /api/radar is owned by R14-brain; until it lands we stay silent:
+// fetch failure / empty payload / non-owner → the section never renders.
+// ---------------------------------------------------------------------------
+
+const RADAR_LEVEL: Record<RadarInsightDTO['level'], { icon: typeof ShieldAlert; circle: string; pulse: boolean }> = {
+  danger: { icon: CircleAlert, circle: 'bg-destructive/10 text-destructive', pulse: true },
+  warning: { icon: TriangleAlert, circle: 'bg-wakil-amber/15 text-wakil-amber', pulse: false },
+  info: { icon: Info, circle: 'bg-wakil-navy/10 text-wakil-navy', pulse: false },
+}
+
+function normalizeRadar(raw: RadarInsightDTO): RadarInsightDTO {
+  const level = (['info', 'warning', 'danger'] as const).includes(raw.level) ? raw.level : 'info'
+  return {
+    id: String(raw.id ?? Math.random()),
+    level,
+    title: typeof raw.title === 'string' ? raw.title : '',
+    detail: typeof raw.detail === 'string' ? raw.detail : '',
+    evidence: Array.isArray(raw.evidence)
+      ? raw.evidence.filter((e) => e && typeof e.label === 'string')
+      : [],
+  }
+}
+
+function RadarDigest({
+  businessId,
+  userId,
+  onNavigate,
+}: {
+  businessId: string
+  userId: string
+  onNavigate?: (v: ViewKey) => void
+}) {
+  // owner gate — role comes from the bootstrap cache (shared with AppShell)
+  const { data: bootstrap } = useQuery({
+    queryKey: ['bootstrap'],
+    queryFn: () => api.bootstrap(),
+    staleTime: 60_000,
+  })
+  const isOwner = useMemo(() => {
+    const b = bootstrap?.businesses.find((x) => x.id === businessId)
+    return b?.users.find((u) => u.id === userId)?.role === 'owner'
+  }, [bootstrap, businessId, userId])
+
+  const { data, isPending } = useQuery({
+    queryKey: QUERY_KEYS.radar(businessId),
+    queryFn: async (): Promise<RadarInsightDTO[]> => {
+      const res = await fetch(`/api/radar?businessId=${businessId}`, { cache: 'no-store' })
+      if (!res.ok) throw new Error(`radar ${res.status}`)
+      const body = (await res.json()) as RadarInsightDTO[] | { insights?: RadarInsightDTO[] }
+      return Array.isArray(body) ? body : (body.insights ?? [])
+    },
+    enabled: isOwner,
+    retry: false,
+    staleTime: 30_000,
+  })
+
+  if (!isOwner) return null
+
+  const insights = (data ?? []).map(normalizeRadar)
+
+  if (isPending) {
+    return (
+      <SectionCard title="رادار الأمانة" icon={ShieldAlert} accent="danger">
+        <div className="space-y-2" aria-busy="true">
+          <Skeleton className="h-14 w-full" />
+          <Skeleton className="h-14 w-5/6" />
+        </div>
+      </SectionCard>
+    )
+  }
+
+  if (insights.length === 0) return null
+
+  return (
+    <SectionCard
+      title="رادار الأمانة"
+      icon={ShieldAlert}
+      subtitle="مراقبة لصالحك — محدش شايفها غيرك"
+      accent="danger"
+      action={
+        <span className="badge-breathe inline-flex items-center gap-1.5 rounded-full border border-destructive/25 bg-destructive/5 px-2.5 py-1 text-[10px] font-semibold text-destructive">
+          <span className="size-1.5 rounded-full bg-destructive" aria-hidden />
+          مراقبة حية
+        </span>
+      }
+    >
+      {/* shield watermark — the exclusive feel */}
+      <span
+        aria-hidden
+        className="pointer-events-none absolute -end-8 -top-8 hidden size-32 text-destructive/5 sm:block dark:text-destructive/10"
+      >
+        <ShieldAlert className="size-full" strokeWidth={1.5} />
+      </span>
+      <ul className="space-y-2" aria-label="رصد رادار الأمانة">
+        {insights.map((ins, i) => {
+          const meta = RADAR_LEVEL[ins.level] ?? RADAR_LEVEL.info
+          const Icon = meta.icon
+          return (
+            <li
+              key={ins.id}
+              className="list-enter press-deep rounded-xl border p-3.5 transition-colors hover:bg-muted/40"
+              style={{ animationDelay: `${Math.min(i, 8) * 40}ms` }}
+            >
+              <div className="flex items-start gap-3">
+                <span
+                  className={cn(
+                    'mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full',
+                    meta.circle,
+                    meta.pulse && 'pulse-ring',
+                  )}
+                >
+                  <Icon className="size-4" aria-hidden />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium">{ins.title}</p>
+                  <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">{ins.detail}</p>
+                  {ins.evidence.length > 0 && (
+                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                      {ins.evidence.map((ev, j) => {
+                        const view = safeView(ev.view)
+                        const chip = (
+                          <>
+                            {ev.ref && (
+                              <span className="num font-mono text-[10px] tabular-nums">{ev.ref}</span>
+                            )}
+                            <span className="text-[11px]">{ev.label}</span>
+                          </>
+                        )
+                        return view && onNavigate ? (
+                          <button
+                            key={j}
+                            type="button"
+                            onClick={() => onNavigate(view)}
+                            className="press focus-warm inline-flex min-h-9 items-center gap-1.5 rounded-full border border-border bg-card px-2.5 transition-colors hover:border-wakil-amber/40 hover:bg-accent"
+                          >
+                            {chip}
+                          </button>
+                        ) : (
+                          <span
+                            key={j}
+                            className="inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-2.5"
+                          >
+                            {chip}
+                          </span>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </li>
+          )
+        })}
+      </ul>
+    </SectionCard>
   )
 }

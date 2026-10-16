@@ -1,5 +1,9 @@
 // وكيل — Model Gateway: one streaming interface over built-in (z-ai SDK) and
 // external BYO OpenAI-compatible providers. Server-side only.
+//
+// External calls are HARD-TIMEOUT-capped so a slow provider can never hang the
+// agent turn: intent extraction 20s, reply streaming 60s. On timeout the
+// harness falls back to its rule-based / deterministic paths.
 
 import ZAI from 'z-ai-web-dev-sdk'
 import { db } from '@/lib/db'
@@ -30,7 +34,9 @@ export const BUILTIN_MODELS: ModelInfo[] = [
 
 export function modelLabelFor(model: ModelInfo): string {
   if (model.source === 'builtin') {
-    return `${model.label} · glm-4.6`
+    // air is glm-4.5-air — labeling it glm-4.6 (the deep model) confuses owners
+    // comparing the chat badge against the picker sub-label.
+    return `${model.label} · ${model.key === 'builtin-air' ? 'glm-4.5-air' : 'glm-4.6'}`
   }
   return `${model.label} · ${model.remoteModel} · مزوّد خارجي`
 }
@@ -60,6 +66,8 @@ export async function resolveModel(modelKey: string | null | undefined): Promise
 async function* streamBuiltin(messages: LLMMessage[]): AsyncGenerator<StreamChunk> {
   const zai = await ZAI.create()
   // SDK convention: system prompt goes as 'assistant' role lead message.
+  // NOTE: the API rejects a lone assistant message (code 1214) — callers must
+  // always include a trailing user turn.
   const sdkMessages = messages.map((m) => ({
     role: m.role === 'system' ? 'assistant' : m.role,
     content: m.content,
@@ -68,11 +76,44 @@ async function* streamBuiltin(messages: LLMMessage[]): AsyncGenerator<StreamChun
     messages: sdkMessages,
     stream: true,
   } as never)
-  for await (const chunk of stream as AsyncIterable<{ choices?: { delta?: { content?: string } }[] }>) {
-    const text = chunk.choices?.[0]?.delta?.content
-    if (text) yield { type: 'content', text }
+  // The SDK hands us the raw SSE body as Uint8Array/string pieces (not parsed
+  // chunk objects) — parse the `data:` lines ourselves, tolerating both shapes.
+  let buffer = ''
+  for await (const raw of stream as AsyncIterable<unknown>) {
+    if (raw == null) continue
+    if (raw instanceof Uint8Array) {
+      buffer += new TextDecoder().decode(raw, { stream: true })
+    } else if (typeof raw === 'string') {
+      buffer += raw
+    } else if (typeof raw === 'object' && 'choices' in (raw as Record<string, unknown>)) {
+      const delta = (raw as { choices?: { delta?: { content?: string } }[] }).choices?.[0]?.delta
+      if (delta?.content) yield { type: 'content', text: delta.content }
+      continue
+    } else {
+      continue
+    }
+    let nl: number
+    while ((nl = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, nl).trim()
+      buffer = buffer.slice(nl + 1)
+      if (!line.startsWith('data:')) continue
+      const data = line.slice(5).trim()
+      if (data === '[DONE]') return
+      try {
+        const json = JSON.parse(data) as { choices?: { delta?: { content?: string } }[] }
+        const text = json.choices?.[0]?.delta?.content
+        if (text) yield { type: 'content', text }
+      } catch {
+        // ignore malformed keepalive lines
+      }
+    }
   }
 }
+
+/** Hard timeout for external intent extraction (non-streaming) — 20s. */
+export const INTENT_TIMEOUT_MS = 20_000
+/** Hard timeout for external reply streaming — 60s. */
+export const REPLY_STREAM_TIMEOUT_MS = 60_000
 
 async function* streamExternal(model: ModelInfo, messages: LLMMessage[]): AsyncGenerator<StreamChunk> {
   const configId = model.key.slice(4)
@@ -90,6 +131,7 @@ async function* streamExternal(model: ModelInfo, messages: LLMMessage[]): AsyncG
       messages,
       stream: true,
     }),
+    signal: AbortSignal.timeout(REPLY_STREAM_TIMEOUT_MS),
   })
   if (!res.ok || !res.body) {
     const detail = await res.text().catch(() => '')
@@ -166,6 +208,7 @@ export async function completeChat(model: ModelInfo, messages: LLMMessage[]): Pr
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${config.provider.apiKey}` },
     body: JSON.stringify({ model: config.remoteId, messages, stream: false }),
+    signal: AbortSignal.timeout(INTENT_TIMEOUT_MS),
   })
   if (!res.ok) throw new Error(`المزوّد رجع ${res.status}`)
   const json = (await res.json()) as { choices?: { message?: { content?: string } }[] }

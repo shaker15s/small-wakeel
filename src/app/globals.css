@@ -162,7 +162,7 @@
     display: inline-block;
   }
   .card-enter {
-    animation: card-enter 200ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+    animation: card-enter 200ms cubic-bezier(0.2, 0.8, 0.3, 1) backwards;
   }
   .press {
     transition: transform 110ms ease, box-shadow 110ms ease, background-color 110ms ease;
@@ -231,6 +231,142 @@
   margin-inline-start: 1px;
 }
 
+/* ============================================================
+   R13-ux — micro-interaction utilities (additive, safe)
+   ============================================================ */
+
+/* gradient text sweep — loading labels */
+.shimmer-text {
+  background: linear-gradient(
+    90deg,
+    var(--muted-foreground) 25%,
+    var(--foreground) 50%,
+    var(--muted-foreground) 75%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer-sweep 1.8s linear infinite;
+}
+
+@keyframes shimmer-sweep {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+/* skeleton shimmer — soft highlight sweep over a muted base
+   (callers set their own rounding/size; this only owns base + sweep) */
+.skel {
+  position: relative;
+  overflow: hidden;
+  background: var(--muted);
+}
+.skel::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in oklab, var(--foreground) 8%, transparent),
+    transparent
+  );
+  animation: skel-sweep 1.6s ease-in-out infinite;
+}
+
+@keyframes skel-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  60%,
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+/* box-shadow ring expand — attention pulses (badges, danger dots) */
+.pulse-ring {
+  animation: pulse-ring 1.8s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--destructive) 45%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+/* hover lift for chips/cards — -2px translate + soft warm shadow */
+.chip-lift {
+  transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease,
+    background-color 180ms ease;
+}
+.chip-lift:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px -6px rgb(23 34 51 / 0.16);
+}
+.chip-lift:active {
+  transform: translateY(0);
+}
+
+/* fade + slide-in-up — stagger via inline animation-delay
+   (fill:backwards so hover transforms keep working after it ends) */
+.list-enter {
+  animation: list-enter 220ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+@keyframes list-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* warm focus-visible ring for custom interactive elements */
+.focus-warm {
+  outline: none;
+}
+.focus-warm:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--ring) 75%, transparent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shimmer-text,
+  .skel,
+  .pulse-ring,
+  .list-enter,
+  .chip-lift,
+  .focus-warm {
+    animation: none !important;
+    transition: none !important;
+  }
+  .skel::after {
+    animation: none !important;
+  }
+  .shimmer-text {
+    color: var(--muted-foreground);
+    -webkit-background-clip: initial;
+    background-clip: initial;
+    background: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -239,5 +375,122 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+  }
+}
+
+/* ============================================================
+   R14-ux — branding & micro-interaction utilities (additive)
+   ============================================================ */
+
+/* gradient sheen sweep across the card top on hover —
+   apply to a rounded card; the sweep is amber-tinted and
+   pointer-events-free so it never eats clicks */
+.card-sheen {
+  position: relative;
+}
+.card-sheen::after {
+  content: "";
+  position: absolute;
+  inset-inline: -20%;
+  top: 0;
+  height: 55%;
+  border-start-start-radius: inherit;
+  border-start-end-radius: inherit;
+  background: linear-gradient(
+    115deg,
+    transparent 35%,
+    color-mix(in oklab, var(--wakil-amber) 16%, transparent) 50%,
+    transparent 65%
+  );
+  transform: translateX(-130%);
+  opacity: 0;
+  pointer-events: none;
+}
+.card-sheen:hover::after {
+  opacity: 1;
+  animation: card-sheen-sweep 650ms ease-out;
+}
+@keyframes card-sheen-sweep {
+  from {
+    transform: translateX(-130%);
+  }
+  to {
+    transform: translateX(130%);
+  }
+}
+
+/* soft scale breathe for live/active badges (radar, live dots) */
+.badge-breathe {
+  animation: badge-breathe 2.6s ease-in-out infinite;
+}
+@keyframes badge-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.07);
+  }
+}
+
+/* hover wiggle for small icons (KPI glyphs, section icons) —
+   works on direct hover AND from a `.group` ancestor hover */
+.icon-wiggle {
+  display: inline-flex;
+}
+.icon-wiggle:hover,
+.group:hover .icon-wiggle {
+  animation: icon-wiggle 480ms ease;
+}
+@keyframes icon-wiggle {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  25% {
+    transform: rotate(-9deg);
+  }
+  75% {
+    transform: rotate(9deg);
+  }
+}
+
+/* deeper press feedback for dense rows (alert/radar rows) */
+.press-deep {
+  transition: transform 120ms ease, background-color 120ms ease, border-color 120ms ease;
+}
+.press-deep:active {
+  transform: scale(0.975);
+}
+
+/* list-enter alternative with spring overshoot — hero/moments that
+   deserve a bouncier entrance; stagger via inline animation-delay */
+.rise-in {
+  animation: rise-in 420ms cubic-bezier(0.34, 1.4, 0.64, 1) backwards;
+}
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.97);
+  }
+  60% {
+    opacity: 1;
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* R14-ux reduced-motion guards (own block; existing classes untouched) */
+@media (prefers-reduced-motion: reduce) {
+  .card-sheen::after,
+  .badge-breathe,
+  .icon-wiggle,
+  .press-deep,
+  .rise-in {
+    animation: none !important;
+    transition: none !important;
+    opacity: 0 !important;
   }
 }

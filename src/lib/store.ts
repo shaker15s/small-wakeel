@@ -4,7 +4,16 @@
 
 import { create } from 'zustand'
 
-export type ViewKey = 'chat' | 'today' | 'inventory' | 'journal' | 'accounts' | 'stats' | 'reports' | 'settings'
+export type ViewKey =
+  | 'chat'
+  | 'today'
+  | 'inventory'
+  | 'journal'
+  | 'accounts'
+  | 'stats'
+  | 'reports'
+  | 'settings'
+  | 'memory'
 
 export const VIEW_LABELS: Record<ViewKey, string> = {
   chat: 'المحادثة',
@@ -15,6 +24,7 @@ export const VIEW_LABELS: Record<ViewKey, string> = {
   stats: 'الإحصائيات',
   reports: 'التقارير',
   settings: 'الإعدادات',
+  memory: 'ذاكرة وكيل',
 }
 
 interface WakilState {
@@ -25,8 +35,11 @@ interface WakilState {
   view: ViewKey
   dark: boolean
   onboardingDone: boolean
+  // conversation (last-used per business — so switching businesses keeps context)
+  activeConversationId: string | null
   // setters
   setSession: (businessId: string, userId: string) => void
+  setActiveConversation: (id: string | null) => void
   setModel: (modelKey: string | null) => void
   setView: (view: ViewKey) => void
   toggleDark: () => void
@@ -39,6 +52,8 @@ const LS = {
   user: 'wakil.userId',
   model: 'wakil.modelKey',
   onboarding: 'wakil.onboarding',
+  /** per-business last-used conversation key (wakil.conversation.{businessId}) */
+  conversation: (businessId: string) => `wakil.conversation.${businessId}`,
 }
 
 export const useWakil = create<WakilState>((set, get) => ({
@@ -48,10 +63,22 @@ export const useWakil = create<WakilState>((set, get) => ({
   view: 'chat',
   dark: false,
   onboardingDone: false,
+  activeConversationId: null,
   setSession: (businessId, userId) => {
     localStorage.setItem(LS.business, businessId)
     localStorage.setItem(LS.user, userId)
-    set({ businessId, userId, view: 'chat' })
+    // restore the last-used conversation for THIS business (kept in its own key)
+    const storedConversation =
+      typeof window !== 'undefined' ? localStorage.getItem(LS.conversation(businessId)) : null
+    set({ businessId, userId, view: 'chat', activeConversationId: storedConversation })
+  },
+  setActiveConversation: (id) => {
+    const businessId = get().businessId
+    if (businessId) {
+      if (id) localStorage.setItem(LS.conversation(businessId), id)
+      else localStorage.removeItem(LS.conversation(businessId))
+    }
+    set({ activeConversationId: id })
   },
   setModel: (modelKey) => {
     localStorage.setItem(LS.model, modelKey ?? 'builtin-deep')
@@ -65,11 +92,14 @@ export const useWakil = create<WakilState>((set, get) => ({
   },
   hydrate: () => {
     if (typeof window === 'undefined') return
+    const businessId = localStorage.getItem(LS.business)
     set({
-      businessId: localStorage.getItem(LS.business),
+      businessId,
       userId: localStorage.getItem(LS.user),
       modelKey: localStorage.getItem(LS.model) ?? 'builtin-deep',
       onboardingDone: localStorage.getItem(LS.onboarding) === '1',
+      // page reload → return to the last-used conversation of the hydrated business
+      activeConversationId: businessId ? localStorage.getItem(LS.conversation(businessId)) : null,
     })
   },
 }))
@@ -80,9 +110,15 @@ export const QUERY_KEYS = {
   items: (b: string) => ['items', b] as const,
   operations: (b: string) => ['operations', b] as const,
   chat: (b: string, u: string) => ['chat', b, u] as const,
+  /** chat history scoped to ONE conversation (null → follow the latest) */
+  chatConversation: (b: string, u: string, c: string | null) => ['chat', b, u, c ?? 'latest'] as const,
   members: (b: string) => ['members', b] as const,
   tasks: (b: string) => ['tasks', b] as const,
   memories: (b: string) => ['memories', b] as const,
   reports: (b: string, r: string) => ['reports', b, r] as const,
   providers: ['providers'] as const,
+  conversations: (b: string, u: string) => ['conversations', b, u] as const,
+  suggestions: (b: string, u: string) => ['suggestions', b, u] as const,
+  quickCommands: (b: string) => ['quickCommands', b] as const,
+  radar: (b: string) => ['radar', b] as const,
 }

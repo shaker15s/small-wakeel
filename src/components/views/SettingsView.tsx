@@ -1,6 +1,6 @@
 'use client'
 
-// وكيل — شاشة «الإعدادات»: الموديلات والمزوّدين + المهام المؤجلة + ذاكرة وكيل.
+// وكيل — شاشة «الإعدادات»: الموديلات والمزوّدين + المهام المؤجلة + ذاكرة وكيل + أدواتك السريعة.
 
 import { useState } from 'react'
 import { motion } from 'framer-motion'
@@ -14,6 +14,7 @@ import {
   Plus,
   Server,
   Trash2,
+  Wrench,
 } from 'lucide-react'
 
 import {
@@ -54,6 +55,7 @@ import { Switch } from '@/components/ui/switch'
 import { api } from '@/lib/api'
 import { arDateTime } from '@/lib/format'
 import { QUERY_KEYS, useWakil } from '@/lib/store'
+import { QuickCommandsManager } from '@/components/chat/QuickCommandsManager'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useToast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
@@ -84,7 +86,7 @@ const BUILTIN_MODELS: { key: string; label: string; tier: 'air' | 'deep'; note: 
   },
   {
     key: 'builtin-air',
-    label: 'خفيف سريع · glm-4.6',
+    label: 'خفيف سريع · glm-4.5-air',
     tier: 'air',
     note: 'ردود أسرع للشغل اليومي',
   },
@@ -125,14 +127,23 @@ function ModelRow({
       aria-label={ariaLabel}
       aria-pressed={selected}
       className={cn(
-        'press flex min-h-11 w-full items-center gap-2.5 rounded-lg border px-3 py-2.5 text-start',
+        'press focus-warm flex min-h-11 w-full items-center gap-2.5 rounded-lg border px-3 py-2.5 text-start transition-colors',
         selected
           ? 'border-wakil-amber/50 bg-accent'
           : 'border-transparent hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60',
       )}
     >
       {children}
-      {selected && <Check className="ms-auto size-4 shrink-0 text-wakil-amber" aria-hidden />}
+      {selected && (
+        <motion.span
+          initial={{ scale: 0.3, opacity: 0 }}
+          animate={{ scale: 1, opacity: 1 }}
+          transition={{ type: 'spring', stiffness: 500, damping: 24 }}
+          className="ms-auto flex shrink-0"
+        >
+          <Check className="size-4 text-wakil-amber" aria-hidden />
+        </motion.span>
+      )}
     </button>
   )
 }
@@ -441,7 +452,10 @@ export default function SettingsView({ businessId, userId }: ViewProps) {
               />
             ) : (
               providers.map((p) => (
-                <Card key={p.id} className="card-enter gap-0 py-0">
+                <Card
+                  key={p.id}
+                  className="card-enter gap-0 py-0 transition-[border-color,box-shadow] duration-200 hover:border-wakil-amber/40 hover:shadow-md"
+                >
                   <CardHeader className="border-b px-4 py-3">
                     <CardTitle className="flex w-full flex-wrap items-center justify-between gap-2 text-sm">
                       <span className="min-w-0 break-words font-semibold">{p.name}</span>
@@ -754,6 +768,16 @@ export default function SettingsView({ businessId, userId }: ViewProps) {
               ))}
             </ul>
           )}
+        </div>
+      </SectionCard>
+
+      {/* (د) أدواتك السريعة — أوامر جاهزة خاصة بشغلك */}
+      <SectionCard title="أدواتك السريعة" icon={Wrench}>
+        <div className="space-y-3">
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            أوامر جاهزة بتظهر فوق شاشة المحادثة — خاصة بشغلك انت
+          </p>
+          <QuickCommandsManager businessId={businessId} userId={userId} />
         </div>
       </SectionCard>
 

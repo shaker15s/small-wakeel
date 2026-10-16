@@ -11,7 +11,11 @@ import type {
   MemoryDTO,
   ReportsDTO,
   ActionCardDTO,
+  ChatActionDTO,
+  ConversationSummaryDTO,
+  QuickCommandDTO,
   ResultCardDTO,
+  SuggestionDTO,
   ThinkingStep,
   ChatTurn,
 } from './types'
@@ -38,6 +42,27 @@ async function post<T>(url: string, body: unknown): Promise<T> {
   return res.json() as Promise<T>
 }
 
+async function patch<T>(url: string, body: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string }
+    throw new Error(data.error ?? `فشل الطلب (${res.status})`)
+  }
+  return res.json() as Promise<T>
+}
+
+async function del(url: string): Promise<void> {
+  const res = await fetch(url, { method: 'DELETE' })
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string }
+    throw new Error(data.error ?? `فشل الطلب (${res.status})`)
+  }
+}
+
 export const api = {
   bootstrap: () => get<BootstrapDTO>('/api/bootstrap'),
   overview: (businessId: string, userId: string) =>
@@ -45,9 +70,14 @@ export const api = {
   items: (businessId: string) => get<ItemDTO[]>(`/api/items?businessId=${businessId}`),
   operations: (businessId: string, status?: string) =>
     get<OperationDTO[]>(`/api/operations?businessId=${businessId}${status ? `&status=${status}` : ''}`),
-  chat: (businessId: string, userId: string) =>
+  chat: (
+    businessId: string,
+    userId: string,
+    /** when set → load THIS conversation's history (null → latest) */
+    conversationId?: string | null,
+  ) =>
     get<{ conversation: { id: string; title: string; createdAt: string; updatedAt: string }; messages: MessageDTO[] }>(
-      `/api/chat?businessId=${businessId}&userId=${userId}`,
+      `/api/chat?businessId=${businessId}&userId=${userId}${conversationId ? `&conversationId=${conversationId}` : ''}`,
     ),
   members: (businessId: string) => get<CustomerDTO[]>(`/api/members?businessId=${businessId}`),
   tasks: (businessId: string) =>
@@ -73,24 +103,57 @@ export const api = {
       `/api/operations/${opId}/confirm`,
       { action, userId, reason },
     ),
+  // — المحادثات (سجل المحادثات القديمة)
+  conversations: (businessId: string, userId: string) =>
+    get<ConversationSummaryDTO[]>(`/api/conversations?businessId=${businessId}&userId=${userId}`),
+  createConversation: (businessId: string, userId: string, title?: string) =>
+    post<ConversationSummaryDTO>('/api/conversations', { businessId, userId, title }),
+  updateConversation: (id: string, patchBody: { title?: string; pinned?: boolean; archived?: boolean }) =>
+    patch<ConversationSummaryDTO>('/api/conversations', { id, ...patchBody }),
+  deleteConversation: (id: string) => del(`/api/conversations?id=${id}`),
+  // — الاقتراحات الديناميكية (بتتغير مع شغلك)
+  suggestions: (businessId: string, userId: string) =>
+    get<SuggestionDTO[]>(`/api/suggestions?businessId=${businessId}&userId=${userId}`),
+  // — أدواتك السريعة (user-extensible tools)
+  quickCommands: (businessId: string) => get<QuickCommandDTO[]>(`/api/quick-commands?businessId=${businessId}`),
+  createQuickCommand: (c: { businessId: string; userId: string; label: string; prompt: string; icon: string }) =>
+    post<QuickCommandDTO>('/api/quick-commands', c),
+  updateQuickCommand: (
+    id: string,
+    patchBody: { label?: string; prompt?: string; icon?: string; sortOrder?: number },
+  ) => patch<QuickCommandDTO>('/api/quick-commands', { id, ...patchBody }),
+  touchQuickCommand: (id: string) => patch<QuickCommandDTO>('/api/quick-commands', { id, touch: true }),
+  deleteQuickCommand: (id: string) => del(`/api/quick-commands?id=${id}`),
 }
 
 // ---------------------------------------------------------------------------
 // SSE chat streaming — the حرف بحرف reader
 // ---------------------------------------------------------------------------
 export interface StreamHandlers {
-  onStart?: (conversationId: string) => void
+  /** start carries BOTH the conversation id and the persisted user-message id —
+   *  the caller can swap the optimistic local user turn id for the real one so
+   *  later refetches reconcile by key (zero remount flicker). */
+  onStart?: (conversationId: string, userMessageId: string) => void
   onThinking?: (steps: ThinkingStep[]) => void
   onStep?: (label: string, state: 'active' | 'done') => void
   onCard?: (card: ActionCardDTO) => void
   onCards?: (cards: ResultCardDTO[]) => void
+  onActions?: (actions: ChatActionDTO[]) => void
   onDelta?: (text: string) => void
   onDone?: (messageId: string, modelLabel: string) => void
   onError?: (message: string) => void
 }
 
 export async function streamChat(
-  body: { businessId: string; userId: string; text: string; modelKey?: string | null; conversationId?: string | null },
+  body: {
+    businessId: string
+    userId: string
+    text: string
+    modelKey?: string | null
+    conversationId?: string | null
+    /** set when the user tapped a suggestion chip — feeds the usage ranking */
+    suggestionId?: string | null
+  },
   handlers: StreamHandlers,
   signal?: AbortSignal,
 ): Promise<void> {
@@ -123,15 +186,17 @@ export async function streamChat(
           | { event: 'step'; label: string; state: 'active' | 'done' }
           | { event: 'card'; card: ActionCardDTO }
           | { event: 'cards'; cards: ResultCardDTO[] }
+          | { event: 'actions'; actions: ChatActionDTO[] }
           | { event: 'delta'; text: string }
           | { event: 'done'; messageId: string; modelLabel: string }
           | { event: 'error'; message: string }
         switch (ev.event) {
-          case 'start': handlers.onStart?.(ev.conversationId); break
+          case 'start': handlers.onStart?.(ev.conversationId, ev.messageId); break
           case 'thinking': handlers.onThinking?.(ev.steps); break
           case 'step': handlers.onStep?.(ev.label, ev.state); break
           case 'card': handlers.onCard?.(ev.card); break
           case 'cards': handlers.onCards?.(ev.cards); break
+          case 'actions': handlers.onActions?.(ev.actions); break
           case 'delta': handlers.onDelta?.(ev.text); break
           case 'done': handlers.onDone?.(ev.messageId, ev.modelLabel); break
           case 'error': handlers.onError?.(ev.message); break
@@ -152,6 +217,7 @@ export function messageToTurn(m: MessageDTO): ChatTurn {
     cards: m.cards ?? null,
     thinking: m.thinking ?? null,
     modelLabel: m.modelLabel ?? null,
+    actions: m.actions ?? null,
     createdAt: m.createdAt,
     outcome: m.outcome ?? undefined,
   }

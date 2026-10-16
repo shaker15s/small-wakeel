@@ -22,6 +22,22 @@ export type ReadTool =
   | 'get_activity_history'
   | 'get_transaction_status'
 
+/** Valid read-tool names — validation set for intent parsing (multi-intent). */
+export const READ_TOOLS: ReadonlySet<string> = new Set<string>([
+  'get_daily_summary',
+  'get_cash_position',
+  'search_catalog',
+  'get_item_stock',
+  'list_low_stock',
+  'list_expiring',
+  'get_supplier_balance',
+  'get_member_status',
+  'list_receivables',
+  'list_payables',
+  'get_activity_history',
+  'get_transaction_status',
+])
+
 function itemRow(it: Item): Record<string, string> {
   return {
     name: it.name,
@@ -111,7 +127,7 @@ export async function runReadTool(
             { label: 'مصروفات', value: egp(sum('expense')) },
             { label: 'تحصيلات', value: egp(sum('collection')) },
             { label: 'اشتراكات', value: egp(sum('membership')) },
-            { label: 'عدد العمليات', value: String(ops.length) },
+            { label: 'عدد العمليات', value: fmtQty(ops.length) },
           ],
         },
       ]
@@ -133,7 +149,7 @@ export async function runReadTool(
             { key: 'unit', label: 'الوحدة' },
           ],
           rows: low.map((it) => ({ ...itemRow(it), unit: arUnit(it.unit) })),
-          footer: [{ label: 'إجمالي الأصناف الناقصة', value: String(low.length) }],
+          footer: [{ label: 'إجمالي الأصناف الناقصة', value: fmtQty(low.length) }],
         },
       ]
     }
@@ -159,7 +175,7 @@ export async function runReadTool(
             { key: 'stock', label: 'الرصيد' },
           ],
           rows: in30.map((it) => ({ name: it.name, batch: it.batchNo ?? '—', expiry: arDate(it.expiresAt!), stock: fmtQty(it.stockQty, arUnit(it.unit)) })),
-          footer: [{ label: 'إجمالي', value: String(in30.length) }],
+          footer: [{ label: 'إجمالي', value: fmtQty(in30.length) }],
         },
       ]
     }

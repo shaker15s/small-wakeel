@@ -122,11 +122,12 @@ export default function StatsView({ businessId }: ViewProps) {
       {isPending || !totals ? (
         <LoadingKpis />
       ) : (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <KpiCard label="المبيعات" value={egp(totals.sales)} icon={ShoppingCart} tone="navy" />
-          <KpiCard label="المشتريات" value={egp(totals.purchases)} icon={ShoppingBag} tone="amber" />
-          <KpiCard label="المصروفات" value={egp(totals.expenses)} icon={TrendingDown} tone="muted" />
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4">
+          <KpiCard index={0} label="المبيعات" value={egp(totals.sales)} icon={ShoppingCart} tone="navy" />
+          <KpiCard index={1} label="المشتريات" value={egp(totals.purchases)} icon={ShoppingBag} tone="amber" />
+          <KpiCard index={2} label="المصروفات" value={egp(totals.expenses)} icon={TrendingDown} tone="muted" />
           <KpiCard
+            index={3}
             label="الصافي"
             value={egp(totals.net)}
             icon={totals.net >= 0 ? PiggyBank : TrendingDown}
@@ -137,7 +138,11 @@ export default function StatsView({ businessId }: ViewProps) {
       )}
 
       {/* الرسم اليومي */}
-      <SectionCard title="الحركة اليومية (ج.م)" icon={BarChart3}>
+      <SectionCard
+        title="الحركة اليومية (ج.م)"
+        icon={BarChart3}
+        className="transition-colors hover:border-wakil-amber/40"
+      >
         {isPending ? (
           <Skeleton className="h-[260px] w-full" aria-busy="true" />
         ) : isEmpty ? (
@@ -216,7 +221,7 @@ export default function StatsView({ businessId }: ViewProps) {
               </TableHeader>
               <TableBody>
                 {(data?.topItems ?? []).map((it, i) => (
-                  <TableRow key={`${it.name}-${i}`}>
+                  <TableRow key={`${it.name}-${i}`} className="hover:bg-muted/40">
                     <TableCell className="max-w-[180px] truncate py-2.5 font-medium">
                       {it.name}
                     </TableCell>

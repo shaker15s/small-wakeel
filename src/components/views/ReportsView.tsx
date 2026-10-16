@@ -95,7 +95,7 @@ export default function ReportsView({ businessId, businessName }: ReportsViewPro
                 </TabsTrigger>
               </TabsList>
             </Tabs>
-            <Button asChild variant="outline" className="min-h-11">
+            <Button asChild variant="outline" className="chip-lift min-h-11">
               <a
                 href={`/api/export?businessId=${encodeURIComponent(businessId)}`}
                 target="_blank"
@@ -107,11 +107,15 @@ export default function ReportsView({ businessId, businessName }: ReportsViewPro
             </Button>
             <Button
               variant="secondary"
-              className="min-h-11"
+              className="chip-lift group min-h-11"
               onClick={() => window.print()}
               aria-label="اطبع التقرير"
             >
-              <Printer aria-hidden /> اطبع
+              <Printer
+                className="transition-transform duration-150 group-active:scale-90 group-active:-rotate-6"
+                aria-hidden
+              />
+              اطبع
             </Button>
           </div>
         }
@@ -219,7 +223,7 @@ export default function ReportsView({ businessId, businessName }: ReportsViewPro
                 </TableHeader>
                 <TableBody>
                   {(data?.byType ?? []).map((t, i) => (
-                    <TableRow key={`${t.type}-${i}`}>
+                    <TableRow key={`${t.type}-${i}`} className="hover:bg-muted/40">
                       <TableCell className="py-2.5 font-medium">
                         {TYPE_AR[t.type] ?? t.type}
                       </TableCell>

@@ -1,9 +1,12 @@
-// GET /api/memories?businessId — agent memory entries (facts & preferences), newest first.
-// POST /api/memories — save a new memory (fact/preference) for the business.
+// /api/memories — وكيل's memory entries.
+// GET    ?businessId[&active=true] → MemoryDTO[] (new fields), newest first.
+// POST   {businessId,userId,text,kind?} → save a fact/preference.
+// PATCH  {id,text?,active?,category?} → edit / (de)activate («انسى» path).
+// DELETE ?id= → remove an entry entirely.
 import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import type { MemoryDTO } from '@/lib/types'
-import { badRequest, searchParams, serverError } from '../_lib/http'
+import { badRequest, notFound, searchParams, serverError } from '../_lib/http'
 import { serializeMemory } from '../_lib/serialize'
 
 export const dynamic = 'force-dynamic'
@@ -15,16 +18,24 @@ export async function POST(req: Request) {
       userId?: string
       text?: string
       kind?: string
+      category?: string
     }
     if (!body.businessId) return badRequest('businessId مطلوب')
     if (!body.userId) return badRequest('userId مطلوب')
     if (!body.text?.trim()) return badRequest('نص الذاكرة مطلوب')
 
+    const kind = ['fact', 'preference', 'rule', 'lexicon', 'insight'].includes(String(body.kind))
+      ? (String(body.kind) as MemoryDTO['kind'])
+      : body.kind === 'preference'
+        ? 'preference'
+        : 'fact'
+
     const memory = await db.agentMemory.create({
       data: {
         businessId: body.businessId,
         userId: body.userId,
-        kind: body.kind === 'preference' ? 'preference' : 'fact',
+        kind,
+        ...(body.category ? { category: body.category.slice(0, 40) } : {}),
         text: body.text.trim().slice(0, 500),
       },
     })
@@ -39,9 +50,10 @@ export async function GET(req: Request) {
     const sp = searchParams(req)
     const businessId = sp.get('businessId')
     if (!businessId) return badRequest('businessId مطلوب')
+    const activeOnly = sp.get('active')
 
     const memories = await db.agentMemory.findMany({
-      where: { businessId },
+      where: { businessId, ...(activeOnly === 'true' ? { active: true } : {}) },
       orderBy: { createdAt: 'desc' },
     })
 
@@ -49,5 +61,49 @@ export async function GET(req: Request) {
     return NextResponse.json(dto)
   } catch (e) {
     return serverError('memories', e)
+  }
+}
+
+export async function PATCH(req: Request) {
+  try {
+    const body = (await req.json()) as {
+      id?: string
+      text?: string
+      active?: boolean
+      category?: string
+    }
+    if (!body.id) return badRequest('id مطلوب')
+
+    const existing = await db.agentMemory.findUnique({ where: { id: body.id } })
+    if (!existing) return notFound('الذاكرة دي مش موجودة')
+
+    const data: { text?: string; active?: boolean; category?: string; updatedAt: Date } = { updatedAt: new Date() }
+    if (typeof body.text === 'string') {
+      if (!body.text.trim()) return badRequest('نص الذاكرة فاضي')
+      data.text = body.text.trim().slice(0, 500)
+    }
+    if (typeof body.active === 'boolean') data.active = body.active
+    if (typeof body.category === 'string') data.category = body.category.trim().slice(0, 40) || 'general'
+
+    const memory = await db.agentMemory.update({ where: { id: body.id }, data })
+    return NextResponse.json(serializeMemory(memory))
+  } catch (e) {
+    return serverError('memories-patch', e)
+  }
+}
+
+export async function DELETE(req: Request) {
+  try {
+    const sp = searchParams(req)
+    const id = sp.get('id')
+    if (!id) return badRequest('id مطلوب')
+
+    const existing = await db.agentMemory.findUnique({ where: { id } })
+    if (!existing) return notFound('الذاكرة دي مش موجودة')
+
+    await db.agentMemory.delete({ where: { id } })
+    return NextResponse.json({ ok: true })
+  } catch (e) {
+    return serverError('memories-delete', e)
   }
 }

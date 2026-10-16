@@ -17,9 +17,6 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "وكيل — مساعد شغلك اليومي",
   description: "مساعد ذكي لصحاب المحلات والجيمات والصيدليات والعطارات — سجّل بع صرف بثقة، وكل حاجة موثقة ومتحققة.",
-  icons: {
-    icon: "/logo.svg",
-  },
 };
 
 export const viewport: Viewport = {

@@ -30,6 +30,8 @@ model Business {
   conversations  Conversation[]
   scheduledTasks ScheduledTask[]
   memories       AgentMemory[]
+  usageEvents    UsageEvent[]
+  quickCommands  QuickCommand[]
   settings       AgentSettings?
 }
 
@@ -129,14 +131,18 @@ model AuditEvent {
 }
 
 model Conversation {
-  id         String   @id @default(cuid())
-  businessId String
-  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  userId     String
-  title      String   @default("محادثة جديدة")
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
-  messages   Message[]
+  id            String    @id @default(cuid())
+  businessId    String
+  business      Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  userId        String
+  title         String    @default("محادثة جديدة")
+  pinned        Boolean   @default(false)
+  archived      Boolean   @default(false)
+  lastMessageAt DateTime  @default(now())
+  messageCount  Int       @default(0)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  messages      Message[]
 }
 
 model Message {
@@ -148,6 +154,7 @@ model Message {
   card           String? // JSON — draft action card
   cards          String? // JSON — result cards (tables)
   thinking       String? // agent visible thinking steps
+  actions        String? // JSON — deep-link action buttons (ChatActionDTO[])
   modelLabel     String?
   createdAt      DateTime     @default(now())
 }
@@ -176,9 +183,51 @@ model AgentMemory {
   businessId String
   business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
   userId     String
-  kind       String // fact | preference
+  kind       String // fact | preference | rule | lexicon | insight
+  category   String   @default("general") // e.g. membership_policies | pricing | credit_limits
   text       String
+  entityRef  String? // lexicon: canonical entity id (item/customer/supplier)
+  confidence Int      @default(80) // 0-100
+  usageCount Int      @default(0)
+  active     Boolean  @default(true)
   createdAt  DateTime @default(now())
+  updatedAt  DateTime @default(now()) @updatedAt
+}
+
+model UsageEvent {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  userId     String
+  kind       String // tool | command | chat | suggestion_used | advisory
+  label      String // tool name / command text / suggestion id
+  createdAt  DateTime @default(now())
+}
+
+model QuickCommand {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  userId     String
+  label      String
+  prompt     String
+  icon       String   @default("spark") // spark | boxes | users | wallet | chart | book | today | alert
+  sortOrder  Int      @default(0)
+  usageCount Int      @default(0)
+  createdAt  DateTime @default(now())
+}
+
+model ProviderCapability {
+  id               String       @id @default(cuid())
+  modelConfigId    String       @unique
+  modelConfig      ModelConfig  @relation(fields: [modelConfigId], references: [id], onDelete: Cascade)
+  ok               Boolean      @default(false)
+  supportsStreaming Boolean      @default(false)
+  supportsTools    Boolean      @default(false)
+  ttftMs           Int?
+  tps              Int?
+  note             String?
+  probedAt         DateTime     @default(now())
 }
 
 model AgentSettings {
@@ -200,11 +249,12 @@ model ModelProvider {
 }
 
 model ModelConfig {
-  id         String        @id @default(cuid())
-  providerId String
-  provider   ModelProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
-  remoteId   String // e.g. wakil-mock-deep
-  label      String // Arabic display label
-  tier       String // air | balanced | deep
-  enabled    Boolean       @default(true)
+  id           String             @id @default(cuid())
+  providerId   String
+  provider     ModelProvider      @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  remoteId     String // e.g. wakil-mock-deep
+  label        String // Arabic display label
+  tier         String // air | balanced | deep
+  enabled      Boolean            @default(true)
+  capabilities ProviderCapability?
 }

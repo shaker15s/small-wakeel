@@ -25,10 +25,13 @@ function PersonRow({ name, phone, plan }: { name: string; phone?: string | null;
           <a
             href={`tel:${phone}`}
             dir="ltr"
-            className="num inline-flex items-center gap-1 hover:text-foreground"
+            className="focus-warm num group inline-flex items-center gap-1 rounded-sm transition-colors hover:text-foreground"
             aria-label={`اتصل بـ ${name}`}
           >
-            <Phone className="size-3" aria-hidden />
+            <Phone
+              className="size-3 transition-transform duration-200 group-hover:rotate-[20deg]"
+              aria-hidden
+            />
             {phone}
           </a>
         ) : (
@@ -109,7 +112,7 @@ export default function AccountsView({ businessId, userId }: ViewProps) {
                 {receivables.map((c) => (
                   <li
                     key={c.id}
-                    className="flex items-center justify-between gap-3 rounded-lg px-2 py-2.5 transition-colors hover:bg-muted"
+                    className="chip-lift flex items-center justify-between gap-3 rounded-lg px-2 py-2.5 transition-colors hover:bg-muted/50"
                   >
                     <PersonRow name={c.name} phone={c.phone} plan={c.plan} />
                     <span
@@ -164,7 +167,7 @@ export default function AccountsView({ businessId, userId }: ViewProps) {
                 {payables.map((s) => (
                   <li
                     key={s.id}
-                    className="flex items-center justify-between gap-3 rounded-lg px-2 py-2.5 transition-colors hover:bg-muted"
+                    className="chip-lift flex items-center justify-between gap-3 rounded-lg px-2 py-2.5 transition-colors hover:bg-muted/50"
                   >
                     <PersonRow name={s.name} phone={s.phone} />
                     <span className="num shrink-0 text-sm font-bold text-wakil-amber tabular-nums">

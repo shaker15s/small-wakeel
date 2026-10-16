@@ -44,6 +44,8 @@ function extractSaleLines(payload: Record<string, unknown>): SaleLine[] {
       const qty = toNonNegativeNumber(e.qty ?? e.quantity)
       let revenue = toNonNegativeNumber(e.total)
       if (revenue === 0) revenue = toNonNegativeNumber(e.price) * qty
+      // seed/chat lines carry per-unit price instead of a line total
+      if (revenue === 0) revenue = toNonNegativeNumber(e.unitPrice) * qty
       lines.push({ name, qty, revenue })
     }
   }

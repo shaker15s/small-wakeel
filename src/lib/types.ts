@@ -122,9 +122,20 @@ export interface MessageDTO {
   cards?: ResultCardDTO[] | null
   thinking?: ThinkingStep[] | null
   modelLabel?: string | null
+  /** deep-link action buttons rendered under the reply (e.g. «افتح الإحصائيات») */
+  actions?: ChatActionDTO[] | null
   /** post-execution outcome synced from the operation's current state */
   outcome?: CardOutcomeDTO | null
   createdAt: string
+}
+
+/** A deep-link button the agent attaches to a reply — وكيل بيفهم التطبيق كله */
+export interface ChatActionDTO {
+  id: string
+  label: string
+  view: 'chat' | 'today' | 'inventory' | 'journal' | 'accounts' | 'stats' | 'reports' | 'settings'
+  icon?: 'chart' | 'boxes' | 'users' | 'wallet' | 'today' | 'journal' | 'book'
+  tone?: 'primary' | 'outline'
 }
 
 export interface CardOutcomeDTO {
@@ -202,9 +213,71 @@ export interface ScheduledTaskDTO {
 
 export interface MemoryDTO {
   id: string
-  kind: 'fact' | 'preference'
+  kind: 'fact' | 'preference' | 'rule' | 'lexicon' | 'insight'
+  category: string
   text: string
+  entityRef?: string | null
+  confidence: number
+  usageCount: number
+  active: boolean
   createdAt: string
+  updatedAt: string
+}
+
+/** One entry in the conversation list (سجل المحادثات القديمة) */
+export interface ConversationSummaryDTO {
+  id: string
+  title: string
+  pinned: boolean
+  archived: boolean
+  lastMessageAt: string
+  messageCount: number
+  /** preview of the last message (plain text, trimmed) */
+  preview: string
+  createdAt: string
+}
+
+/** A dynamic quick-command chip — computed from live data + usage history (بتتغير مع شغلك) */
+export interface SuggestionDTO {
+  id: string
+  label: string
+  /** the exact text sent to the agent when the chip is tapped */
+  prompt: string
+  reason: 'frequent' | 'alert' | 'vertical' | 'time' | 'memory' | 'custom'
+  reasonLabel: string // «بتستخدمه كتير» / «فيه تنبيه» / «خاص بشغلك»
+  icon: 'spark' | 'boxes' | 'users' | 'wallet' | 'chart' | 'book' | 'today' | 'alert'
+  tone?: 'primary' | 'outline'
+}
+
+/** A user-defined tool — أدواتك السريعة (user-extensible tools) */
+export interface QuickCommandDTO {
+  id: string
+  label: string
+  prompt: string
+  icon: string
+  sortOrder: number
+  usageCount: number
+  createdAt: string
+}
+
+/** Owner-only anomaly insight from the honesty radar (رادار الأمانة) */
+export interface RadarInsightDTO {
+  id: string
+  level: 'info' | 'warning' | 'danger'
+  title: string
+  detail: string
+  evidence: { label: string; ref?: string; view: 'journal' | 'accounts' | 'inventory' }[]
+}
+
+/** Provider capability probe result (فاحص المزود) */
+export interface ProbeResultDTO {
+  modelConfigId: string
+  ok: boolean
+  supportsStreaming: boolean
+  supportsTools: boolean
+  ttftMs?: number | null
+  tps?: number | null
+  note?: string | null
 }
 
 export interface ReportsDTO {
@@ -222,6 +295,7 @@ export type ChatStreamEvent =
   | { event: 'step'; label: string; state: 'active' | 'done' }
   | { event: 'card'; card: ActionCardDTO }
   | { event: 'cards'; cards: ResultCardDTO[] }
+  | { event: 'actions'; actions: ChatActionDTO[] }
   | { event: 'delta'; text: string }
   | { event: 'done'; messageId: string; modelLabel: string }
   | { event: 'error'; message: string }
@@ -234,6 +308,7 @@ export interface ChatTurn {
   cards?: ResultCardDTO[] | null
   thinking?: ThinkingStep[] | null
   modelLabel?: string | null
+  actions?: ChatActionDTO[] | null
   createdAt: string
   streaming?: boolean
   /** post-execution verification shown inside the action card */

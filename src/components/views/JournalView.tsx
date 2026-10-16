@@ -2,9 +2,9 @@
 
 // وكيل — شاشة «السجل»: يومية العمليات الموثقة بفلاتر للحالة والنوع.
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
-import { Link2, Receipt, ScrollText, User } from 'lucide-react'
+import { Check, Copy, Link2, Receipt, ScrollText, User } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -47,6 +47,56 @@ const CHIP_TONE: Record<string, string> = {
   AWAITING_APPROVAL: 'bg-wakil-amber/15 text-wakil-amber',
   FAILED_SAFE: 'bg-destructive/10 text-destructive',
   CANCELLED: 'bg-muted text-muted-foreground',
+}
+
+// ---------------------------------------------------------------------------
+// ref chip — click to copy (WKL-####) with a Check blink as feedback
+// ---------------------------------------------------------------------------
+
+function RefChip({ opRef }: { opRef: string }) {
+  const [copied, setCopied] = useState(false)
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(
+    () => () => {
+      if (timerRef.current) clearTimeout(timerRef.current)
+    },
+    [],
+  )
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(opRef)
+    } catch {
+      // clipboard blocked — still give the feedback blink
+    }
+    setCopied(true)
+    if (timerRef.current) clearTimeout(timerRef.current)
+    timerRef.current = setTimeout(() => setCopied(false), 1400)
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      title="انسخ المرجع"
+      aria-label={`انسخ المرجع ${opRef}`}
+      className={cn(
+        'press focus-warm num inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-mono text-xs font-bold tracking-wide transition-colors',
+        copied
+          ? 'bg-wakil-teal/10 text-wakil-teal'
+          : 'bg-wakil-navy/5 text-wakil-navy hover:bg-wakil-navy/10',
+      )}
+      dir="ltr"
+    >
+      {copied ? (
+        <Check className="size-3" aria-hidden />
+      ) : (
+        <Copy className="size-3 opacity-60" aria-hidden />
+      )}
+      {opRef}
+    </button>
+  )
 }
 
 export default function JournalView({ businessId }: ViewProps) {
@@ -164,16 +214,15 @@ export default function JournalView({ businessId }: ViewProps) {
           hint="جرّب تشيل الفلاتر أو تختار حالة أو نوع تاني"
         />
       ) : (
-        <ol className="card-enter max-h-[560px] space-y-3 overflow-y-auto scroll-warm pe-1">
-          {ops.map((op) => (
+        <ol className="max-h-[560px] space-y-3 overflow-y-auto scroll-warm pe-1">
+          {ops.map((op, i) => (
             <li
               key={op.id}
-              className="rounded-xl border bg-card p-4 shadow-sm transition-colors hover:bg-muted/40"
+              style={{ animationDelay: `${Math.min(i, 8) * 40}ms` }}
+              className="list-enter rounded-xl border bg-card p-4 shadow-sm transition-colors hover:bg-muted/40"
             >
               <div className="flex flex-wrap items-center gap-2">
-                <span className="num font-mono text-xs font-bold tracking-wide text-wakil-navy">
-                  {op.ref}
-                </span>
+                <RefChip opRef={op.ref} />
                 <TypeBadge type={op.type} />
                 <StatusBadge status={op.status as OpStatus} />
                 <RiskBadge risk={op.risk} />
