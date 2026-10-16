@@ -18,6 +18,36 @@ export async function POST() {
     let ran = 0
     for (const task of due) {
       try {
+        // R18 «remind» tasks: pure reminders — no tool to run, the title IS
+        // the payload. It lands in the conversation as a scheduled message.
+        if (task.tool === 'remind') {
+          await db.scheduledTask.update({
+            where: { id: task.id },
+            data: { status: 'done', executedAt: new Date(), result: task.title },
+          })
+          let conv = task.conversationId
+            ? await db.conversation.findUnique({ where: { id: task.conversationId } })
+            : await db.conversation.findFirst({ where: { businessId: task.businessId, userId: task.userId }, orderBy: { updatedAt: 'desc' } })
+          if (!conv) {
+            conv = await db.conversation.create({
+              data: { businessId: task.businessId, userId: task.userId, title: 'مهام وكيل المجدولة' },
+            })
+          }
+          await db.message.create({
+            data: {
+              conversationId: conv.id,
+              role: 'assistant',
+              text: `⏰ تذكير: ${task.title}\nدي مهمة مجدولة من ${task.whenLabel} — وقتها وصل.`,
+              thinking: JSON.stringify([
+                { label: 'مهمة مجدولة', detail: `${task.title} (${task.whenLabel})`, state: 'done', icon: 'verify' },
+              ]),
+              modelLabel: 'مهمة مجدولة · وكيل',
+            },
+          })
+          await db.conversation.update({ where: { id: conv.id }, data: { updatedAt: new Date() } })
+          ran++
+          continue
+        }
         const cards = await runReadTool(task.tool as ReadTool, task.businessId, safeParse(task.fields))
         // Recurrence: schedule next run before marking done
         if (task.recurrence) {

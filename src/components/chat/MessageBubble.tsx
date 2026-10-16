@@ -120,12 +120,12 @@ export function MessageBubble({
   if (turn.role === 'user') {
     const optimistic = turn.id.startsWith('local-')
     return (
-      <div className="flex w-full justify-end">
+      <div className="settle-in flex w-full justify-end">
         <motion.div
-          initial={optimistic ? { opacity: 0, y: 6 } : false}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.16, ease: 'easeOut' }}
-          className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-tl-sm bg-[var(--wakil-amber-soft)] px-4 py-2.5 text-[15px] leading-7 text-accent-foreground"
+          initial={optimistic ? { opacity: 0, y: 6, scale: 0.98 } : false}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          transition={{ type: 'spring', stiffness: 480, damping: 30 }}
+          className="max-w-[85%] whitespace-pre-wrap break-words rounded-[1.25rem] rounded-tl-md bg-[var(--wakil-amber-soft)] px-4 py-2.5 text-[15px] leading-7 text-accent-foreground shadow-sm"
         >
           {withNums(turn.text)}
         </motion.div>
@@ -190,7 +190,7 @@ export function MessageBubble({
   }
 
   return (
-    <div className="flex w-full items-start justify-start gap-2.5">
+    <div className="settle-in flex w-full items-start justify-start gap-2.5">
       <AgentAvatar state={avatarState} size="sm" />
 
       <div className="flex min-w-0 flex-1 flex-col gap-2.5">

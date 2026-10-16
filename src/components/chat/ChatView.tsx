@@ -1,32 +1,38 @@
 'use client'
 
-// وكيل — ChatView: the conversation-first heart of the app, rebuilt to
-// ChatGPT/Claude quality. The live turn lives INSIDE the turns list (same DOM
-// node from first thinking frame to final card reveal — zero flicker):
-//   • pre-text → ThinkingIndicator (3 rotating animation modes + statuses)
-//   • deltas   → ONLY the streamed text + caret + compact step line
-//   • card / cards / actions are BUFFERED in closure refs — never rendered
-//     mid-stream — then revealed BELOW the finished text with a staggered
-//     spring (fixes «الكروت بتظهر فوق الرد»).
-// Round 14 adds the conversation layer: «محادثة جديدة» + history drawer
-// (ConversationDrawer) + dynamic suggestion chips that follow the user's work
-// + the user's own quick tools pinned in the Composer.
+// وكيل — ChatView (R18 «آبل جلاس»): the conversation-first heart of the app,
+// full-bleed. The whole screen belongs to the chat now:
+//   • NO fixed header — a FLOATING GLASS PILL at the top center: hidden by
+//     default, springs in when the user hovers the top strip (or taps the
+//     peeking وكيل avatar — touch-friendly). It carries the business
+//     switcher, new chat, history, «ورقة وكيل», notifications, theme, and
+//     a jump back to the app views — every icon in its own circle.
+//   • The composer FLOATS at the bottom over the messages (glass + gradient
+//     scrim) and AUTO-HIDES while the user reads history (scrolled up) —
+//     never while there's a live draft or focus. The model picker moved
+//     INSIDE the composer (opens upward, scrollable).
+//   • The reading column widened to max-w-4xl — the screen finally breathes
+//     full width; no side voids.
+//   • Auto-scroll still follows the stream only while near the bottom; the
+//     jump-to-bottom FAB appears (glass circle) once the user scrolls away.
+// The battle-tested streaming logic (SSE contract, storm-safe queue,
+// buffered card reveal, retry) is preserved verbatim from R15.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { motion, MotionConfig } from 'framer-motion'
-import type { LucideIcon } from 'lucide-react'
-import { Brain, Check, ChevronDown, Cpu, History, Loader2, NotebookPen, Scale, Sparkles, SquarePen, Zap } from 'lucide-react'
+import { AnimatePresence, motion, MotionConfig } from 'framer-motion'
+import { ChevronDown, History, LayoutGrid, Loader2, Moon, NotebookPen, SquarePen, Sun } from 'lucide-react'
+import { useTheme } from 'next-themes'
+
 import { api, messageToTurn, streamChat, type ChatTurnWithMeta } from '@/lib/api'
 import { getVertical } from '@/lib/verticals'
 import { useWakil, QUERY_KEYS, type ViewKey } from '@/lib/store'
-import { TIER_AR } from '@/lib/labels'
 import type {
   ActionCardDTO,
+  AlertDTO,
   BusinessLite,
   ChatActionDTO,
   ChatTurn,
-  ModelConfigDTO,
   QuickCommandDTO,
   ResultCardDTO,
   SuggestionDTO,
@@ -37,45 +43,32 @@ import { Composer } from './Composer'
 import { ConversationDrawer } from './ConversationDrawer'
 import { NotesSheet } from './NotesSheet'
 import { TOOL_ICONS } from './QuickCommandsManager'
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { BusinessMenu } from '@/components/app/BusinessMenu'
+import { NotificationBell } from '@/components/app/NotificationBell'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/hooks/use-toast'
 
 interface ChatViewProps {
   business: BusinessLite
+  businesses: BusinessLite[]
   userId: string
   /** deep-link navigation from agent action buttons (e.g. «افتح الإحصائيات») */
   onNavigate?: (view: ViewKey) => void
 }
 
-const BUILTIN_MODELS = [
-  {
-    key: 'builtin-deep',
-    label: 'عميق مفكّر',
-    sub: 'glm-4.6 · للمهام المعقدة',
-    icon: Brain,
-  },
-  {
-    key: 'builtin-air',
-    label: 'خفيف سريع',
-    sub: 'glm-4.5-air · سريع ويكفي',
-    icon: Zap,
-  },
-] as const
-
-const TIER_ICONS: Record<string, LucideIcon> = { air: Zap, balanced: Scale, deep: Brain }
-
 const arNum = (n: number): string => new Intl.NumberFormat('ar-EG').format(n)
 
-export function ChatView({ business, userId, onNavigate }: ChatViewProps) {
+export function ChatView({ business, businesses, userId, onNavigate }: ChatViewProps) {
   const vertical = getVertical(business.type)
   const modelKey = useWakil((s) => s.modelKey)
   const setModel = useWakil((s) => s.setModel)
+  const setSession = useWakil((s) => s.setSession)
   const activeConversationId = useWakil((s) => s.activeConversationId)
   const setActiveConversation = useWakil((s) => s.setActiveConversation)
   const queryClient = useQueryClient()
   const { toast } = useToast()
+  const { theme, setTheme } = useTheme()
 
   const [turns, setTurns] = useState<ChatTurnWithMeta[]>([])
   // the conversation ACTUALLY displayed (from GET / start event) — distinct
@@ -89,6 +82,10 @@ export function ChatView({ business, userId, onNavigate }: ChatViewProps) {
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [creating, setCreating] = useState(false)
   const [notesOpen, setNotesOpen] = useState(false)
+  // composer auto-hide protection: a live draft/focus pins the composer open
+  const [drafting, setDrafting] = useState(false)
+  // floating pill: hover OR pinned (tap on the peeking avatar)
+  const [pillPinned, setPillPinned] = useState(false)
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const nearBottomRef = useRef(true)
@@ -105,8 +102,6 @@ export function ChatView({ business, userId, onNavigate }: ChatViewProps) {
   // One effect owns the transcript: it applies the fetched history whenever
   // the data or the target conversation changes, and drops the old transcript
   // while a NEW key has no cached data yet (so stale messages never linger).
-  // (deps include the conversation key — a cache-hit key switch can return a
-  // deep-equal object via structural sharing, which alone wouldn't re-fire.)
   useEffect(() => {
     if (!data) {
       setTurns([])
@@ -141,7 +136,7 @@ export function ChatView({ business, userId, onNavigate }: ChatViewProps) {
     if (nearBottomRef.current) scrollToBottom(false)
   }, [turns, scrollToBottom])
 
-  // ---- providers for the model picker ----
+  // ---- providers for the model picker (rendered INSIDE the composer) ----
   const { data: providersData } = useQuery({
     queryKey: QUERY_KEYS.providers,
     queryFn: () => api.providers(),
@@ -158,6 +153,14 @@ export function ChatView({ business, userId, onNavigate }: ChatViewProps) {
   const enabledExternal = (providersData?.providers ?? [])
     .flatMap((p) => p.models.map((m) => ({ ...m, providerName: p.name })))
     .filter((m) => m.enabled)
+
+  // ---- notifications (same query key as AppShell → shared cache, no extra fetch) ----
+  const { data: overview } = useQuery({
+    queryKey: QUERY_KEYS.overview(business.id, userId),
+    queryFn: () => api.overview(business.id, userId),
+    refetchInterval: 30_000,
+  })
+  const alerts = useMemo(() => overview?.alerts ?? [], [overview])
 
   // ---- dynamic suggestions (the adaptive demos — بتتغير مع شغلك) ----
   const suggestionsQ = useQuery({
@@ -472,7 +475,7 @@ export function ChatView({ business, userId, onNavigate }: ChatViewProps) {
 
   // ---- derived ----
   const lastTurn = turns.length > 0 ? turns[turns.length - 1] : null
-  const headerAvatarState: AgentState =
+  const pillAvatarState: AgentState =
     failedId && lastTurn?.id === failedId
       ? 'error'
       : lastTurn?.role === 'assistant' && lastTurn.streaming
@@ -482,6 +485,9 @@ export function ChatView({ business, userId, onNavigate }: ChatViewProps) {
         : 'idle'
   const showWelcome = !isLoading && turns.length === 0
   const showJump = !nearBottom && !isLoading
+  // the composer auto-hides while reading history — but a live draft/focus
+  // pins it open («مربع الكتابة يختفي لما أعمل سكرول لفوق» — إلا لو بيكتب)
+  const composerVisible = nearBottom || drafting
 
   // hero chips: dynamic when the endpoint answers, else 2 vertical fallbacks
   const heroSuggestions = !suggestionsQ.isPending && (suggestionsQ.data?.length ?? 0) > 0 ? suggestionsQ.data : null
@@ -489,84 +495,35 @@ export function ChatView({ business, userId, onNavigate }: ChatViewProps) {
 
   return (
     <MotionConfig reducedMotion="user">
-      <div className="relative flex h-full min-h-0 flex-col">
-        {/* ===== compact header: agent + business | new chat + history | model ===== */}
-        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border/70 bg-card/60 px-3 py-2 backdrop-blur-sm sm:px-4">
-          <div className="flex min-w-0 items-center gap-1.5 sm:gap-2">
-            <AgentAvatar state={headerAvatarState} size="sm" />
-            <div className="min-w-0">
-              <p className="truncate text-sm font-bold leading-tight">{business.name}</p>
-              <p className="truncate text-[11px] leading-tight text-muted-foreground">{vertical.label}</p>
-            </div>
-            <div className="ms-1 flex shrink-0 items-center gap-1">
-              <Button
-                variant="outline"
-                className="press h-9 shrink-0 gap-1.5 rounded-full px-2.5 text-xs font-medium sm:px-3"
-                onClick={() => void startNewChat()}
-                disabled={creating}
-                aria-label="محادثة جديدة"
-                title="محادثة جديدة"
-              >
-                {creating ? (
-                  <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-                ) : (
-                  <SquarePen className="size-3.5 text-wakil-amber" aria-hidden="true" />
-                )}
-                <span className="hidden sm:inline">محادثة جديدة</span>
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="press size-9 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
-                onClick={() => setDrawerOpen(true)}
-                aria-label="المحادثات القديمة"
-                title="المحادثات القديمة"
-              >
-                <History className="size-4" aria-hidden="true" />
-              </Button>
-              {/* «ورقة وكيل» — the agent's scratchpad for THIS conversation */}
-              <Button
-                variant="ghost"
-                size="icon"
-                className="press relative size-9 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
-                onClick={() => setNotesOpen(true)}
-                disabled={!loadedConvId}
-                aria-label="ورقة وكيل"
-                title="ورقة وكيل — ملاحظاته من شغله في المحادثة دي"
-              >
-                <NotebookPen className="size-4" aria-hidden="true" />
-                {notesCount > 0 && (
-                  <motion.span
-                    initial={{ scale: 0.4, opacity: 0 }}
-                    animate={{ scale: 1, opacity: 1 }}
-                    transition={{ type: 'spring', stiffness: 420, damping: 22 }}
-                    className="num absolute -end-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--wakil-amber)] px-1 text-[9px] font-bold tabular-nums text-white dark:text-black"
-                  >
-                    {arNum(notesCount)}
-                  </motion.span>
-                )}
-              </Button>
-            </div>
-          </div>
+      <div className="relative flex h-full min-h-0 flex-col overflow-hidden">
+        {/* ===== floating glass pill (hover-reveal / tap-pin) ===== */}
+        <FloatingPill
+          business={business}
+          businesses={businesses}
+          avatarState={pillAvatarState}
+          notesCount={notesCount}
+          notesDisabled={!loadedConvId}
+          alerts={alerts}
+          pinned={pillPinned}
+          setPinned={setPillPinned}
+          creating={creating}
+          onNewChat={() => void startNewChat()}
+          onHistory={() => setDrawerOpen(true)}
+          onNotes={() => setNotesOpen(true)}
+          onNavigate={onNavigate}
+          theme={theme}
+          onToggleTheme={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+        />
 
-          <ModelPicker
-            modelKey={modelKey}
-            setModel={setModel}
-            enabledExternal={enabledExternal}
-            currentLabel={currentLabel}
-            onToast={toast}
-          />
-        </div>
-
-        {/* ===== messages (scroll) + floating jump-to-bottom ===== */}
-        <div className="relative min-h-0 flex-1">
-          <div
-            ref={scrollRef}
-            onScroll={onScroll}
-            className="scroll-warm h-full overflow-y-auto px-3 py-4 sm:px-4"
-          >
+        {/* ===== messages — full-bleed scroll, content passes UNDER the glass ===== */}
+        <div
+          ref={scrollRef}
+          onScroll={onScroll}
+          className="scroll-warm h-full overflow-y-auto overflow-x-clip"
+        >
+          <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 pb-44 pt-16 sm:px-6">
             {isLoading && (
-              <div className="mx-auto flex max-w-2xl flex-col gap-5" role="status" aria-label="بيحمّل المحادثة">
+              <div className="flex flex-col gap-5" role="status" aria-label="بيحمّل المحادثة">
                 <div className="ms-auto h-12 w-2/5 animate-pulse rounded-2xl bg-muted" />
                 <div className="flex items-start gap-2.5">
                   <div className="size-7 shrink-0 animate-pulse rounded-full bg-muted" />
@@ -581,15 +538,15 @@ export function ChatView({ business, userId, onNavigate }: ChatViewProps) {
 
             {showWelcome && (
               <motion.div
-                initial={{ opacity: 0, y: 12 }}
+                initial={{ opacity: 0, y: 16 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.26, ease: 'easeOut' }}
-                className="mx-auto flex max-w-md flex-col items-center gap-4 py-8 text-center"
+                transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
+                className="flex flex-col items-center gap-4 py-10 text-center"
               >
                 <AgentAvatar state="idle" size="lg" />
                 <div>
                   <h2 className="text-lg font-bold">أهلاً بيك 👋</h2>
-                  <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">{vertical.welcome}</p>
+                  <p className="mt-1.5 max-w-md text-sm leading-relaxed text-muted-foreground">{vertical.welcome}</p>
                 </div>
                 <div className="flex flex-wrap justify-center gap-1.5">
                   {suggestionsQ.isPending ? (
@@ -612,7 +569,7 @@ export function ChatView({ business, userId, onNavigate }: ChatViewProps) {
                         animate={{ opacity: 1, y: 0 }}
                         transition={{ delay: 0.15 + i * 0.05, duration: 0.22, ease: 'easeOut' }}
                         onClick={() => void send(ex)}
-                        className="press rounded-full border border-border bg-card px-3.5 py-2 text-xs transition-all hover:-translate-y-0.5 hover:border-wakil-amber/50 hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                        className="press chip-lift rounded-full border border-border bg-card/70 px-3.5 py-2 text-xs backdrop-blur-sm transition-all hover:border-wakil-amber/50 hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
                       >
                         {ex}
                       </motion.button>
@@ -622,44 +579,34 @@ export function ChatView({ business, userId, onNavigate }: ChatViewProps) {
               </motion.div>
             )}
 
-            <div className="mx-auto flex max-w-2xl flex-col gap-5">
-              {turns.map((t) => (
-                <MessageBubble
-                  key={t.id}
-                  turn={t}
-                  onApprove={approve}
-                  onReject={reject}
-                  busyOpId={busyOpId}
-                  onNavigate={onNavigate}
-                  onRetry={t.id === failedId ? retry : undefined}
-                  reveal={t.id === revealId}
-                  error={t.id === failedId}
-                />
-              ))}
-            </div>
+            {turns.map((t) => (
+              <MessageBubble
+                key={t.id}
+                turn={t}
+                onApprove={approve}
+                onReject={reject}
+                busyOpId={busyOpId}
+                onNavigate={onNavigate}
+                onRetry={t.id === failedId ? retry : undefined}
+                reveal={t.id === revealId}
+                error={t.id === failedId}
+              />
+            ))}
           </div>
-
-          {/* floating scroll-to-bottom (appears when scrolled up) */}
-          {showJump && (
-            <div className="pointer-events-none absolute inset-x-0 bottom-4 flex justify-center">
-              <motion.button
-                type="button"
-                initial={{ scale: 0.6, opacity: 0, y: 4 }}
-                animate={{ scale: 1, opacity: 1, y: 0 }}
-                transition={{ duration: 0.15, ease: 'easeOut' }}
-                onClick={() => scrollToBottom(true)}
-                aria-label="انزل لآخر المحادثة"
-                className="press pointer-events-auto flex size-10 items-center justify-center rounded-full border border-border bg-card text-muted-foreground shadow-lg shadow-black/10 hover:text-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
-              >
-                <ChevronDown className="size-4" aria-hidden="true" />
-              </motion.button>
-            </div>
-          )}
         </div>
 
-        {/* ===== composer ===== */}
-        <div className="shrink-0 border-t border-border/70 bg-card/60 px-3 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2 backdrop-blur-sm sm:px-4 sm:pb-3">
-          <div className="mx-auto max-w-2xl">
+        {/* ===== floating auto-hide composer (glass over the messages) ===== */}
+        <motion.div
+          initial={false}
+          animate={{
+            y: composerVisible ? 0 : 180,
+            opacity: composerVisible ? 1 : 0,
+          }}
+          transition={{ type: 'spring', stiffness: 340, damping: 34, opacity: { duration: 0.18 } }}
+          className="composer-scrim pointer-events-none absolute inset-x-0 bottom-0 z-20 pt-8"
+          aria-hidden={!composerVisible}
+        >
+          <div className="pointer-events-auto mx-auto w-full max-w-4xl px-4 pb-3 sm:px-6">
             <Composer
               commands={commandsQ.data ?? []}
               suggestions={suggestionsQ.data ?? []}
@@ -668,12 +615,41 @@ export function ChatView({ business, userId, onNavigate }: ChatViewProps) {
               onSuggestionTap={sendSuggestion}
               disabled={sending}
               queuedCount={queuedCount}
+              modelKey={modelKey}
+              setModel={setModel}
+              enabledExternal={enabledExternal}
+              currentLabel={currentLabel}
+              onModelToast={toast}
+              onDraftingChange={setDrafting}
             />
-            <p className="mt-1.5 hidden text-center text-[10px] text-muted-foreground sm:block">
+            <p className="mt-1.5 text-center text-[10px] text-muted-foreground/80">
               وكيل بيسأل قبل ما ينفذ — كل عملية بتتحقق بعد التنفيذ
             </p>
           </div>
-        </div>
+        </motion.div>
+
+        {/* ===== jump-to-bottom (glass FAB — appears when the composer hid) ===== */}
+        <AnimatePresence>
+          {showJump && (
+            <motion.div
+              key="jump"
+              initial={{ scale: 0.5, opacity: 0, y: 8 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.5, opacity: 0, y: 8 }}
+              transition={{ type: 'spring', stiffness: 420, damping: 26 }}
+              className="absolute inset-x-0 bottom-5 z-10 flex justify-center"
+            >
+              <button
+                type="button"
+                onClick={() => scrollToBottom(true)}
+                aria-label="انزل لآخر المحادثة"
+                className="glass press-apple icon-seat size-11 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+              >
+                <ChevronDown className="size-5" aria-hidden="true" />
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* ===== conversations drawer (سجل المحادثات القديمة) ===== */}
         {drawerOpen && (
@@ -705,25 +681,266 @@ export function ChatView({ business, userId, onNavigate }: ChatViewProps) {
 }
 
 // ---------------------------------------------------------------------------
+// FloatingPill — the hover-reveal glass navbar («الناف بار يظهر مع الهافر»)
+// ---------------------------------------------------------------------------
+function FloatingPill({
+  business,
+  businesses,
+  avatarState,
+  notesCount,
+  notesDisabled,
+  alerts,
+  pinned,
+  setPinned,
+  creating,
+  onNewChat,
+  onHistory,
+  onNotes,
+  onNavigate,
+  theme,
+  onToggleTheme,
+}: {
+  business: BusinessLite
+  businesses: BusinessLite[]
+  avatarState: AgentState
+  notesCount: number
+  notesDisabled: boolean
+  alerts: AlertDTO[]
+  pinned: boolean
+  setPinned: (v: boolean) => void
+  creating: boolean
+  onNewChat: () => void
+  onHistory: () => void
+  onNotes: () => void
+  onNavigate?: (view: ViewKey) => void
+  theme: string | undefined
+  onToggleTheme: () => void
+}) {
+  const [hovered, setHovered] = useState(false)
+  const setSession = useWakil((s) => s.setSession)
+  const expanded = hovered || pinned
+
+  // HOVER-INTENT (macOS-style): enter clears the pending hide; leave arms a
+  // 350ms grace timer — moving between the strip and the pill never flickers,
+  // and the pill only folds once the mouse really leaves the top zone.
+  // A radix popover being open (business menu / bell) keeps it alive too.
+  const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const checkHide = () => {
+    if (document.querySelector('[data-radix-popper-content-wrapper]')) {
+      hideTimer.current = setTimeout(checkHide, 350) // a popover is open — retry
+      return
+    }
+    setHovered(false)
+  }
+  const enter = useCallback(() => {
+    if (hideTimer.current) clearTimeout(hideTimer.current)
+    hideTimer.current = null
+    setHovered(true)
+  }, [])
+  const leave = useCallback(() => {
+    if (hideTimer.current) clearTimeout(hideTimer.current)
+    hideTimer.current = setTimeout(checkHide, 350)
+  }, [])
+  useEffect(
+    () => () => {
+      if (hideTimer.current) clearTimeout(hideTimer.current)
+    },
+    [],
+  )
+
+  return (
+    <div className="pointer-events-none absolute inset-x-0 top-0 z-30 flex justify-center">
+      {/* hover strip — full-width invisible trigger at the very top */}
+      <div
+        className="pointer-events-auto absolute inset-x-0 top-0 h-12"
+        onMouseEnter={enter}
+        onMouseLeave={leave}
+        aria-hidden="true"
+      />
+      {/* focus/hover-follow hint: a keyboard user landing on the pill keeps it open */}
+      <div
+        onFocusCapture={enter}
+        onBlurCapture={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) leave()
+        }}
+        className="relative flex justify-center"
+      >
+        <AnimatePresence mode="wait" initial={false}>
+          {expanded ? (
+            <motion.div
+              key="pill"
+              initial={{ y: -28, opacity: 0, scale: 0.94 }}
+              animate={{ y: 0, opacity: 1, scale: 1 }}
+              exit={{ y: -24, opacity: 0, scale: 0.96 }}
+              transition={{ type: 'spring', stiffness: 420, damping: 30 }}
+              className="glass-strong pointer-events-auto mt-2 flex max-w-[calc(100vw-1.25rem)] items-center gap-0.5 overflow-x-auto rounded-full p-1.5 scroll-warm"
+              role="toolbar"
+              aria-label="شريط وكيل"
+              onMouseEnter={enter}
+              onMouseLeave={leave}
+            >
+              {/* وكيل avatar — its own circle */}
+              <button
+                type="button"
+                onClick={() => setPinned(!pinned)}
+                className="press-apple icon-seat size-9 shrink-0"
+                aria-label={pinned ? 'اقفل الشريط' : 'ثبّت الشريط'}
+                title={pinned ? 'اقفل' : 'ثبّت الشريط'}
+              >
+                <AgentAvatar state={avatarState} size="sm" />
+              </button>
+
+              {/* business switcher — instant portal popover (shrink-safe on mobile) */}
+              <div className="shrink-0">
+                <BusinessMenu
+                  businesses={businesses}
+                  active={business}
+                  compact
+                  onPick={(b, u) => setSession(b, u)}
+                />
+              </div>
+
+              <span className="mx-0.5 h-5 w-px shrink-0 bg-border" aria-hidden="true" />
+
+              {/* new chat */}
+              <Button
+                variant="ghost"
+                className="press-apple icon-seat size-9 shrink-0 text-muted-foreground hover:text-foreground"
+                onClick={onNewChat}
+                disabled={creating}
+                aria-label="محادثة جديدة"
+                title="محادثة جديدة"
+              >
+                {creating ? (
+                  <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  <SquarePen className="size-4" aria-hidden="true" />
+                )}
+              </Button>
+
+              {/* history */}
+              <Button
+                variant="ghost"
+                className="press-apple icon-seat size-9 shrink-0 text-muted-foreground hover:text-foreground"
+                onClick={onHistory}
+                aria-label="المحادثات القديمة"
+                title="المحادثات القديمة"
+              >
+                <History className="size-4" aria-hidden="true" />
+              </Button>
+
+              {/* «ورقة وكيل» — scratchpad */}
+              <Button
+                variant="ghost"
+                className="press-apple icon-seat relative size-9 shrink-0 text-muted-foreground hover:text-foreground"
+                onClick={onNotes}
+                disabled={notesDisabled}
+                aria-label="ورقة وكيل"
+                title="ورقة وكيل — ملاحظاته من شغله في المحادثة دي"
+              >
+                <NotebookPen className="size-4" aria-hidden="true" />
+                {notesCount > 0 && (
+                  <motion.span
+                    initial={{ scale: 0.4, opacity: 0 }}
+                    animate={{ scale: 1, opacity: 1 }}
+                    transition={{ type: 'spring', stiffness: 420, damping: 22 }}
+                    className="num absolute -end-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--wakil-amber)] px-1 text-[9px] font-bold tabular-nums text-white dark:text-black"
+                  >
+                    {arNum(notesCount)}
+                  </motion.span>
+                )}
+              </Button>
+
+              {/* notifications */}
+              <NotificationBell alerts={alerts} onNavigate={(v) => onNavigate?.(v)} />
+
+              {/* theme */}
+              <Button
+                variant="ghost"
+                className="press-apple icon-seat size-9 shrink-0 text-muted-foreground hover:text-foreground"
+                aria-label="تبديل الوضع الليلي"
+                title="الوضع الليلي"
+                onClick={onToggleTheme}
+              >
+                <motion.span
+                  key={theme ?? 'system'}
+                  initial={{ rotate: -90, opacity: 0 }}
+                  animate={{ rotate: 0, opacity: 1 }}
+                  transition={{ duration: 0.15, ease: 'easeOut' }}
+                  className="flex"
+                >
+                  {theme === 'dark' ? <Sun className="size-4.5" aria-hidden="true" /> : <Moon className="size-4.5" aria-hidden="true" />}
+                </motion.span>
+              </Button>
+
+              {/* back to the app views (desktop) */}
+              {onNavigate && (
+                <Button
+                  variant="ghost"
+                  className="press-apple icon-seat hidden size-9 text-muted-foreground hover:text-foreground sm:inline-flex"
+                  onClick={() => onNavigate('today')}
+                  aria-label="افتح لوحة اليوم"
+                  title="لوحة اليوم والإحصائيات"
+                >
+                  <LayoutGrid className="size-4" aria-hidden="true" />
+                </Button>
+              )}
+            </motion.div>
+          ) : (
+            /* collapsed: the peeking وكيل avatar — the hover/tap affordance */
+            <motion.button
+              key="peek"
+              type="button"
+              initial={{ opacity: 0, y: -12 }}
+              animate={{ opacity: 0.62, y: 0 }}
+              exit={{ opacity: 0, y: -12 }}
+              transition={{ type: 'spring', stiffness: 380, damping: 28 }}
+              onClick={() => setPinned(true)}
+              onMouseEnter={enter}
+              className="glass pointer-events-auto icon-seat mt-2 size-9 opacity-70 transition-opacity hover:opacity-100"
+              aria-label="افتح شريط وكيل"
+              title="الأدوات والمحادثات — مرّر الماوس هنا"
+            >
+              <AgentAvatar state={avatarState} size="sm" />
+            </motion.button>
+          )}
+        </AnimatePresence>
+      </div>
+
+      {/* pinned → outside click closes the pill */}
+      {pinned && (
+        <button
+          type="button"
+          className="fixed inset-0 z-[-1] cursor-default"
+          aria-label="اقفل الشريط"
+          onClick={() => setPinned(false)}
+          tabIndex={-1}
+        />
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Dynamic suggestion pill (welcome hero) — icon + label + reason badge
 // ---------------------------------------------------------------------------
 function SuggestionPill({ s, index, onPick }: { s: SuggestionDTO; index: number; onPick: () => void }) {
-  const Icon = TOOL_ICONS[s.icon] ?? Sparkles
+  const Icon = TOOL_ICONS[s.icon] ?? SquarePen
   const primary = s.tone === 'primary'
   return (
     <motion.button
       type="button"
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ delay: 0.15 + index * 0.05, duration: 0.22, ease: 'easeOut' }}
+      initial={{ opacity: 0, y: 8, scale: 0.97 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      transition={{ delay: 0.15 + index * 0.05, duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
       onClick={onPick}
       aria-label={s.reasonLabel ? `${s.label} — ${s.reasonLabel}` : s.label}
       title={s.prompt}
       className={cn(
-        'press flex min-h-11 max-w-full flex-col items-start gap-0.5 rounded-2xl border px-3.5 py-2 text-start transition-all hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50',
+        'press chip-lift flex min-h-11 max-w-full flex-col items-start gap-0.5 rounded-2xl border px-3.5 py-2 text-start transition-all focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50',
         primary
           ? 'border-transparent bg-primary text-primary-foreground hover:bg-primary/90'
-          : 'border-border bg-card hover:border-wakil-amber/50 hover:bg-accent hover:text-accent-foreground',
+          : 'border-border bg-card/70 backdrop-blur-sm hover:border-wakil-amber/50 hover:bg-accent hover:text-accent-foreground',
       )}
     >
       <span className="flex items-center gap-1.5 text-xs font-medium">
@@ -739,141 +956,5 @@ function SuggestionPill({ s, index, onPick }: { s: SuggestionDTO; index: number;
         </span>
       )}
     </motion.button>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Model picker — shadcn Popover (proper focus + outside-click handling)
-// ---------------------------------------------------------------------------
-function ModelPicker({
-  modelKey,
-  setModel,
-  enabledExternal,
-  currentLabel,
-  onToast,
-}: {
-  modelKey: string | null
-  setModel: (key: string) => void
-  enabledExternal: Array<ModelConfigDTO & { providerName: string }>
-  currentLabel: string
-  onToast: (t: { title: string; description?: string }) => void
-}) {
-  const [open, setOpen] = useState(false)
-
-  const select = (key: string, label: string) => {
-    setModel(key)
-    setOpen(false)
-    onToast({ title: 'تم تبديل الموديل', description: label })
-  }
-
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <Button
-          variant="outline"
-          className="group h-9 shrink-0 gap-1.5 rounded-full text-xs font-medium"
-          aria-label={`تبديل الموديل — الحالي ${currentLabel}`}
-        >
-          <Cpu className="size-3.5 text-wakil-amber" aria-hidden="true" />
-          <span className="max-w-24 truncate">{currentLabel}</span>
-          <ChevronDown
-            className="size-3.5 shrink-0 text-muted-foreground transition-transform duration-200 group-data-[state=open]:rotate-180"
-            aria-hidden="true"
-          />
-        </Button>
-      </PopoverTrigger>
-
-      <PopoverContent
-        align="end"
-        // R17 fix: long provider lists overflow small screens with no way to
-        // scroll («القايمة بتاعت الموديلات مش بتفتح كاملة ومبقدرش اسطرول») —
-        // cap the height and make the list itself scrollable.
-        className="max-h-[70vh] w-64 overflow-y-auto scroll-warm rounded-xl p-0"
-        dir="rtl"
-      >
-        <div className="p-1.5">
-          <p className="px-2.5 pb-1 pt-1.5 text-[11px] font-semibold text-muted-foreground">
-            الموديلات الداخلية
-          </p>
-          {BUILTIN_MODELS.map((m) => (
-            <ModelRow
-              key={m.key}
-              icon={m.icon}
-              label={m.label}
-              sub={m.sub}
-              active={modelKey === m.key}
-              onSelect={() => select(m.key, m.label)}
-            />
-          ))}
-
-          {enabledExternal.length > 0 && (
-            <>
-              <p className="mt-1.5 border-t border-border/60 px-2.5 pb-1 pt-2 text-[11px] font-semibold text-muted-foreground">
-                مزوّدين خارجيين
-              </p>
-              {enabledExternal.map((m) => (
-                <ModelRow
-                  key={m.id}
-                  icon={TIER_ICONS[m.tier] ?? Brain}
-                  label={m.label}
-                  sub={`${TIER_AR[m.tier] ?? m.tier} · ${m.providerName}`}
-                  active={modelKey === `ext:${m.id}`}
-                  onSelect={() => select(`ext:${m.id}`, `${m.label} — ${m.providerName}`)}
-                />
-              ))}
-            </>
-          )}
-
-          <p className="mt-1.5 border-t border-border/60 px-2.5 py-2 text-[10px] leading-relaxed text-muted-foreground">
-            تضيف مزوّدين من الإعدادات ↗
-          </p>
-        </div>
-      </PopoverContent>
-    </Popover>
-  )
-}
-
-function ModelRow({
-  icon: Icon,
-  label,
-  sub,
-  active,
-  onSelect,
-}: {
-  icon: LucideIcon
-  label: string
-  sub: string
-  active: boolean
-  onSelect: () => void
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onSelect}
-      aria-label={label}
-      aria-pressed={active}
-      className={cn(
-        'flex min-h-11 w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-start transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50',
-        active && 'bg-accent/70',
-      )}
-    >
-      <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-muted">
-        <Icon className="size-3.5 text-wakil-amber" aria-hidden="true" />
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-xs font-semibold">{label}</span>
-        <span className="block truncate text-[10px] text-muted-foreground">{sub}</span>
-      </span>
-      {active && (
-        <motion.span
-          initial={{ scale: 0.4, opacity: 0 }}
-          animate={{ scale: 1, opacity: 1 }}
-          transition={{ type: 'spring', stiffness: 420, damping: 22 }}
-          className="flex shrink-0"
-        >
-          <Check className="size-4 text-wakil-amber" aria-hidden="true" />
-        </motion.span>
-      )}
-    </button>
   )
 }

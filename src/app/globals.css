@@ -142,11 +142,17 @@
   html {
     direction: rtl;
     scroll-behavior: smooth;
+    /* R18: kills the phantom horizontal scroll (RTL left gap) without
+       creating a scroll container — content can never shift sideways */
+    overflow-x: clip;
+    max-width: 100%;
   }
   body {
     @apply bg-background text-foreground;
     font-feature-settings: "tnum" 1; /* tabular numbers for money */
     -webkit-font-smoothing: antialiased;
+    overflow-x: clip;
+    max-width: 100%;
   }
   ::selection {
     background: var(--wakil-amber-soft);
@@ -492,5 +498,133 @@
     animation: none !important;
     transition: none !important;
     opacity: 0 !important;
+  }
+}
+
+/* ============================================================
+   R18 — LIQUID GLASS (آبل) + micro-interactions upgrade
+   ============================================================ */
+
+/* the apple easing curves */
+:root {
+  --ease-apple: cubic-bezier(0.32, 0.72, 0, 1);      /* sheet/pill entrances */
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);  /* bouncy pop */
+  --ease-glide: cubic-bezier(0.22, 1, 0.36, 1);      /* content settle */
+}
+
+/* liquid glass surface: frosted + saturated + hairline edge + top sheen */
+.glass {
+  background: color-mix(in oklab, var(--card) 78%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(1.6);
+  backdrop-filter: blur(20px) saturate(1.6);
+  border: 1px solid color-mix(in oklab, var(--foreground) 10%, transparent);
+  box-shadow:
+    0 1px 0 0 color-mix(in oklab, var(--card) 80%, transparent) inset,
+    0 -1px 0 0 color-mix(in oklab, var(--foreground) 8%, transparent) inset,
+    0 12px 32px -12px rgb(15 26 43 / 0.18),
+    0 2px 8px -2px rgb(15 26 43 / 0.08);
+}
+.dark .glass {
+  background: color-mix(in oklab, var(--card) 72%, transparent);
+  box-shadow:
+    0 1px 0 0 color-mix(in oklab, var(--foreground) 10%, transparent) inset,
+    0 -1px 0 0 rgb(0 0 0 / 0.35) inset,
+    0 12px 32px -12px rgb(0 0 0 / 0.5),
+    0 2px 8px -2px rgb(0 0 0 / 0.3);
+}
+
+/* stronger glass for floating chrome (composer / top pill) */
+.glass-strong {
+  background: color-mix(in oklab, var(--card) 86%, transparent);
+  -webkit-backdrop-filter: blur(28px) saturate(1.8);
+  backdrop-filter: blur(28px) saturate(1.8);
+  border: 1px solid color-mix(in oklab, var(--foreground) 12%, transparent);
+  box-shadow:
+    0 1px 0 0 color-mix(in oklab, var(--card) 90%, transparent) inset,
+    0 -1px 0 0 color-mix(in oklab, var(--foreground) 10%, transparent) inset,
+    0 18px 48px -16px rgb(15 26 43 / 0.28),
+    0 4px 12px -4px rgb(15 26 43 / 0.12);
+}
+.dark .glass-strong {
+  background: color-mix(in oklab, var(--card) 80%, transparent);
+  box-shadow:
+    0 1px 0 0 color-mix(in oklab, var(--foreground) 12%, transparent) inset,
+    0 -1px 0 0 rgb(0 0 0 / 0.4) inset,
+    0 18px 48px -16px rgb(0 0 0 / 0.6),
+    0 4px 12px -4px rgb(0 0 0 / 0.35);
+}
+
+/* apple pop — spring overshoot for pills, badges, chips */
+.pop-in {
+  animation: pop-in 360ms var(--ease-spring) backwards;
+}
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.92);
+  }
+  60% {
+    opacity: 1;
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* soft content settle — message entrances */
+.settle-in {
+  animation: settle-in 380ms var(--ease-glide) backwards;
+}
+@keyframes settle-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* springy press for circular icon buttons */
+.press-apple {
+  transition: transform 140ms var(--ease-spring), background-color 140ms ease,
+    color 140ms ease, box-shadow 140ms ease;
+}
+.press-apple:hover {
+  transform: scale(1.08);
+}
+.press-apple:active {
+  transform: scale(0.88);
+  transition-duration: 60ms;
+}
+
+/* a single circular icon seat — every icon gets its own circle */
+.icon-seat {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  flex-shrink: 0;
+}
+
+/* gradient scrim under the floating composer so text fades under it */
+.composer-scrim {
+  background: linear-gradient(
+    to top,
+    color-mix(in oklab, var(--background) 92%, transparent) 30%,
+    color-mix(in oklab, var(--background) 55%, transparent) 70%,
+    transparent
+  );
+}
+
+/* R18 glass reduced-motion guard */
+@media (prefers-reduced-motion: reduce) {
+  .pop-in,
+  .settle-in,
+  .press-apple {
+    animation: none !important;
+    transition: none !important;
   }
 }

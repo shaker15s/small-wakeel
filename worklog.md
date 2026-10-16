@@ -590,3 +590,41 @@ Stage Summary:
 - All 3 reported UI bugs fixed at ROOT CAUSE (dev-portal overlay + stacking-context trap + no scroll + width cap) and browser-verified.
 - «العقل الحقيقي» LIVE: the prompt now REACHES a real LLM every turn; the model thinks, free-chats (even outside work), decomposes compound tasks, picks and calls tools itself in a loop, creates approval-gated drafts, saves promises to memory — with the deterministic fallback ladder intact underneath (brain fails → PASS 1 → rule-based; zero double-execution).
 - Remaining for R18: real scheduled reminders (promise dates → morning report), ASR/TTS voice, VLM photo ingestion, Excel import, WhatsApp. The model's memory_save + promise-net cover the «مهمة مجدولة» data today; proactive delivery (بيتصل بيك) is next.
+
+---
+Task ID: R18
+Agent: CEO (orchestrator, direct build)
+Task: «بلجنز + عقل حقيقي + تصميم آبل» — full R18 update: liquid-glass chat redesign (hover-reveal floating pill, auto-hide composer, model picker inside composer, full-width, business-switcher fix, overflow fixes) + brain tools (calculate / schedule_task / set_persona), anti-refusal prompt rules, JSON-echo parser hardening, and routing-hijack fix for compound work messages.
+
+Work Log:
+- globals.css: html/body `overflow-x: clip` + max-width (kills the phantom horizontal scroll / RTL left-gap), liquid-glass utilities (.glass, .glass-strong — backdrop-blur+saturation+hairline edge+top sheen), Apple easing vars (--ease-apple/spring/glide), .pop-in/.settle-in/.press-apple/.icon-seat/.composer-scrim, reduced-motion guards.
+- Composer.tsx REBUILT: compact glass input pill (min-h 44px, 3-row cap), MODEL PICKER MOVED INSIDE (opens side="top" from the bottom box, max-h-[45vh] scrollable — «قايمة الموديلات تحت في مربع الكتابة»), every icon in its own circle (mic/deep-research/send), send button spring + queue counter, onDraftingChange protects auto-hide while drafting/focused.
+- ChatView.tsx REBUILT (full-bleed chat): floating glass pill at top center — hidden by default, HOVER-INTENT reveal (350ms grace timers, popover-aware retry, pinned mode via avatar tap for touch), contains وكيل avatar circle + BusinessMenu + new-chat/history/notes(badge)/NotificationBell/theme/grid-nav, all circular icon seats; pill horizontally scrollable on mobile (max-w calc(100vw-1.25rem), shrink-0 children — 370px @390px ✓). Auto-hiding floating composer (framer spring y/opacity; hides when scrolled up AND no draft; jump-to-bottom glass FAB replaces it). Reading column widened to max-w-4xl; messages pass UNDER the glass (liquid depth). Battle-tested SSE send/stream/queue/retry logic preserved verbatim.
+- AppShell.tsx: view==='chat' → FULL-BLEED branch (no header/nav/desktop footer; mobile tab bar only, glass-strong). Other views keep classic chrome now built from shared BusinessMenu + NotificationBell. Fixed accounts/reports nav icons.
+- NEW components/app/BusinessMenu.tsx: business/user switcher as instant Radix Popover portal (fixes BOTH bugs: slow-to-appear + «فيه حاجة مغطية عليه» — the old inline dropdown was painted under the scroll container).
+- NEW components/app/NotificationBell.tsx: shared bell + NotificationList (portal popover, same component in pill + header).
+- MessageBubble.tsx: settle-in entrances, spring user-bubble entrance, refined radii (rounded-[1.25rem] rounded-tl-md).
+- prompt.ts: TONE_AR map; buildAgentSystemPrompt accepts `tone` (injected as «نبرتك الحالية» block — the model's OWN system prompt is now data it controls via set_persona); new tools documented (calculate / schedule_task / set_persona); «الممنوعات المطلقة» block: ban «أنا مش مدرّب/مش هغيّر تفكيري» refusals, ban technical meta-talk, honesty rule (never claim a draft was registered when the tool failed/ran), free-chat explicit (football/cooking/tech/any topic).
+- harness.ts BRAIN: safeCalculate (Arabic-Indic digits + ×÷٪ normalized, charset whitelist, Function on sanitized string only, 4-decimals rounding) → kv card «الحاسبة» + facts; schedule_task (title/whenLabel → ScheduledTask row, resolveArabicWhen parses يوم الجمعة/بكره/بعد بكره/اخر الشهر/الشهر الجاي/الاسبوع الجاي → concrete Cairo 10:00 date, tool='remind' default, jotNote todo); set_persona (Arabic tone words → AgentSettings.tone upsert, TONE_AR line fed back into every future brain prompt). brainStepLabel labels for the 3 new tools; AGENT_TOOL_NAMES/TOOL_STEP_LABEL updated in registry.ts.
+- harness.ts PARSER HARDENING: parseBrainReply rewritten — handles pure JSON, fenced JSON, MULTIPLE separate tool_calls blocks mixed with prose, and ESCAPED-quote echoes (\"tool_calls\"); per-call signature dedupe. NEW stripToolJson (brace-walk removal of any tool_calls JSON + «نتايج الأدوات» echo) applied to the final reply — the user can never see raw JSON again. Loop-level executedSigs dedupe: an exact re-issued call reports back instead of re-executing (no duplicate drafts from model echoes).
+- api/tasks/tick: 'remind' tasks post a scheduled reminder message into the conversation (no tool run, title IS the payload) — «مهمة مجدولة» delivers on the promised day.
+- memory.ts ROUTING FIX (third hijack of its family): extractSaveRequest now bails when the message carries BOTH a write verb AND a digit (WORK_BEARING_RE + DIGIT_RE) — «حسن اشترى بـ١٠٠ دفع ٤٠… خليك فاكر الميعاد» goes to the BRAIN LOOP (model itself splits record_sale + memory_save + schedule_task); pure saves («احفظ إني بحب أسدد كل خميس») still take the deterministic path.
+- Cleanup: deleted the garbage hijack memory («الميعاد وذكرني يومه»), fixed the JSON-leaked historical message, cancelled stale duplicate WKL-4013/4014 test drafts, reset persona tone to friendly, fresh conversation left as the default view.
+
+Stage Summary:
+- E2E VERIFIED (agent-browser, fresh session, 0 console errors):
+  • Chat renders full-bleed; peek avatar top-center → hover/tap → glass pill springs in → mouse leaves → folds back (hover-intent cycle verified programmatically).
+  • BusinessMenu: instant open, switch سوبرماركت→صيدلية took effect immediately (label + data).
+  • Model picker INSIDE composer: opens upward, lists built-ins + 4 external mock models.
+  • Math: «احسبلي (٤٥٠×٣)÷٥ وبعدينقولي هربح كام لو بعت بحاجه ٢٥» → calculate ×2 → «٢٧٠» and «٢٤٥» cards + natural reply, zero refusal.
+  • Compound deferred payment: «وليد اشترى أوجمنتين بـ١١٠ دفع ٥٠ الباقي السبت… ذكرني» → draft WKL-4015 (total 110ج, paid 50ج → 60ج آجل) + memory «وليد عليه 60 جنيه باقي (يوم السبت)» + ScheduledTask «وليد هيدفع باقي 60 جنيه» remind يوم السبت 2026-10-17 + honest reply referencing the real ref.
+  • Free chat: Ahly-vs-Zamalek opinion — real conversational answer.
+  • set_persona: «عايزك تكلمني بشكل رسمي» → tone persisted formal (AgentSettings verified), later reset to friendly.
+  • Read tool via brain: «ملخص اليوم ايه؟» → real DB numbers.
+  • Composer auto-hide: scrolled 6324px conversation to top → composer slides below viewport + jump FAB appears; back to bottom → returns.
+  • Overflow: html scrollWidth == clientWidth at 390px, 800px, 1280px (phantom horizontal scroll GONE); mobile pill fits (370 ≤ 390).
+  • VLM reviews: desktop chat + dark mode + mobile pill all pass (glass quality, contrast, no cut-offs).
+  • tsc clean, eslint clean, dev.log zero ⨯, mock-provider :3031 healthy, dev server :3000 healthy (setsid-detached).
+- Architecture: 25 tools now live in the model's hands (12 reads, 7 write-drafts, memory ×2, calculate, schedule_task, set_persona + user's own web tools) — the «الموديل يتحكم في كل حاجة» direction: even its system prompt's tone is a tool-controlled setting.
+- Known minor: model sometimes mis-states a DERIVED figure in prose (said «خسارة ١٥٠» where 68−150=82) while the underlying tool numbers stay correct — the verifier only cross-checks DB-sourced facts, not arithmetic the model narrates; next round could route derived math through calculate automatically.
+

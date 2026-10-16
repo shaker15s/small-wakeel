@@ -29,6 +29,14 @@ import { startOfCairoDay } from '@/app/api/_lib/dates'
 /** «احفظ …» / «خليك فاكر …» / «أنا بفضل …» — the R13 preference path (verbatim). */
 export const MEMORY_SAVE_RE = /(احفظ|خليك فاكر|افتكر اني|انا بفضل|بستحب)/
 
+/** R18 hijack guard: a message carrying BOTH a write verb and a number is
+ *  WORK («حسن اشترى بـ١٠٠ دفع ٤٠ والباقي... خليك فاكر الميعاد وذكرني») —
+ *  the BRAIN LOOP owns it: the model itself splits the tasks (record_sale /
+ *  memory_save / schedule_task). Only PURE save requests («احفظ إني بحب أسدد
+ *  كل خميس» — a verb but zero digits) stay on the deterministic memory path. */
+const WORK_BEARING_RE = /(اشتر[ىي]|بعت|بع |بيع|دفع|سدد|حصل|قبض|استلم|سلم|خد)/
+const DIGIT_RE = /[\d٠-٩]/
+
 const FORGET_KEYWORDS = ['انسى', 'انسي', 'امسح من ذاكرتك', 'امسحها من ذاكرتك', 'بطل فاكر', 'بطل تفكر', 'انسها', 'امسح الكلام ده', 'امسح الذكرى دي']
 const FORGET_RE = /(انسى|انسي|امسح من ذاكرتك|بطل فاكر|بطل تفكر|انسها|امسحها)/
 
@@ -92,6 +100,8 @@ export interface SaveRequest {
  */
 export function extractSaveRequest(text: string, norm: string): SaveRequest | null {
   if (!MEMORY_SAVE_RE.test(norm) || norm.length > 260) return null
+  // R18: compound work + memory ask → the brain handles the memory itself
+  if (WORK_BEARING_RE.test(norm) && DIGIT_RE.test(toWesternDigits(norm))) return null
   for (const kw of ['خليك فاكر اني', 'خليك فاكر', 'افتكر اني', 'احفظ', 'انا بفضل', 'بستحب']) {
     const m = flexiblePattern(kw).exec(text)
     if (!m) continue

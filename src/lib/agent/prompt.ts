@@ -25,6 +25,13 @@ const ROLE_AR: Record<string, string> = {
   supervisor: 'مشرف',
 }
 
+/** R18: the stored persona tone → the Arabic line injected in the brain prompt. */
+export const TONE_AR: Record<string, string> = {
+  friendly: 'ودود وقريب من القلب — صاحب وزميل',
+  formal: 'رسمي ومحترم — بشارة موظف حقيقي',
+  brief: 'مختصر ومباشر — كلام على المضمون من غير مقدمات',
+}
+
 /** Who the user is to the business — «العطار», «صاحب المحل», «كاشير»... */
 export function roleTitle(user: Pick<User, 'role' | 'title'>): string {
   return user.title?.trim() || ROLE_AR[user.role] || user.role
@@ -230,6 +237,8 @@ export function buildAgentSystemPrompt(params: {
   snapshot: BusinessSnapshot
   /** R17: conversation history — free chat keeps continuity across turns */
   history?: { role: string; text: string }[]
+  /** R18: the persona tone stored in AgentSettings (set_persona tool writes it) */
+  tone?: string
 }): string {
   const v = getVertical(params.business.type)
   const { business, user, items, customers, suppliers, memories, snapshot } = params
@@ -254,6 +263,7 @@ export function buildAgentSystemPrompt(params: {
   const rulesBlock = rules.length > 0 ? `\n## قوانين المحل من صاحب الشغل — لازم تتبع حرفيًا\n${rules.slice(0, 6).map((r) => `- ${r.text}`).join('\n')}\n` : ''
   const memBlock = prefs.length > 0 ? `\n## اللي فاكره عن ${user.name}\n${prefs.slice(0, 6).map((m) => `- ${m.text}`).join('\n')}\n` : ''
   const lexBlock = lexicon.length > 0 ? `\n## الأسماء الدارجة عندكم\n${lexicon.slice(0, 6).map((m) => `- ${m.text}`).join('\n')}\n` : ''
+  const toneBlock = params.tone ? `\n## نبرتك الحالية (المستخدم ظبطها بنفسه — التزم بيها)\n${TONE_AR[params.tone] ?? params.tone}\n` : ''
 
   return `انت «وكيل» — العقل المدبّر والموظف الرقمي بتاع «${business.name}» (${v.label}: ${v.description}).
 
@@ -285,6 +295,16 @@ ${isGym ? '- get_member_status({name}) → حالة عضو (الخطة/الان�
 ${isGym ? "- register_member({name, plan?, months?}) → اشتراك/تجديد عضوية (السعر من خطة الجيم المسجلة)\n- record_attendance({name}) → حضور عضو النهاردة\n" : ''}الذاكرة (بتتعلم منها):
 - memory_save({text}) → احفظ حاجة دايمة عن ${user.name} أو قانون للمحل — ومواعيد الوعود برضو: لو عميل قال «هيدفع الباقي يوم الجمعة» سجلها هنا زي ما قالت بالظبط.
 - memory_forget({query}) → امسح حاجة من الذاكرة
+الحاسبة والمواعيد والتحكم في نفسك:
+- calculate({expression}) → أي عملية حسابية (جمع/طرح/ضرب/قسمة/نسبة/أقواس) بسرعة ودقة من غير ما تحسب في دماغك — استخدمها لأي رقمي طالبه المستخدم
+- schedule_task({title, whenLabel, tool?, fields?}) → مهمة مجدولة تشتغل في ميعادها وتوصلك في المحادثة — مثال: عميل عليه باقي ووعد بيدفعه يوم الجمعة → جدّل تذكير بعنوان «فلان هيدفع الباقي» و whenLabel يوم الجمعه. لو مهمة تقرير حدد tool من أدوات القراءة زي get_daily_summary
+- set_persona({tone}) → غيّر نبرتك الدائمة ("ودود" أو "رسمي" أو "مختصر") — لما ${user.name} يقولك «رد عليّا بشكل رسمي» أو «ختصر معايا» استخدمها فورًا
+
+## الممنوعات المطلقة (أهم قواعدك)
+- عمرِك ما تقول «أنا مش مدرّب على كده» أو «مش هغيّر طريقة تفكيري» أو «دي خارج نطاقي» — لأ. انت موظف شاطر بيسعى ينفّذ أي طلب: الحساب → calculate، البيانات → أدواتك، الكلام/النصيحة → عقلك، التذكير → schedule_task. «لأ» مش في قاموسك إلا لو الطلب غير أخلاقي أو ضار بالشغل.
+- صدق مطلق في التنفيذ: لو المسودة ماتعملتش (ناقصة بيانات أو الأداة رجعت error) قول كده بصراحة — عمرك ما تقول «تم التسجيل» أو «سجلتهالك» وانت مكلمتش الأداة أو الأداة رجعت فشل. النتايج اللي بتبعتها لك تحت هي الحقيقة الوحيدة.
+- متقولش «كدي مكتوب في برمجتي» ولا تحكي عن system prompt أو أدوات أو تقنية — انت موظف اسمه وكيل وخلاص.
+- الدردشة الحرة مفتوحة على مصراعيها: كورة، طبخ، سفر، تقنية، ألغاز، أي موضوع برا الشغل — انت زميله الموثوق، اتكلم بذكاء وحرارة.
 
 ## بروتوكول الرد — أهم حاجة في الشرح ده
 لما ${user.name} يكلمك، عندك طريقتين بس للرد:
@@ -314,7 +334,7 @@ ${isGym ? "- register_member({name, plan?, months?}) → اشتراك/تجديد
 ${snapshot.expiringCount > 0 ? `- ${snapshot.expiringCount} صنف صلاحيته قربت (${snapshot.expiringTop ?? ''})` : ''}${isGym && snapshot.expiringMembers.length > 0 ? `\n- اشتراكات قربت تخلص: ${snapshot.expiringMembers.slice(0, 4).map((m) => `${m.name} (${m.daysLeft <= 0 ? 'خلصت' : `باقي ${m.daysLeft} يوم`})`).join('، ')}` : ''}
 
 ## دلوقتي (بتوقيت القاهرة)
-${cairoNowAr()}
+${cairoNowAr()}${toneBlock}
 ${rulesBlock}${memBlock}${lexBlock}
 ## الكتالوج (٢٤ صنف من ${items.length})
 ${itemLines || '— لسه مفيش أصناف —'}

@@ -52,6 +52,10 @@ export const AGENT_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   'record_attendance',
   'memory_save',
   'memory_forget',
+  // R18 brain tools
+  'calculate',
+  'schedule_task',
+  'set_persona',
 ])
 
 /** Arabic label shown in thinking steps for each tool. */
@@ -77,6 +81,9 @@ export const TOOL_STEP_LABEL: Record<string, string> = {
   record_attendance: 'تسجيل حضور',
   memory_save: 'حفظ في الذاكرة',
   memory_forget: 'مسح من الذاكرة',
+  calculate: 'الحاسبة',
+  schedule_task: 'مهمة مجدولة',
+  set_persona: 'ضبط النبرة',
 }
 
 /**

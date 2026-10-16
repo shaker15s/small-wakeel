@@ -60,7 +60,7 @@ import { RESEARCH_TRIGGER_RE, runDeepResearch } from './research'
 import { ensurePrismaFresh, jotFactsFromCards, jotNote, notesContext } from './scratchpad'
 import { activeTools, userToolsPromptLine } from './userTools'
 import { factsFromCards, verifyReply, type VerifyFact } from './verify'
-import { buildAdvisoryPrompt, buildAgentSystemPrompt, buildReplyPrompt, buildSystemPrompt, roleTitle } from './prompt'
+import { buildAdvisoryPrompt, buildAgentSystemPrompt, buildReplyPrompt, buildSystemPrompt, roleTitle, TONE_AR } from './prompt'
 import { READ_TOOLS, runReadTool, TYPE_AR, type ReadTool } from './tools'
 import {
   bumpMemoryUsage,
@@ -1305,8 +1305,11 @@ interface BrainToolCall {
 }
 
 /**
- * Parse a brain reply: {"tool_calls":[…]} (direct OR embedded in prose) →
- * the calls; null → plain conversational text (free-chat / final reply).
+ * Parse a brain reply into tool calls. Handles ALL the shapes GLM actually
+ * emits: (a) a pure {"tool_calls":[…]} JSON, (b) the JSON wrapped in a code
+ * fence, (c) SEVERAL separate blocks mixed with prose («{...}\n\n{...}»),
+ * (d) JSON with ESCAPED quotes (\"tool_calls\") echoed from the results we
+ * sent it. Returns the merged calls; null → plain conversational text.
  */
 function parseBrainReply(raw: string): BrainToolCall[] | null {
   const cleaned = raw.trim()
@@ -1331,18 +1334,98 @@ function parseBrainReply(raw: string): BrainToolCall[] | null {
     }
     return null
   }
+
+  // (a) direct — the whole string is one JSON object (fences tolerated)
   const direct = tryParse(cleaned.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim())
   if (direct) return direct
-  // the model wrapped the JSON in prose — extract the {…} block
-  const m = cleaned.match(/\{\s*"tool_calls"/)
-  if (m && m.index !== undefined) {
-    const end = cleaned.lastIndexOf('}')
-    if (end > m.index) {
-      const embedded = tryParse(cleaned.slice(m.index, end + 1))
-      if (embedded) return embedded
+
+  // (b-d) scan for embedded blocks: unescape \" → " first (escaped echoes),
+  // then brace-walk every {"tool_calls":…} block and parse each separately.
+  const unescaped = cleaned.replace(/\\"/g, '"')
+  const calls: BrainToolCall[] = []
+  const seen = new Set<string>()
+  let idx = 0
+  while (idx < unescaped.length) {
+    const at = unescaped.indexOf('"tool_calls"', idx)
+    if (at === -1) break
+    // walk BACK to the enclosing {
+    let start = -1
+    for (let i = at; i >= 0; i--) {
+      if (unescaped[i] === '{') {
+        start = i
+        break
+      }
     }
+    // walk FORWARD to the balanced close (skips nothing — best effort)
+    let depth = 0
+    let end = -1
+    for (let i = start; i < unescaped.length; i++) {
+      const ch = unescaped[i]
+      if (ch === '{') depth++
+      else if (ch === '}') {
+        depth--
+        if (depth === 0) {
+          end = i + 1
+          break
+        }
+      }
+    }
+    if (start >= 0) {
+      const block = unescaped.slice(start, end === -1 ? unescaped.length : end)
+      const parsed = tryParse(block)
+      if (parsed) {
+        for (const c of parsed) {
+          const sig = `${c.tool}:${JSON.stringify(c.args)}`
+          if (!seen.has(sig)) {
+            seen.add(sig)
+            calls.push(c)
+          }
+        }
+      }
+    }
+    idx = (end === -1 ? at + 1 : end)
   }
-  return null
+  return calls.length > 0 ? calls : null
+}
+
+/** Strip any tool_calls JSON (plain, escaped, fenced) from a FINAL text reply
+ *  — the model sometimes echoes its own tool calls; the user must never see
+ *  raw JSON. Also drops «نتايج الأدوات» echo blocks. */
+function stripToolJson(text: string): string {
+  let out = text.replace(/\\"/g, '"')
+  // fenced blocks first
+  out = out.replace(/```(?:json)?\s*\{[\s\S]*?"tool_calls"[\s\S]*?\}\s*```/g, '')
+  let idx = 0
+  while (idx < out.length) {
+    const at = out.indexOf('"tool_calls"', idx)
+    if (at === -1) break
+    let start = -1
+    for (let i = at; i >= 0; i--) {
+      if (out[i] === '{') {
+        start = i
+        break
+      }
+    }
+    let depth = 0
+    let end = -1
+    for (let i = start; i < out.length; i++) {
+      const ch = out[i]
+      if (ch === '{') depth++
+      else if (ch === '}') {
+        depth--
+        if (depth === 0) {
+          end = i + 1
+          break
+        }
+      }
+    }
+    if (start >= 0) out = out.slice(0, start) + out.slice(end === -1 ? out.length : end)
+    else idx = at + 1
+  }
+  // results-echo cleanup
+  const echoAt = out.indexOf('نتايج الأدوات')
+  if (echoAt !== -1) out = out.slice(0, echoAt)
+  return out.replace(/[ \t]{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim()
 }
 
 /** Brain write-tools → the harness executor contract (opType + intent fields).
@@ -1415,9 +1498,103 @@ const BRAIN_WRITE_TOOLS: Record<
 function brainStepLabel(call: BrainToolCall): { label: string; icon: ThinkingStep['icon'] } {
   if (call.tool === 'memory_save') return { label: 'بحفظ في ذاكرتي', icon: 'verify' }
   if (call.tool === 'memory_forget') return { label: 'بامسح من ذاكرتي', icon: 'verify' }
+  if (call.tool === 'calculate') return { label: 'بحسب في الحاسبة', icon: 'verify' }
+  if (call.tool === 'schedule_task') return { label: 'بجدّل مهمة', icon: 'plan' }
+  if (call.tool === 'set_persona') return { label: 'بظبط نبرتي', icon: 'plan' }
   const w = BRAIN_WRITE_TOOLS[call.tool]
   if (w) return { label: `بجهّز مسودة: ${TYPE_AR[w.opType] ?? w.opType}`, icon: 'plan' }
   return { label: `بجيب: ${TOOL_LABEL_AR[call.tool] ?? call.tool}`, icon: 'search' }
+}
+
+// ---------------------------------------------------------------------------
+// R18 «الأدوات بتاعة العقل» — calculate / schedule_task / set_persona
+// ---------------------------------------------------------------------------
+/** Pretty Arabic-Indic number for calculator output (no currency — pure math). */
+function fmtCalcNumber(n: number): string {
+  return new Intl.NumberFormat('ar-EG', { maximumFractionDigits: 4 }).format(n)
+}
+
+/** SAFE arithmetic evaluation — digits normalized (٠-٩ ۰-۹), × ÷ to * /,
+ *  then a charset whitelist, then Function() on the sanitized string only.
+ *  The model NEVER refuses math («حسبلي كده») — it calls calculate instead. */
+function safeCalculate(rawExpr: string): { ok: true; value: number } | { ok: false; error: string } {
+  const expr = toWesternDigits(String(rawExpr ?? ''))
+    .replace(/ـ/g, '') // tatweel is a JOINER, not an operator
+    .replace(/[×xX]/g, '*')
+    .replace(/÷/g, '/')
+    .replace(/−|–|—/g, '-')
+    .replace(/٪/g, '%')
+    .replace(/\s+/g, '')
+    .slice(0, 200)
+  if (!expr) return { ok: false, error: 'التعبير فاضي' }
+  if (!/^[\d+\-*/().%]+$/.test(expr)) return { ok: false, error: 'التعبير فيه حروف مش مسموحة' }
+  if (/\d{16,}/.test(expr)) return { ok: false, error: 'رقم أطول من اللازم' }
+  try {
+    const value = Function(`"use strict"; return (${expr})`)() as unknown
+    if (typeof value !== 'number' || !Number.isFinite(value)) return { ok: false, error: 'النتيجة مش رقم صالح' }
+    return { ok: true, value: Math.round(value * 10000) / 10000 }
+  } catch {
+    return { ok: false, error: 'التعبير مش مظبوط رياضيًا' }
+  }
+}
+
+/** «بكره» / «يوم الجمعة» / «بعد بكره» / «الاسبوع الجاي» … → a concrete Date
+ *  (Cairo-local morning 10:00 — reminders land at a humane hour). */
+function resolveArabicWhen(whenLabel: string): Date | null {
+  const s = normalizeAr(whenLabel)
+  const now = new Date()
+  const d = new Date(now)
+  d.setHours(10, 0, 0, 0)
+  // weekday map — Saturday STARTS the Egyptian business week
+  const DAYS: Record<string, number> = {
+    السبت: 6,
+    الاحد: 0,
+    الاتنين: 1,
+    التلات: 2,
+    الاربع: 3,
+    الخميس: 4,
+    الجمعه: 5,
+  }
+  let matched = false
+  if (/بعد بكره/.test(s)) {
+    d.setDate(d.getDate() + 2)
+    matched = true
+  } else if (/بكره/.test(s)) {
+    d.setDate(d.getDate() + 1)
+    matched = true
+  } else {
+    for (const [name, dow] of Object.entries(DAYS)) {
+      if (s.includes(name)) {
+        const diff = (dow - d.getDay() + 7) % 7 || 7
+        d.setDate(d.getDate() + diff)
+        matched = true
+        break
+      }
+    }
+  }
+  if (!matched) {
+    if (/اخر الشهر/.test(s)) {
+      d.setMonth(d.getMonth() + 1, 0) // last day of current month
+      matched = true
+    } else if (/الشهر الجاي/.test(s)) {
+      d.setMonth(d.getMonth() + 1)
+      matched = true
+    } else if (/الاسبوع الجاي/.test(s)) {
+      d.setDate(d.getDate() + 7)
+      matched = true
+    }
+  }
+  return matched ? d : null
+}
+
+/** The Arabic tone word (or latin key) → the AgentSettings.tone value. */
+function toneKey(raw: string): string | null {
+  const s = normalizeAr(raw)
+  if (/رسمي|محترم|فصحي/.test(s)) return 'formal'
+  if (/مختصر|قصير|مباشر|على طول|بدون مقدمات/.test(s)) return 'brief'
+  if (/ودود|دافي|صاحب|صديق|ودي/.test(s)) return 'friendly'
+  if (['friendly', 'formal', 'brief'].includes(s)) return s
+  return null
 }
 
 /** Promised-payment clause: «هيديني الباقي يوم الجمعة» → «يوم الجمعة» (normalized text). */
@@ -1749,6 +1926,10 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     const replyParts: string[] = []
     const resultsForModel: Record<string, unknown>[] = []
     let rounds = 0
+    // R18 dedupe: the same tool+args signature must never execute twice in
+    // ONE turn (the model sometimes re-issues its earlier call when it
+    // echoes JSON) — a repeat reports back instead of drafting a duplicate.
+    const executedSigs = new Set<string>()
 
     // dynamic thinking timeline: understand(done) + mem + [tool steps…] + verify + reply
     const toolSteps: ThinkingStep[] = []
@@ -1767,6 +1948,14 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
 
     /** execute ONE model-issued tool call — never throws, always reports back */
     const execBrainCall = async (call: BrainToolCall): Promise<void> => {
+      // R18 dedupe: an exact re-issue (the model echoing its own earlier
+      // call) reports back instead of re-executing — no duplicate drafts.
+      const sig = `${call.tool}:${JSON.stringify(call.args)}`
+      if (executedSigs.has(sig)) {
+        resultsForModel.push({ tool: call.tool, ok: true, duplicate: true, note: 'نفذت الأداة دي مرة قبل كده في نفس الرسالة — مكررتهاش' })
+        return
+      }
+      executedSigs.add(sig)
       executedAnyTool = true
       const { label, icon } = brainStepLabel(call)
       const argBits = Object.values(call.args)
@@ -1925,6 +2114,97 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           }
           return
         }
+        // ---- calculate (R18: the model NEVER refuses math) ----
+        if (call.tool === 'calculate') {
+          const rawExpr = String(call.args.expression ?? call.args.expr ?? call.args.formula ?? call.args.calc ?? '')
+          const calc = safeCalculate(rawExpr)
+          if (calc.ok) {
+            const prettyExpr = toWesternDigits(rawExpr).replace(/\s+/g, ' ').trim().slice(0, 80)
+            const valueAr = fmtCalcNumber(calc.value)
+            const calcCard: ResultCardDTO = {
+              kind: 'kv',
+              title: 'الحاسبة',
+              rows: [{ label: prettyExpr, value: valueAr }],
+            }
+            allCards.push(calcCard)
+            emit({ event: 'cards', cards: allCards })
+            brainFacts.push({ label: prettyExpr, value: valueAr })
+            step.detail = `${prettyExpr} = ${valueAr}`
+            resultsForModel.push({ tool: 'calculate', ok: true, expression: prettyExpr, value: calc.value })
+            replyParts.push(`${prettyExpr} = ${valueAr}`)
+          } else {
+            step.detail = calc.error
+            resultsForModel.push({ tool: 'calculate', ok: false, error: calc.error })
+          }
+          await trackUsage(business.id, user.id, 'tool', 'calculate')
+          return
+        }
+        // ---- schedule_task (R18 «مهمة مجدولة» — reminders land in the chat) ----
+        if (call.tool === 'schedule_task') {
+          const title = String(call.args.title ?? call.args.reminder ?? '').trim().slice(0, 140)
+          const whenLabel = String(call.args.whenLabel ?? call.args.when ?? '').trim().slice(0, 80)
+          if (!title) {
+            step.detail = 'عنوان المهمة فاضي'
+            resultsForModel.push({ tool: 'schedule_task', ok: false, error: 'title مطلوب' })
+            return
+          }
+          const rawTool = String(call.args.tool ?? '').trim()
+          const taskTool = READ_TOOLS.has(rawTool) ? rawTool : 'remind'
+          const when = resolveArabicWhen(whenLabel) ?? (() => {
+            const d = new Date()
+            d.setDate(d.getDate() + 1)
+            d.setHours(10, 0, 0, 0)
+            return d
+          })()
+          const whenAr = new Intl.DateTimeFormat('ar-EG', { weekday: 'long', day: 'numeric', month: 'long' }).format(when)
+          const task = await db.scheduledTask.create({
+            data: {
+              businessId: business.id,
+              userId: user.id,
+              conversationId: ctx.conversationId ?? null,
+              title,
+              tool: taskTool,
+              fields: JSON.stringify(call.args.fields ?? {}),
+              whenLabel: whenLabel || whenAr,
+              scheduledFor: when,
+              recurrence: null,
+            },
+          })
+          step.detail = `${title} — ${whenLabel || whenAr}`
+          void jotNote({
+            businessId: business.id,
+            userId: user.id,
+            conversationId: ctx.conversationId,
+            kind: 'todo',
+            text: `مهمة مجدولة: ${title} (${whenLabel || whenAr})`,
+            source: 'scheduled',
+          })
+          meta.notesJotted++
+          resultsForModel.push({ tool: 'schedule_task', ok: true, task: title, when: whenLabel || whenAr })
+          replyParts.push(`سجّلت مهمة مجدولة ✅ — «${title}» يوم ${whenLabel || whenAr}، وهفتكرها في وقتها.`)
+          await trackUsage(business.id, user.id, 'tool', 'schedule_task')
+          return
+        }
+        // ---- set_persona (R18: the model tunes its own operating tone) ----
+        if (call.tool === 'set_persona') {
+          const raw = String(call.args.tone ?? call.args.style ?? '').trim()
+          const key = toneKey(raw)
+          if (!key) {
+            step.detail = 'نبرة مش معروفة'
+            resultsForModel.push({ tool: 'set_persona', ok: false, error: 'اختار: ودود / رسمي / مختصر' })
+            return
+          }
+          await db.agentSettings.upsert({
+            where: { businessId: business.id },
+            update: { tone: key, updatedAt: new Date() },
+            create: { businessId: business.id, vertical: business.type, tone: key },
+          })
+          step.detail = TONE_AR[key] ?? key
+          resultsForModel.push({ tool: 'set_persona', ok: true, tone: key })
+          replyParts.push(`ظبطت نبرتي من دلوقتي ✅ — ${TONE_AR[key] ?? key}.`)
+          await trackUsage(business.id, user.id, 'tool', 'set_persona')
+          return
+        }
         // ---- unknown tool ----
         resultsForModel.push({ tool: call.tool, ok: false, error: 'أداة غير معروفة' })
         step.detail = 'أداة مش معروفة — تجاهلتها'
@@ -1943,7 +2223,20 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     let finalText = ''
     try {
       const snapshot = await getSnapshot(business)
-      const baseBrain = buildAgentSystemPrompt({ business, user, items, customers, suppliers, memories, snapshot, history: ctx.history })
+      // R18: the persona tone the user/model chose (set_persona writes it) —
+      // the brain's OWN system prompt is data the agent controls.
+      const settings = await db.agentSettings.findUnique({ where: { businessId: business.id } })
+      const baseBrain = buildAgentSystemPrompt({
+        business,
+        user,
+        items,
+        customers,
+        suppliers,
+        memories,
+        snapshot,
+        history: ctx.history,
+        tone: settings?.tone ?? undefined,
+      })
       const brainSystem = notesSection ? `${baseBrain}\n\n${notesSection}` : baseBrain
       const convo: LLMMessage[] = [
         { role: 'system', content: brainSystem },
@@ -1972,6 +2265,9 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         calls = parseBrainReply(raw)
       }
       finalText = calls ? '' : raw.trim() // cap reached with pending calls → compose deterministic
+      // R18 safety: the model sometimes ECHOES its own tool_calls JSON (plain
+      // or escaped) inside the final prose — the user must never see raw JSON.
+      finalText = stripToolJson(finalText)
       // GLM-on-Arabic glitch: stray CJK ideographs/kana sometimes leak into
       // Arabic replies («هت 影响 على») — strip them deterministically (the
       // brain's language is Arabic/English only, never Chinese/Japanese).
