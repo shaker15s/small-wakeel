@@ -35,7 +35,7 @@ tail -f dev.log                               # dev server log
 |---|---|
 | Start dev | `bun run dev` (:3000, hot reload, logs to `dev.log`) |
 | Production build | `bun run build && bun run start` (standalone, honours `PORT`) |
-| Full quality gate | `bun run check && bun run evals && bun run db:sync --check` |
+| Full quality gate (what CI runs) | `bun run ci` (or `bun run ci:fast` to skip the build) |
 | Schema drift check | `bun run db:sync --check` (exit 1 = drift, prints the exact statements) |
 | Apply schema additions | `bun run db:sync` (additive only, one transaction) |
 | Regenerate Prisma client | `bun run db:generate` (offline-safe) |

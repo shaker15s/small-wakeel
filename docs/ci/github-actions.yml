@@ -1,3 +1,9 @@
+# وكيل — GitHub Actions gate.
+#
+# Copy to .github/workflows/ci.yml to enable it (pushing workflow files needs a
+# token with the `workflow` scope). The steps are the same ones scripts/ci.sh
+# runs locally, so CI and a developer machine can never disagree.
+#
 name: CI
 
 on:
@@ -35,23 +41,8 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Generate Prisma client
-        run: bun run db:generate
-
-      - name: Schema drift gate
-        run: bun run db:sync --check
-
-      - name: Typecheck
-        run: bun run typecheck
-
-      - name: Lint
-        run: bun run lint
-
-      - name: Unit + integration tests
-        run: bun test
-
-      - name: Golden Arabic eval suite
-        run: bun run evals
+      - name: Full gate (generate · drift · typecheck · lint · tests · evals)
+        run: bash scripts/ci.sh --fast
 
       - name: Production build
         run: bun run build

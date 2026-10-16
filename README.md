@@ -52,7 +52,8 @@ bun run check       # typecheck + lint + tests
 bun run db:sync --check   # schema drift gate (exit 1 when drift)
 ```
 
-CI runs all of it on every push (`.github/workflows/ci.yml`).
+`bun run ci` runs the whole gate locally (install → prisma → drift → typecheck → lint → tests → evals → build); `bun run ci:fast` skips the build.
+CI runs the same script — copy [`docs/ci/github-actions.yml`](docs/ci/github-actions.yml) to `.github/workflows/ci.yml` to enable it (pushing workflow files needs a token with the `workflow` scope).
 
 ---
 
