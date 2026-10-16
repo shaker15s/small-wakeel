@@ -35,6 +35,21 @@ export interface ModelInfo {
   baseUrl?: string
 }
 
+/**
+ * Offline / deterministic mode (WAKIL_OFFLINE=1).
+ *
+ * Some deployments have no LLM reachable at all — an air-gapped shop, a smoke
+ * test, the golden-dataset eval suite, CI. In that mode every model call fails
+ * IMMEDIATELY (no retry ladder, no timeouts) so the harness drops straight to
+ * its deterministic Arabic ladder instead of stalling for seconds per pass.
+ */
+export function isOfflineMode(): boolean {
+  const flag = process.env.WAKIL_OFFLINE?.trim().toLowerCase()
+  return flag === '1' || flag === 'true' || flag === 'on'
+}
+
+const OFFLINE_ERROR = 'وضع الأوفلاين مفعّل (WAKIL_OFFLINE=1) — الموديلات متعطلة عن قصد'
+
 export const BUILTIN_MODELS: ModelInfo[] = [
   { key: 'builtin-deep', label: 'عميق مفكّر', tier: 'deep', source: 'builtin' },
   { key: 'builtin-air', label: 'خفيف سريع', tier: 'air', source: 'builtin' },
@@ -128,7 +143,12 @@ export const REPLY_STREAM_TIMEOUT_MS = 60_000
 // ---------------------------------------------------------------------------
 
 /** Set by retry/fallback hooks; the harness resets + reads it per turn. */
-export const llmHealth = { retried: false, fellBack: false }
+export const llmHealth = {
+  retried: false,
+  fellBack: false,
+  /** Label of the model that ACTUALLY answered, when the ladder had to switch. */
+  servedBy: null as string | null,
+}
 
 function breakerKeyFor(model: ModelInfo): string {
   return `${model.source === 'external' ? 'external' : 'builtin'}:${model.key}`
@@ -218,45 +238,126 @@ async function* streamExternal(model: ModelInfo, messages: LLMMessage[]): AsyncG
   }
 }
 
+// ---------------------------------------------------------------------------
+// FALLBACK LADDER — «لو موديل وقع، الشغل مايقفش»
+// ---------------------------------------------------------------------------
+// Before this, a dead model meant a dead turn: the requested source was tried
+// and the harness dropped straight to the rule ladder, so a shop with a working
+// BYO provider still got «الموديل مش متاح» whenever the built-in gateway was
+// unreachable (no key, no network, provider outage). Now every model call walks
+// an ordered ladder — requested model first, then the closest-tier ENABLED model
+// from the other source — and announces the switch to the user instead of
+// silently degrading. Bounded to MAX_MODEL_ATTEMPTS so latency stays sane.
+
+const MAX_MODEL_ATTEMPTS = 3
+const LADDER_TTL_MS = 30_000
+let ladderCache: { at: number; models: ModelInfo[] } | null = null
+
+function tierRank(tier: string): number {
+  return tier === 'deep' ? 0 : tier === 'balanced' ? 1 : 2
+}
+
+/** Enabled BYO models, cached briefly (they change only from the UI). */
+async function externalModels(): Promise<ModelInfo[]> {
+  if (ladderCache && Date.now() - ladderCache.at < LADDER_TTL_MS) return ladderCache.models
+  try {
+    const configs = await db.modelConfig.findMany({
+      where: { enabled: true },
+      include: { provider: true, capabilities: true },
+      orderBy: { id: 'asc' },
+    })
+    const models: ModelInfo[] = configs.map((c) => ({
+      key: `ext:${c.id}`,
+      label: c.label,
+      tier: (c.tier as 'air' | 'balanced' | 'deep') ?? 'balanced',
+      source: 'external' as const,
+      remoteModel: c.remoteId,
+      baseUrl: c.provider.baseUrl,
+    }))
+    // Models that PROBED ok come first — a known-dead provider is tried last.
+    const probed = new Map(configs.map((c) => [`ext:${c.id}`, c.capabilities?.ok === true]))
+    models.sort((a, b) => Number(probed.get(b.key) ?? false) - Number(probed.get(a.key) ?? false))
+    ladderCache = { at: Date.now(), models }
+    return models
+  } catch {
+    return []
+  }
+}
+
+/** Ordered alternatives to `model`: same tier first, opposite source next. */
+export async function fallbackLadder(model: ModelInfo): Promise<ModelInfo[]> {
+  const externals = (await externalModels()).filter((m) => m.key !== model.key)
+  const builtins = BUILTIN_MODELS.filter((m) => m.key !== model.key)
+  const wanted = tierRank(model.tier)
+  const byTier = (a: ModelInfo, b: ModelInfo) => Math.abs(tierRank(a.tier) - wanted) - Math.abs(tierRank(b.tier) - wanted)
+  const primary = model.source === 'builtin' ? externals : builtins
+  const secondary = model.source === 'builtin' ? builtins : externals
+  return [...primary.sort(byTier), ...secondary.sort(byTier)]
+}
+
 /** Unified streaming chat. Yields reasoning chunks first (if the model produces
- *  them), then content chunks. Falls back to built-in on external failure. */
+ *  them), then content chunks — walking the fallback ladder on failure. */
 export async function* streamChat(
   model: ModelInfo,
   messages: LLMMessage[],
 ): AsyncGenerator<StreamChunk> {
-  if (model.source === 'external') {
+  if (isOfflineMode()) throw new Error(OFFLINE_ERROR)
+  const ladder = [model, ...(await fallbackLadder(model))].slice(0, MAX_MODEL_ATTEMPTS)
+  let lastError: unknown = null
+  for (let attempt = 0; attempt < ladder.length; attempt++) {
+    const candidate = ladder[attempt]
     try {
       const started = await startStream(
-        streamExternal(model, messages),
-        breakerKeyFor(model),
-        `stream:${model.key}`,
+        candidate.source === 'external' ? streamExternal(candidate, messages) : streamBuiltin(messages),
+        breakerKeyFor(candidate),
+        `stream:${candidate.key}`,
       )
+      if (attempt > 0) {
+        llmHealth.fellBack = true
+        llmHealth.servedBy = candidate.label
+        console.warn(`[llm] «${model.label}» وقع — بكمّل بـ«${candidate.label}»`)
+        // Honest to the owner: the model changed mid-conversation.
+        yield { type: 'reasoning', text: `«${model.label}» مش راد دلوقتي — بكمّل بـ«${candidate.label}».` }
+      }
       if (!started.first.done) yield started.first.value
       yield* started.gen
       return
     } catch (err) {
-      console.error('[llm] external provider failed, falling back to builtin:', err)
-      llmHealth.fellBack = true
-      yield { type: 'reasoning', text: 'المزوّد الخارجي مش متاح حاليًا — هرجع للموديل الداخلي.' }
-      // fall through to the builtin path below
+      lastError = err
+      console.error(`[llm] فشل «${candidate.label}»:`, err instanceof Error ? err.message : err)
     }
   }
-  const builtinKey = model.source === 'builtin' ? `builtin:${model.key}` : 'builtin:fallback'
-  const started = await startStream(streamBuiltin(messages), builtinKey, `stream:${model.key}`)
-  if (!started.first.done) yield started.first.value
-  yield* started.gen
+  throw lastError instanceof Error ? lastError : new Error('مفيش موديل متاح دلوقتي')
 }
 
 /** Non-streaming completion (intent extraction / research synthesis / judge) —
  *  wrapped with retry + breaker; the harness's deterministic fallbacks still
  *  catch the final throw. */
 export async function completeChat(model: ModelInfo, messages: LLMMessage[]): Promise<string> {
-  return withBreaker(breakerKeyFor(model), () =>
-    withRetry(() => completeChatOnce(model, messages), {
-      label: `intent:${model.key}`,
-      onRetry: retryHook(`intent:${model.key}`),
-    }),
-  )
+  // Checked BEFORE the retry/breaker wrappers: offline must be instant.
+  if (isOfflineMode()) throw new Error(OFFLINE_ERROR)
+  const ladder = [model, ...(await fallbackLadder(model))].slice(0, MAX_MODEL_ATTEMPTS)
+  let lastError: unknown = null
+  for (const candidate of ladder) {
+    try {
+      const text = await withBreaker(breakerKeyFor(candidate), () =>
+        withRetry(() => completeChatOnce(candidate, messages), {
+          label: `intent:${candidate.key}`,
+          onRetry: retryHook(`intent:${candidate.key}`),
+        }),
+      )
+      if (text.trim()) {
+        if (candidate.key !== model.key) {
+          llmHealth.fellBack = true
+          llmHealth.servedBy = candidate.label
+        }
+        return text
+      }
+    } catch (err) {
+      lastError = err
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('مفيش موديل متاح دلوقتي')
 }
 
 async function completeChatOnce(model: ModelInfo, messages: LLMMessage[]): Promise<string> {

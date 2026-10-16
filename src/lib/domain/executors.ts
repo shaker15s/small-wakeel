@@ -2,7 +2,7 @@
 // The LLM extracts intent; THESE functions are the only writers of business truth.
 // Every write: idempotency key, state machine, verification read-back, audit event.
 
-import type { Item, Operation } from '@prisma/client'
+import type { Item, Operation, Prisma } from '@prisma/client'
 import { db } from '@/lib/db'
 import type { OpType } from '@/lib/types'
 import { arUnit } from '@/lib/verticals'
@@ -87,12 +87,20 @@ export async function createDraft(params: {
 export async function executeOperation(opId: string, decidedBy: string): Promise<{ op: Operation; outcome: ExecOutcome }> {
   const op = await db.operation.findUnique({ where: { id: opId } })
   if (!op) throw new Error('العملية مش موجودة')
-  if (op.status !== 'AWAITING_APPROVAL') throw new Error(`العملية مش في حالة انتظار اعتماد (حالتها: ${op.status})`)
 
-  await db.operation.update({
-    where: { id: opId },
+  // Atomic compare-and-set: the UPDATE only matches while the row is still
+  // awaiting approval. Two approvals arriving together therefore cannot both
+  // proceed — the loser gets count = 0 and is rejected. (A read-then-write
+  // check would let the second caller execute the SAME operation twice:
+  // double stock movement, double cash entry.)
+  const claimed = await db.operation.updateMany({
+    where: { id: opId, status: 'AWAITING_APPROVAL' },
     data: { status: 'EXECUTING', decidedAt: new Date() },
   })
+  if (claimed.count === 0) {
+    const current = await db.operation.findUnique({ where: { id: opId }, select: { status: true } })
+    throw new Error(`العملية مش في حالة انتظار اعتماد (حالتها: ${current?.status ?? 'مش موجودة'})`)
+  }
 
   const payload = JSON.parse(op.payload) as Record<string, unknown>
   let outcome: ExecOutcome
@@ -182,7 +190,7 @@ const EXECUTORS: Record<OpType, Executor> = {
       const remaining = total - paid
       const customerId = p.customerId ? String(p.customerId) : null
 
-      await Promise.all([
+      await db.$transaction([
         ...resolved.map((r) => db.item.update({ where: { id: r.itemId }, data: { stockQty: { decrement: Math.round(r.qty) } } })),
         db.cashEntry.create({ data: { businessId, direction: 'in', amount: paid, reason: `بيع — ${resolved.map((r) => r.name).join(' + ')}`, ref } }),
         ...(customerId && remaining !== 0 ? [db.customer.update({ where: { id: customerId }, data: { balance: { increment: remaining } } })] : []),
@@ -221,14 +229,14 @@ const EXECUTORS: Record<OpType, Executor> = {
     const remaining = total - paid
     const customerId = p.customerId ? String(p.customerId) : null
 
-    const txOps: Promise<unknown>[] = [
+    const txOps: Prisma.PrismaPromise<unknown>[] = [
       db.item.update({ where: { id: itemId }, data: { stockQty: { decrement: Math.round(qtyN) } } }),
       db.cashEntry.create({ data: { businessId, direction: 'in', amount: paid, reason: `بيع — ${item.name}`, ref } }),
     ]
     if (customerId && remaining !== 0) {
       txOps.push(db.customer.update({ where: { id: customerId }, data: { balance: { increment: remaining } } }))
     }
-    await Promise.all(txOps)
+    await db.$transaction(txOps)
 
     // Verification read-back
     const after = await stockBefore(itemId)
@@ -266,7 +274,9 @@ const EXECUTORS: Record<OpType, Executor> = {
       const remaining = total - paid
       const supplierId = p.supplierId ? String(p.supplierId) : null
 
-      await Promise.all([
+      // ONE transaction: stock movements, the cash entry and the supplier
+      // balance either all land or none do (no half-executed purchase).
+      await db.$transaction([
         ...resolved.map((r) => db.item.update({ where: { id: r.itemId }, data: { stockQty: { increment: Math.round(r.qty) } } })),
         db.cashEntry.create({ data: { businessId, direction: 'out', amount: paid, reason: `شرا — ${resolved.map((r) => r.name).join(' + ')}`, ref } }),
         ...(supplierId && remaining !== 0 ? [db.supplier.update({ where: { id: supplierId }, data: { balance: { increment: remaining } } })] : []),
@@ -300,14 +310,14 @@ const EXECUTORS: Record<OpType, Executor> = {
     const supplierId = p.supplierId ? String(p.supplierId) : null
     const before = await stockBefore(itemId)
 
-    const txOps: Promise<unknown>[] = [
+    const txOps: Prisma.PrismaPromise<unknown>[] = [
       db.item.update({ where: { id: itemId }, data: { stockQty: { increment: Math.round(qtyN) } } }),
       db.cashEntry.create({ data: { businessId, direction: 'out', amount: paid, reason: `شرا — ${item.name}`, ref } }),
     ]
     if (supplierId && remaining !== 0) {
       txOps.push(db.supplier.update({ where: { id: supplierId }, data: { balance: { increment: remaining } } }))
     }
-    await Promise.all(txOps)
+    await db.$transaction(txOps)
 
     const after = await stockBefore(itemId)
     const checks = [
@@ -346,7 +356,7 @@ const EXECUTORS: Record<OpType, Executor> = {
     if (amount <= 0) return { ok: false, checks: [], effects: [], failReason: 'المبلغ لازم يكون أكبر من صفر' }
     const before = customer.balance
     if (amount > before) return { ok: false, checks: [], effects: [], failReason: `المبلغ أكبر من المديونية (${egp(before)})` }
-    await Promise.all([
+    await db.$transaction([
       db.customer.update({ where: { id: customerId }, data: { balance: { decrement: amount } } }),
       db.cashEntry.create({ data: { businessId, direction: 'in', amount, reason: `تحصيل — ${customer.name}`, ref } }),
     ])
@@ -369,7 +379,7 @@ const EXECUTORS: Record<OpType, Executor> = {
     if (amount <= 0) return { ok: false, checks: [], effects: [], failReason: 'المبلغ لازم يكون أكبر من صفر' }
     const before = supplier.balance
     if (amount > before) return { ok: false, checks: [], effects: [], failReason: `المبلغ أكبر من المستحق للمورد (${egp(before)})` }
-    await Promise.all([
+    await db.$transaction([
       db.supplier.update({ where: { id: supplierId }, data: { balance: { decrement: amount } } }),
       db.cashEntry.create({ data: { businessId, direction: 'out', amount, reason: `سداد — ${supplier.name}`, ref } }),
     ])

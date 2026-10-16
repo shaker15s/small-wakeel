@@ -40,16 +40,35 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       if (op.risk === 'R3' && body.reason?.trim()) {
         await db.operation.update({ where: { id }, data: { reason: body.reason.trim() } })
       }
-      const { op: updated, outcome } = await executeOperation(id, user.id)
-      return NextResponse.json({
-        operation: serializeOp(updated, user.name),
-        outcome,
-      })
+      try {
+        const { op: updated, outcome } = await executeOperation(id, user.id)
+        return NextResponse.json({
+          operation: serializeOp(updated, user.name),
+          outcome,
+        })
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'مش قادر أنفّذ العملية'
+        // State-machine conflicts (already approved/cancelled elsewhere — e.g.
+        // two taps on the approve button) are CLIENT errors: answer 409 with the
+        // real reason instead of a generic 500.
+        if (/انتظار اعتماد|مش موجودة/.test(message)) {
+          return NextResponse.json({ error: message }, { status: 409 })
+        }
+        throw err
+      }
     }
 
     if (body.action === 'reject' || body.action === 'cancel') {
-      const updated = await rejectOperation(id, user.id, body.reason)
-      return NextResponse.json({ operation: serializeOp(updated, user.name) })
+      try {
+        const updated = await rejectOperation(id, user.id, body.reason)
+        return NextResponse.json({ operation: serializeOp(updated, user.name) })
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'مش قادر ألغي العملية'
+        if (/انتظار اعتماد|مش موجودة/.test(message)) {
+          return NextResponse.json({ error: message }, { status: 409 })
+        }
+        throw err
+      }
     }
 
     return badRequest('action لازم يكون approve أو reject')

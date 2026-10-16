@@ -23,8 +23,29 @@ import { normalizeAr } from './arabic'
 import type { TurnEmit } from './harness'
 
 /** Auto-detect trigger (explicit deepResearch flag OR these words). */
+/**
+ * Auto-research triggers — EGYPTIAN dialect aware, and deliberately
+ * WORD-BOUNDED.
+ *
+ * Why the boundaries matter: «ليه» (why) is a substring of «عليه» / «إليه» /
+ * «اللي عليه», which appear in the most ordinary shop sentences — «حسن دفع
+ * ٥٠ من اللي عليه» used to be hijacked into a full deep-research report
+ * (2.6 s, web queries, a sources card) instead of booking a collection.
+ * Same for «سوق» inside «بيسوق» and «بحث» inside «مباحث». Only a standalone
+ * word may trigger the expensive pipeline.
+ */
 export const RESEARCH_TRIGGER_RE =
-  /ابحث|بحث|حلّل|حلل|قارن|مقارنة|دراسة|ادرس|ليه|استراتيجية|إزاي أحسن|بكام في السوق|سوق|أسعار المنافسين/i
+  /(?:^| )(?:ابحث|بحث|حلّل|حلل|قارن|مقارنة|دراسة|ادرس|ليه|استراتيجية|إزاي أحسن|سوق|الأسواق)(?: |$|؟|\?)|بكام في السوق|أسعار المنافسين/i
+
+/**
+ * True when the message is a concrete business COMMAND (a write, or a read of
+ * a named tool). Such messages must never be auto-hijacked by the research
+ * pipeline: «بعت ٢ علبة لبن» is an instruction, not a research question.
+ * Explicit toggles and genuine analysis questions still research.
+ */
+export function isActionableIntent(intent: { intent: string; tool?: string }): boolean {
+  return intent.intent === 'write' || (intent.intent === 'read' && Boolean(intent.tool))
+}
 
 const AR_ORDINALS = ['١', '٢', '٣', '٤', '٥', '٦']
 

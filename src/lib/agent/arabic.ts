@@ -27,7 +27,14 @@ export function toWesternDigits(s: string): string {
   for (const ch of s) {
     const ai = AR_DIGITS.indexOf(ch)
     const fi = FA_DIGITS.indexOf(ch)
-    out += ai >= 0 ? String(ai) : fi >= 0 ? String(fi) : ch
+    if (ai >= 0) out += String(ai)
+    else if (fi >= 0) out += String(fi)
+    // ARABIC DECIMAL SEPARATOR (U+066B) and THOUSANDS SEPARATOR (U+066C).
+    // Without this, «١٢٫٥٠ جنيه» parsed as 12 — a real money bug: every price
+    // typed with an Arabic decimal separator lost its piastres silently.
+    else if (ch === '\u066B') out += '.'
+    else if (ch === '\u066C') out += ''
+    else out += ch
   }
   return out
 }
@@ -52,6 +59,7 @@ const AR_NUMBER_WORDS: Record<string, number> = {
 export function parseArabicNumber(raw: string): number | null {
   const hasDigits = /[0-9٠-٩]/.test(raw)
   if (hasDigits) {
+    // «،» and «,» are used as decimal separators by Egyptian speakers too.
     const s = toWesternDigits(raw).replace(/[,،]/g, '.')
     const m = s.match(/-?\d+(\.\d+)?/)
     if (m) return parseFloat(m[0])

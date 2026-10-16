@@ -226,11 +226,13 @@ model ScheduledTask {
   whenLabel      String
   scheduledFor   DateTime
   recurrence     String? // daily | weekly | monthly
-  status         String    @default("pending") // pending | done | failed | cancelled
+  status         String    @default("pending") // pending | running | done | failed | cancelled
   result         String?
   failReason     String?
   createdAt      DateTime  @default(now())
   executedAt     DateTime?
+  /** set when a runner atomically claims the task (stuck-run recovery uses it) */
+  claimedAt      DateTime?
 
   @@index([status, scheduledFor])
   @@index([businessId, userId, status])

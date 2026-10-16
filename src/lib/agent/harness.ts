@@ -56,7 +56,7 @@ import { convertToBaseUnit, matchEntity, normalizeAr, parseQuantity, toWesternDi
 import { createDraft } from '@/lib/domain/executors'
 import { canDraft, computeRisk, RISK_META } from '@/lib/domain/risk'
 import { completeChat, llmHealth, modelLabelFor, resolveModel, streamChat, type LLMMessage } from './llm'
-import { RESEARCH_TRIGGER_RE, runDeepResearch } from './research'
+import { RESEARCH_TRIGGER_RE, isActionableIntent, runDeepResearch } from './research'
 import { ensurePrismaFresh, jotFactsFromCards, jotNote, notesContext } from './scratchpad'
 import { activeTools, userToolsPromptLine } from './userTools'
 import { factsFromCards, verifyReply, type VerifyFact } from './verify'
@@ -360,7 +360,9 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
     return { intent: 'write', opType: 'stock_adjustment', fields: {} }
   }
   if (/(وضع|رصيد|حاله) الخزنه|الخزنه|كاش/.test(s)) return { intent: 'read', tool: 'get_cash_position', fields: {} }
-  if (/(مخزون|ناقص|استوك)/.test(s) && !/(بعت|بيع|شرا|اشتري)/.test(s)) return { intent: 'read', tool: 'list_low_stock', fields: {} }
+  // «النواقص» / «نواقص» are the broken plurals an Egyptian owner actually uses —
+  // a substring test for «ناقص» misses them entirely.
+  if (/(مخزون|ناقص|نواقص|استوك|تحت الحد)/.test(s) && !/(بعت|بيع|شرا|اشتري)/.test(s)) return { intent: 'read', tool: 'list_low_stock', fields: {} }
   if (/(صلاحيت|صلاحيه|منتهي|قربت|تنتهي|قرب تخلص)/.test(s)) return { intent: 'read', tool: 'list_expiring', fields: {} }
   if (/(مديون|اللي ليا|تحصيلات|مين عليها|عليها فلوس|عليهم فلوس|العملاء)/.test(s)) return { intent: 'read', tool: 'list_receivables', fields: {} }
   if (/(اللي علينا|للمورد|الموردين|مستحق)/.test(s)) return { intent: 'read', tool: 'list_payables', fields: {} }
@@ -377,7 +379,7 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
   }
   // Attendance (gym): noun «حضور» + Egyptian verb forms («كريم حضر»,
   // «لعب حصة PT», «خلص تدريب») — a member WORKED OUT today.
-  if (/(حضور|(^| )حضر( |$)|لعب حصه?|خلص (تدريب|حصه?)|اتمرن|اتدرب)/.test(s)) return { intent: 'write', opType: 'attendance', fields: {} }
+  if (/(حضور|(^| )حضر(ت)?( |$)|لعب حصه?|خلص (تدريب|حصه?)|اتمرن|اتدرب|عمل تمرين)/.test(s)) return { intent: 'write', opType: 'attendance', fields: {} }
   // Membership STATUS question — a READ, must beat the renewal WRITE below:
   // «عضوية عمر باقي قد ايه؟» → get_member_status for عمر (name word follows
   // عضويه/اشتراك); renewal verbs (جدد/تجديد/سجل) keep the WRITE path.
@@ -391,7 +393,11 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
   }
   // Word-boundary forms only: «اشتراك عمر شهرية» matches, but a QUESTION like
   // «الاشتراكات اللي هتنتهي» (plural الاشتراكات) must NOT fire a membership write.
-  if (isGym && (/(^| )(اشتراك|تجديد|اشتراك جديد|جديد لـ)( |$)/.test(s) || /جدد/.test(s))) return { intent: 'write', opType: 'membership', fields: {} }
+  // Verb forms count: «اشتركت سارة يناير» / «جددت لعمر» — a bare noun test missed
+  // every sentence that uses the past tense, which is how owners talk.
+  if (isGym && (/(^| )(اشتراك|تجديد|جديد لـ)( |$)/.test(s) || /جدد|جددت|اشتركت|تجدد/.test(s))) {
+    return { intent: 'write', opType: 'membership', fields: {} }
+  }
   if (/(مصروف|صرفت)/.test(s)) return { intent: 'write', opType: 'expense', fields: { label: 'مصروف' } }
   // Sale FIRST so a partial payment («بع لبن لأحمد بس دفع ٢٠ بس») never looks
   // like a collection. «بع» is the Egyptian imperative — standalone word.
@@ -1202,6 +1208,16 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
       const isRenewal = norm.includes('تجديد') || norm.includes('جدد')
       const explicitName = String(f.customerName ?? '').trim()
       const customer = explicitName ? matchEntity(explicitName, customers)?.entity ?? null : matchEntity(text, customers)?.entity ?? null
+      // A name WAS typed but it is not in the member list. Saying «لمين؟» again
+      // makes the owner think the agent ignored him — name the missing person
+      // and offer the fix. («اشتركت سارة …» when سارة is not registered.)
+      const hintedName = text.match(/(?:اشتركت|جددت|جدد|اشتراك|لـ|ل)\s+([^\s،,؟?0-9]{2,20})/)?.[1]
+      if (!customer && !explicitName && hintedName && normalizeAr(hintedName).length >= 2) {
+        return {
+          ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'العضو',
+          failMessage: `مفيش عضو مسجّل باسم «${hintedName}» — اتأكد من الاسم أو ضيفه من شاشة الأعضاء`,
+        }
+      }
       if (!customer && isRenewal) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'العضو', failMessage: 'تجديد لمين؟' }
       // A NEW subscription with NO name at all (rule path, question-like text)
       // must never draft «عضو جديد» — ask for the name first.
@@ -1677,6 +1693,9 @@ export async function runAgentTurn(ctx: TurnContext, emit: TurnEmit): Promise<Tu
     void trackKindEvent(ctx.business.id, ctx.user.id, 'verify', result.verified.status)
   }
   result.notesJotted = meta.notesJotted
+  // If the fallback ladder had to swap models mid-turn, the label the UI shows
+  // must name the model that ACTUALLY answered — never claim a dead one.
+  if (llmHealth.servedBy) result.modelLabel = llmHealth.servedBy
   return result
 }
 
@@ -1867,7 +1886,11 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   // بحث ويب (٢ استعلامات) → كارت المصادر المرقمة → تقرير الخلاصة/التحليل/
   // التوصيات باستشهادات [١] [٢] → تحقق ذاتي (أرقام + حكم LLM) — كله يتعمل
   // وييتحقق قبل أول حرف يوصل للمستخدم.
-  if (ctx.deepResearch === true || RESEARCH_TRIGGER_RE.test(text)) {
+  // Auto-research must not hijack a concrete command («حسن دفع ٥٠ من اللي عليه»
+  // contains «ليه» but is a collection, not a research question).
+  const wantsAutoResearch = ctx.deepResearch !== true && RESEARCH_TRIGGER_RE.test(text)
+  const autoResearchBlocked = wantsAutoResearch && isActionableIntent(ruleBasedIntent(text, business.type))
+  if (ctx.deepResearch === true || (wantsAutoResearch && !autoResearchBlocked)) {
     meta.kind = 'research'
     const researchResult = await runDeepResearch({
       business,
