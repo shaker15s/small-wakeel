@@ -11,7 +11,7 @@
 
 'use client'
 
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useRef, useSyncExternalStore } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import {
@@ -32,7 +32,6 @@ import { useTheme } from 'next-themes'
 import { api } from '@/lib/api'
 import { QUERY_KEYS, useWakil, VIEW_LABELS, type ViewKey } from '@/lib/store'
 import { getVertical } from '@/lib/verticals'
-import type { BusinessLite } from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import { useToast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'

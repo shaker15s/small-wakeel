@@ -15,7 +15,7 @@
 // snapshot the advisory mode + suggestions engine are grounded in.
 // Every number here comes from the REAL database — zero hallucination.
 
-import type { AgentMemory, Business, Customer, Item } from '@prisma/client'
+import type { AgentMemory, Business } from '@prisma/client'
 import { db } from '@/lib/db'
 import { egp } from '@/lib/format'
 import { normalizeAr, toWesternDigits, matchEntity } from './arabic'

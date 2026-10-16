@@ -241,6 +241,7 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
       const buf = {
         card: null as ActionCardDTO | null,
         cards: null as ResultCardDTO[] | null,
+        plan: null as string[] | null,
         actions: null as ChatActionDTO[] | null,
       }
       let errored = false
@@ -291,6 +292,12 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
             },
             onCards: (cards) => {
               buf.cards = cards
+            },
+            // R28: the agent announces the read-only plan it is running, so a
+            // compound question shows its work instead of a long silence
+            onPlan: (steps) => {
+              buf.plan = steps
+              patchTurn({ plan: steps })
             },
             onActions: (actions) => {
               buf.actions = actions
@@ -556,8 +563,20 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
               >
                 <AgentAvatar state="idle" size="lg" />
                 <div>
-                  <h2 className="text-lg font-bold">أهلاً بيك 👋</h2>
-                  <p className="mt-1.5 max-w-md text-sm leading-relaxed text-muted-foreground">{vertical.welcome}</p>
+                  {/* the greeting is the first thing a new owner sees — it gets
+                      the same kinetic treatment as the marketing surface
+                      (words rise 55ms apart) instead of a static <h2> */}
+                  <h2 className="text-lg font-bold" aria-label="أهلاً بيك">
+                    {['أهلاً', 'بيك', '👋'].map((w, i) => (
+                      <span key={w} style={{ ['--word-i' as string]: i }} className="kinetic-word">
+                        {w}
+                        {i < 2 ? ' ' : ''}
+                      </span>
+                    ))}
+                  </h2>
+                  <p className="blur-in mt-1.5 max-w-md text-sm leading-relaxed text-muted-foreground" style={{ animationDelay: '0.22s' }}>
+                    {vertical.welcome}
+                  </p>
                 </div>
                 <div className="flex flex-wrap justify-center gap-1.5">
                   {suggestionsQ.isPending ? (

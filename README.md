@@ -17,6 +17,7 @@ Four verticals ship in the seed data — **سوبر ماركت، عطارة، ص
 | **Verified answers** | `src/lib/agent/verify.ts` re-reads the database after a write and checks the numbers it reported (`checks[]`), so the reply can't drift from the ledger. |
 | **Arabic that Egyptians actually type** | Dialect normalisation, Arabic-Indic digits, word-numbers («نص كيلو»), broken plurals («النواقص»), unit conversion, alias matching — see `src/lib/agent/arabic.ts` and the golden eval suite. |
 | **Model outages must not stop the shop** | A fallback ladder walks the requested model → the closest-tier enabled BYO model → the built-in gateway, announces the switch, and only then drops to the deterministic rule ladder (`WAKIL_OFFLINE=1` reproduces that path in tests). |
+| **The reply must agree with the cards** | A draft turn's reply is a *contract* composed deterministically (operation, amount, approval requirement); a read turn's reply is buffered and **grounded** — if the model's prose shares no figure or distinctive word with the cards, the deterministic summary replaces it. |
 | **Money math** | Integer **piastres** everywhere (1 EGP = 100 piastres). No floats in the ledger. |
 | **Time** | Every «today» is a **Cairo** day (`src/app/api/_lib/dates.ts`), never the server's UTC day. |
 
@@ -119,10 +120,13 @@ Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/SECURITY.md](docs
 - «ورقة وكيل» scratchpad notes, «أدوات بتاعتك» custom web sources/webhooks, quick commands, model picker with live capability probing.
 - Reports (7d/30d), suggestions, radar alerts, global search, JSON export, catalog restore.
 - A self-critiquing agent: every draft arrives with the doubts it found and how confident it is — the owner decides with the objection in front of him, not after the money moved.
+- **«سوبر باورز»** — tools the shop actually asks for, all deterministic: real profit margin per item, stockout forecasting («هيخلص خلال ٣ أيام»), a customer's payment behaviour, period-over-period comparison, and where the cash goes.
+- **Compound questions in one round trip** — `run_plan` (a safe, read-only Programmatic Tool Calling subset) runs up to six reads in parallel and answers «مبيعات الأسبوع وربحه والنواقص» as one batch; `deep_dive` spins an **isolated researcher** that returns only its summary and the numbers it found.
+- **Accuracy beats refusal** — a sale larger than the recorded stock drafts anyway (the shelf count is often stale); the agent attaches the finding, drops its confidence, and escalates to a written reason when the stock is zero. A package size inside an item's name («زيت عافية 800 مل») is identity, not a measurement.
 
 **For the engineer**
 - Strict TypeScript, zod at every boundary, ESLint clean, no dead code or unused dependency.
-- Real tests: 127 tests across 14 files (unit + integration against a throwaway copy of the real DB) and 10 golden-dataset evals of the Arabic pipeline; `bun test` is proven not to touch the demo data (`bunfig.toml` preload + `tests/helpers/preload.ts`).
+- Real tests: **158 tests across 18 files** (unit + integration against a throwaway copy of the real DB) and 10 golden-dataset evals of the Arabic pipeline; `bun test` is proven not to touch the demo data (`bunfig.toml` preload + `tests/helpers/preload.ts`). New gates: `tests/unit/pipeline.test.ts` (plan normalisation refuses writes, tool timeouts, context budget, sub-agent isolation), `tests/integration/superpowers.test.ts` (SQL arithmetic of all five superpowers), `tests/unit/motion-guard.test.ts` (reduced motion never hides content) and `tests/unit/ui-hygiene.test.ts` (dead imports — the crash class that blanked the preview).
 - Speed is measured, not claimed: a 5-second catalog cache with write-through invalidation and hit/miss stats on `GET /api/health`; unreachable providers fail fast instead of burning the retry budget (7 s → ~0.1 s in the live preview).
 - Engine-free Prisma setup for offline/air-gapped installs (`scripts/db-sync.ts`, `scripts/prisma-generate.sh`).
 - Additive-only migrations, indexed query paths, `no-store` on all API responses, CSP + security headers.

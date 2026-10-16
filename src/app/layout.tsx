@@ -31,8 +31,13 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="ar" dir="rtl" suppressHydrationWarning>
+      {/* suppressHydrationWarning on <body> too: browser extensions
+          (bis_status/__processed_* are injected by Brave/Bing/AV extensions)
+          rewrite the body attributes and React 19 reports a mismatch the app
+          cannot fix. It is console noise, not a bug in our markup. */}
       <body
         className="antialiased bg-background text-foreground"
+        suppressHydrationWarning
       >
         <ThemeProvider attribute="class" defaultTheme="light" enableSystem={true}>
           {children}

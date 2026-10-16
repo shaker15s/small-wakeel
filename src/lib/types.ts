@@ -121,6 +121,8 @@ export interface MessageDTO {
   text: string
   card?: ActionCardDTO | null
   cards?: ResultCardDTO[] | null
+  /** R28: read-only plan labels the agent announced before running it */
+  plan?: string[] | null
   thinking?: ThinkingStep[] | null
   modelLabel?: string | null
   /** deep-link action buttons rendered under the reply (e.g. «افتح الإحصائيات») */
@@ -381,6 +383,8 @@ export type ChatStreamEvent =
   | { event: 'step'; label: string; state: 'active' | 'done' }
   | { event: 'card'; card: ActionCardDTO }
   | { event: 'cards'; cards: ResultCardDTO[] }
+  /** R28: the plan the agent is about to run (multi-step, read-only) */
+  | { event: 'plan'; steps: string[] }
   | { event: 'actions'; actions: ChatActionDTO[] }
   | { event: 'delta'; text: string }
   | { event: 'done'; messageId: string; modelLabel: string }
@@ -392,6 +396,7 @@ export interface ChatTurn {
   text: string
   card?: ActionCardDTO | null
   cards?: ResultCardDTO[] | null
+  plan?: string[] | null
   thinking?: ThinkingStep[] | null
   modelLabel?: string | null
   actions?: ChatActionDTO[] | null

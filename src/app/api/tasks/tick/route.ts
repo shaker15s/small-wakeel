@@ -1,7 +1,6 @@
 // POST /api/tasks/tick — runs due scheduled tasks (read tools only) and
 // posts the result into the owner's conversation as an agent message.
 import { NextResponse } from 'next/server'
-import { db } from '@/lib/db'
 import { requeueStuckTasks, runDueTasks } from '@/lib/tasks/runner'
 import { serverError } from '../../_lib/http'
 import { guard } from '../../_lib/guard'

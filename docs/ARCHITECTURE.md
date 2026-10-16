@@ -77,6 +77,8 @@ Everything the model returns is treated as *untrusted input*: fields are validat
 * `WAKIL_OFFLINE=1` makes every call fail instantly, which is how the eval suite and CI test the deterministic path.
 * **Fail fast on a dead host.** `withRetry` separates *connection* failures (`ECONNREFUSED`/`ENOTFOUND`/`EHOSTUNREACH`, including undici's `cause.code`) from transient hiccups (429/5xx/timeout). A refused socket is never retried: waiting 0/800/2500 ms against a port nobody listens on cost the owner 7 seconds of «بفهم طلبك» before the ladder was even consulted — it is now ~0.1 s straight to the next model.
 * **The rule ladder has the last word on writes.** If the model answers with prose (flaky provider, garbled JSON, a small model ignoring the schema) while `ruleBasedIntent` recognises a concrete write, the deterministic intent wins: a clear «بعت ٣ كيلو …» must never be downgraded to chit-chat and lose the sale.
+* **Connect failures fail fast and open the breaker at once.** `isConnectFailure` also catches a bare undici `TypeError: fetch failed` (no `cause.code`), so a dead host is attempted ONCE; the circuit breaker's threshold is bypassed for connect-level failures (`breakerRecord(key, false, fatal=true)`) — a host that cannot be reached is not the model the owner is waiting for. Live: 3 attempts with 800/2500 ms backoff → 1 attempt, and the switch notice ««عميق مفكّر» وقع — بكمّل بـ«وكيل عميق»» appears in dev.log with the served model labelled in the UI.
+* **A real 5xx IS retried.** `isTransient` matched the English form `status 5xx` only, while the providers throw Arabic messages with a bare number («المزوّد رجع 503») — so a provider hiccup was treated as a deterministic failure and never retried. Found by `tests/unit/resilience.test.ts`, fixed by matching the number in an error-ish context.
 
 ### 2b. «تأمل وكيل» — self-critique before the draft (`src/lib/domain/audit.ts`)
 
@@ -105,6 +107,58 @@ so a faulty audit can never block a legitimate draft.
 lower confidence) instead of being refused. A shelf count is usually stale, and the owner must
 be able to record what actually happened; refusing the sale silently pushed real revenue out of
 the ledger. Cleaning up the count stays the owner's call — the doubt is simply visible.
+
+### 2b-ii. «سوبر باورز» — the tool layer beyond reading (`src/lib/agent/{tools,pipeline,registry,prompt}.ts`)
+
+Five deterministic money/future tools join the twelve read tools. They are
+*deterministic on purpose*: the numbers come from the ledger, never from a model.
+
+| tool | question it answers | arithmetic |
+| --- | --- | --- |
+| `get_profit_margin` | «أنا بربح كام؟» | sold revenue − `costPrice` × qty per item, ranked; falls back to price margins when the window has no sales |
+| `forecast_stockout` | «إيه اللي هيخلص؟» | qty ÷ (sold ÷ days) → days left, ≤10 days listed, order = 30-day cover |
+| `get_customer_history` | «العميل ده بيحاسب إزاي؟» | balance, last collection, average collection, gap between collections |
+| `compare_periods` | «أنا أحسن من الأسبوع اللي فات؟» | two Cairo-day windows, per-type deltas, one verdict |
+| `expense_breakdown` | «فلوسي بتتصرف في إيه؟» | expense categories ranked, share %, per-day burn |
+
+Two **orchestration** tools make compound questions cheap:
+
+* `run_plan({plan:[{tool,args}]})` — Programmatic Tool Calling without code
+  execution. `normalizePlan` accepts the three shapes models actually send
+  (`{plan}`, `{steps}`, `[…]`), **drops every write tool** (the approval gate is
+  not bypassable from inside a plan), caps the batch at 6, runs the reads in
+  parallel and returns one compact result — three round trips become one.
+* `deep_dive({question})` — an **isolated researcher** (`runSubAgent`): its own
+  message loop, read tools only, `maxRounds` 3, 12s budget, and it returns a
+  SUMMARY plus the numbers it found. The parent context never pays for the
+  intermediate reads; a JSON-looking reply with an unknown tool is corrected and
+  retried instead of being mistaken for a final answer.
+
+The guarded pipeline (`runToolPipeline`) wraps every read: 9s hard timeout
+(Promise.race, never throws), result digest capped at 1.6k chars for the model
+while the UI keeps the full card, and a `trimmed` flag so the thinking step can
+say «اتقصّرت للسياق». `budgetToolHistory` keeps the newest three results whole
+and digests the older ones, logging a `context.compact` audit row when it fires.
+
+### 2b-iii. Reply contracts — the text must agree with the cards
+
+Live evidence (2026-10-17, preview host, providers down) showed a profit table
+AND a real draft while the reply said «من رسالتك مفيش عملية محددة». Three rules
+now make that impossible:
+
+1. **A draft turn's reply is a contract** — name, summary, amount, the approval
+   requirement + the audit's note. Composed deterministically (`جهزتلك مسودة
+   «بيع» — بيع ٢ قطعة … راجعها واعتمدها لو تمام.`), verified, then paced. No
+   model call: one round trip less and zero chance of prose that disagrees with
+   the money.
+2. **A read turn's reply must be grounded** — the model may phrase it, but the
+   text is buffered and checked with `replyGroundsCards` (a shared figure of ≥2
+   digits or a distinctive shared word). Ungrounded prose is replaced by
+   `deterministicReadReply(cards)`.
+3. **A brain turn that used no tool cannot override the ledger** — when the
+   model answers a clearly write- or read-shaped request with prose only, the
+   turn falls through to PASS 1 (the deterministic engine) instead of shipping
+   the prose.
 
 ### 2c. Speed: a 5-second catalog cache (`src/lib/agent/catalog.ts`)
 
@@ -180,6 +234,29 @@ POST /api/chat ──► draft card (Operation.status = AWAITING_APPROVAL)
 ---
 
 ## 7. Front-end
+
+* **The reduced-motion contract: «no movement», never «no content».** The R14
+  guard applied `opacity: 0 !important` to `.rise-in`, the only entrance class
+  the third onboarding screen used — with «تقليل الحركة» on, step 3 was blank
+  with no error anywhere. Every content class (`.rise-in`, `.list-enter`,
+  `.ae-riser`, `.blur-in`, `.ae-curtain`, `.kinetic-word`, `.odometer`) now keeps
+  `opacity: 1 !important` + `animation: none`; only the decorative sheens
+  (`.card-sheen::after`, `.ae-sweep::after`) stay hidden. `tests/unit/motion-guard.test.ts`
+  parses `globals.css`, brace-matches every reduced-motion block and fails if any
+  entrance class is ever hidden again — the bug cannot come back unnoticed.
+* **«أفتر إفكتس» motion layer** (`globals.css`, appended): `.ae-riser`
+  (staggered riser), `.blur-in` (focus pull), `.ae-curtain` (directional step
+  transition via `--enter-x`), `.kinetic-word` (55 ms per-word headline), `.magnetic`
+  (pointer pull), `.ae-rail` (progress rail), `.ae-float` (parallax planes),
+  `.odometer` (number roll-up), `.ae-sweep` (one-pass sheen on money controls,
+  `.ae-sweep-loop` for demo planes). The onboarding is a 3-step cinematic flow on
+  top of them; the chat welcome greeting is kinetic; the draft CTA is magnetic +
+  swept + pressed.
+* **Dead imports are a crash, not a warning.** `tsc` does not flag them and the
+  ESLint config does not either — an unused lucide icon emptied a chunk and landed
+  the preview in its error boundary. `tests/unit/ui-hygiene.test.ts` walks `src/`
+  and asserts every named import is referenced (plus `<body suppressHydrationWarning>`
+  for the extension-injected attribute mismatch).
 
 * React 19 + Next 16 App Router, RTL by default (`<html lang="ar" dir="rtl">`).
 * State: `zustand` for session/business/user/model, `@tanstack/react-query` for server state, SSE for chat streaming (deltas, thinking steps, cards, `done`).

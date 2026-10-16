@@ -503,15 +503,32 @@
   }
 }
 
-/* R14-ux reduced-motion guards (own block; existing classes untouched) */
+/* R14-ux reduced-motion guards (own block; existing classes untouched)
+   NOTE (R28 bug fix): the decorative sheen is the ONLY thing that may stay
+   hidden here. `opacity: 0 !important` used to be applied to the whole list —
+   which made the third onboarding screen (the only surface using `.rise-in`)
+   completely invisible for every user with «تقليل الحركة» switched on, i.e. a
+   blank step with no error anywhere. Reduced motion means «no movement», never
+   «no content». */
 @media (prefers-reduced-motion: reduce) {
-  .card-sheen::after,
   .badge-breathe,
   .icon-wiggle,
   .press-deep,
-  .rise-in {
+  .rise-in,
+  .blur-in,
+  .ae-riser,
+  .ae-curtain,
+  .kinetic-word,
+  .magnetic {
     animation: none !important;
     transition: none !important;
+    transform: none !important;
+    filter: none !important;
+    opacity: 1 !important;
+  }
+  .card-sheen::after,
+  .ae-sweep::after {
+    animation: none !important;
     opacity: 0 !important;
   }
 }
@@ -772,5 +789,202 @@
   }
   .confidence-fill {
     width: var(--confidence, 0%);
+  }
+}
+
+/* ============================================================
+   R28 — «أفتر إفكتس» layer: depth, light, kinetics, magnetism
+   ============================================================
+   The brief was «خليهم كأنهم معمولين في أفتر إفكتس». What that actually means
+   in a browser is four things, and all four are CSS-first so they run on the
+   compositor thread (60fps on a mid-range Android, not just on a MacBook):
+     1. LAYERS — depth comes from stacked planes at different scales/blurs,
+        not from drawing shadows.
+     2. LIGHT — a moving highlight (sweep/sheen) reads as a physical surface;
+        it must never intercept pointer events.
+     3. KINETICS — type and cards arrive in a choreographed order (stagger),
+        the way an AE layer stack animates top-down.
+     4. PHYSICS — springs and magnetic pull for anything the finger touches.
+
+   Every class here is registered in the prefers-reduced-motion guard above,
+   so «no motion» never becomes «no content». */
+
+/* --- 1. depth: a blurred, scaled plane behind content ------------------- */
+.ae-riser {
+  animation: ae-riser 520ms var(--ease-out-quint) backwards;
+  animation-delay: calc(var(--stagger, 0) * 60ms);
+  will-change: transform, opacity, filter;
+}
+@keyframes ae-riser {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 22px, 0) scale(0.965);
+    filter: blur(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    filter: blur(0);
+  }
+}
+
+/* focus-pull: content resolves out of blur in place (a lens rack) */
+.blur-in {
+  animation: blur-in 420ms var(--ease-out-quint) backwards;
+  animation-delay: calc(var(--stagger, 0) * 45ms);
+}
+@keyframes blur-in {
+  from {
+    opacity: 0;
+    filter: blur(10px);
+    transform: scale(1.015);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: none;
+  }
+}
+
+/* curtain: a step change wipes in from the direction of travel ----------- */
+.ae-curtain {
+  animation: ae-curtain 460ms var(--ease-out-quint) backwards;
+}
+@keyframes ae-curtain {
+  from {
+    opacity: 0;
+    transform: translate3d(var(--enter-x, 0), 0, 0) scale(0.985);
+    filter: blur(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    filter: blur(0);
+  }
+}
+
+/* --- 2. light: a sweep that travels across a surface ------------------- */
+.ae-sweep {
+  position: relative;
+  overflow: hidden;
+}
+.ae-sweep::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    105deg,
+    transparent 35%,
+    color-mix(in oklab, white 45%, transparent) 50%,
+    transparent 65%
+  );
+  transform: translateX(-120%);
+  /* One pass on entrance. An INFINITE sheen on a money control is nagging —
+     the looping variant is opt-in (`.ae-sweep-loop`) for demo/hero planes. */
+  animation: ae-sweep 1100ms var(--ease-in-out-soft) 380ms 1 both;
+}
+.ae-sweep-loop::after {
+  animation: ae-sweep 2600ms var(--ease-in-out-soft) 900ms infinite;
+}
+@keyframes ae-sweep {
+  0% {
+    transform: translateX(-120%);
+  }
+  55%,
+  100% {
+    transform: translateX(120%);
+  }
+}
+
+/* --- 3. kinetics: word-by-word type entrance --------------------------- */
+.kinetic-word {
+  display: inline-block;
+  animation: kinetic-word 480ms var(--ease-out-quint) backwards;
+  animation-delay: calc(var(--word-i, 0) * 55ms + var(--stagger, 0) * 40ms);
+}
+@keyframes kinetic-word {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 0.5em, 0) rotate(1.5deg);
+    filter: blur(5px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    filter: blur(0);
+  }
+}
+
+/* --- 4. physics: magnetic pull on the primary action ------------------- */
+.magnetic {
+  transition: transform 220ms var(--ease-spring), box-shadow 220ms var(--ease-out-quint);
+}
+@media (hover: hover) {
+  .magnetic:hover {
+    transform: translate3d(0, -1px, 0) scale(1.015);
+  }
+}
+.magnetic:active {
+  transform: scale(0.97);
+}
+
+/* progress rail: the onboarding dots read as a timeline, not 3 dots ----- */
+.ae-rail {
+  position: relative;
+  height: 3px;
+  border-radius: 9999px;
+  background: color-mix(in oklab, var(--foreground) 10%, transparent);
+  overflow: hidden;
+}
+.ae-rail > span {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  border-radius: 9999px;
+  background: linear-gradient(90deg, var(--wakil-amber), color-mix(in oklab, var(--wakil-amber) 55%, white));
+  transition: width 520ms var(--ease-out-quint);
+}
+
+/* a floating artifact — the «demo» planes in onboarding --------------- */
+.ae-float {
+  animation: ae-float 5200ms var(--ease-in-out-soft) infinite;
+}
+@keyframes ae-float {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) rotate(var(--tilt, 0deg));
+  }
+  50% {
+    transform: translate3d(0, -9px, 0) rotate(calc(var(--tilt, 0deg) + 0.6deg));
+  }
+}
+
+/* odometer digits roll up when money animates in ---------------------- */
+.odometer {
+  display: inline-block;
+  animation: odometer 560ms var(--ease-out-quint) backwards;
+  animation-delay: calc(var(--stagger, 0) * 40ms);
+}
+@keyframes odometer {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 0.42em, 0);
+    filter: blur(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    filter: blur(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ae-sweep::after,
+  .ae-float {
+    animation: none !important;
+  }
+  .ae-float {
+    transform: none !important;
   }
 }

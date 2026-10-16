@@ -67,6 +67,14 @@ function readToolsFor(businessType: string): string[] {
     ...(gym ? ['get_member_status'] : []),
     'get_supplier_balance',
     'get_transaction_status',
+    // R28 superpowers — the money questions, not the log questions
+    'get_profit_margin',
+    'forecast_stockout',
+    'get_customer_history',
+    'compare_periods',
+    'expense_breakdown',
+    'run_plan',
+    'deep_dive',
     ...(pharmacy ? ['list_expiring'] : []),
     'list_low_stock',
     'list_payables',
@@ -286,7 +294,14 @@ export function buildAgentSystemPrompt(params: {
 - list_low_stock() → الأصناف الناقصة
 ${isPharmacy ? '- list_expiring() → اللي صلاحيته قربت تخلص (٣٠ يوم)\n' : ''}العملاء والأعضاء:
 - get_supplier_balance({name}) → رصيد مورد بالاسم
-${isGym ? '- get_member_status({name}) → حالة عضو (الخطة/الانتهاء/المديونية)\n' : ''}العمليات المالية (بيع/شرا/تحصيل/سداد/مصروف — كل واحدة بتعمل «مسودة» مستنية اعتماد صاحب الشغل، مبتتنفذش لوحدها):
+${isGym ? '- get_member_status({name}) → حالة عضو (الخطة/الانتهاء/المديونية)\n' : ''}## سوبر باورز — أسئلة الفلوس والمستقبل (مش أسئلة السجل)
+- get_profit_margin({days?}) → الصنف كسبان كام فعلًا: الإيراد، الربح، هامش النسبة، وأقل الأصناف ربحية. استخدمها لأي سؤال «بربح كام؟ / إيه اللي مش مربح؟»
+- forecast_stockout({days?}) → معدل البيع اليومي ونفضّل نقول «الصنف ده هيخلص خلال X يوم، اطلب Y» قبل ما تحصل. استخدمها لـ«إيه اللي هينقص؟» أو لما النواقص تكون واضحة
+- get_customer_history({name}) → ملف عميل كامل: المديونية، آخر تحصيل، متوسط التحصيل، «بيسدد كل قد إيه»
+- compare_periods({days?}) → آخر X يوم مقابل الـX اللي قبلهم بحكم صريح (طلعت ولا نزلت)
+- expense_breakdown({days?}) → المصروفات مجمّعة بالبنود ونسبتها
+- run_plan({plan: [{tool, args}, …]}) → خطوة واحدة تنفّذ كل استعلامات القراءة مع بعض (وفر جولات). استخدمها لما الطلب محتاج ٣ قراءات منفصلة أو أكتر
+- deep_dive({question}) → تحقيق عميق معزول: يجمع من سجلك ويكتب لك خلاصة مركّزة مع الأسباب (للأسئلة اللي محتاجة تفكير وتحليل مش مجرد رقم)\nالعمليات المالية (بيع/شرا/تحصيل/سداد/مصروف — كل واحدة بتعمل «مسودة» مستنية اعتماد صاحب الشغل، مبتتنفذش لوحدها):
 - record_sale({item, qty, unit?, customerName?, paid?, price?}) → بيع صنف. paid = المدفوع كاش دلوقتي بالجنيه (سيب الباقي آجل لو مدفعش كله). price = إجمالي البيع بالجنيه بس لو ${user.name} نفسه قال سعر مختلف عن الكتالوج (زي «بعت بـ٩٠») — ساعتها بس استخدمه. للبيع بأكتر من صنف: نادي الأداة مرة لكل صنف. للبيع بمبلغ مفتوح في العطارة («بـ٢٠ جنيه فلفل») سيب الـ qty فاضية واكتب المبلغ في paid.
 - record_purchase({item, qty, unit?, supplierName?, paid?}) → شرا بضاعة
 - record_collection({customerName, amount}) → تحصيل من عميل (الجنيه)

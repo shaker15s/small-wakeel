@@ -134,7 +134,7 @@ export function MessageBubble({
   }
 
   // ---- assistant turn ------------------------------------------------------
-  const { card, cards, actions, thinking, modelLabel } = turn
+  const { card, cards, actions, thinking, modelLabel, plan } = turn
   const streaming = turn.streaming === true
   const hasText = turn.text.length > 0
   const avatarState: AgentState = error
@@ -343,6 +343,10 @@ export function MessageBubble({
           </motion.div>
         ) : null}
 
+        {plan && plan.length > 0 && !streaming ? (
+          <PlanStrip steps={plan} delay={ordinal++ * 0.06} />
+        ) : null}
+
         {cards && cards.length > 0 ? (
           <motion.div {...revealProps(cardsDelay)} className="w-full">
             <ResultCards cards={cards} />
@@ -409,5 +413,37 @@ function CopyButton({ text }: { text: string }) {
         <Copy className="size-3.5" aria-hidden="true" />
       )}
     </button>
+  )
+}
+
+/**
+ * «الخطّة» — the steps the agent is running when it decides to work in one shot.
+ *
+ * Shown as a compact numbered strip (After-Effects style stagger: each step
+ * rises 40ms after the previous). It exists because a multi-step answer used to
+ * look like a long silence: the owner now sees the machine working.
+ */
+function PlanStrip({ steps, delay = 0 }: { steps: string[]; delay?: number }) {
+  return (
+    <div className="enter-rise ms-12 flex flex-col gap-1.5" style={{ animationDelay: `${delay}s` }}>
+      <span className="text-[11px] font-semibold text-muted-foreground">
+        خطّة الشغل · <span className="num">{steps.length}</span> خطوات
+      </span>
+      <ol className="flex flex-wrap items-center gap-1.5">
+        {steps.map((label, i) => (
+          <li
+            key={`${label}-${i}`}
+            style={{ ['--stagger' as string]: i }}
+            className="ae-riser flex items-center gap-1.5 rounded-full border border-border/70 bg-card/70 px-2.5 py-1 text-[11px]"
+          >
+            <span className="num flex size-4 items-center justify-center rounded-full bg-accent text-[9px] font-bold text-accent-foreground">
+              {i + 1}
+            </span>
+            {label}
+            <Check className="size-3 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+          </li>
+        ))}
+      </ol>
+    </div>
   )
 }

@@ -2,7 +2,6 @@
 // unit conversion, and fuzzy entity matching. The LLM only identifies WHAT the
 // user wants; this module makes the server actually UNDERSTAND it deterministically.
 
-import { AR_UNITS } from '../verticals'
 
 /** Normalize Arabic text for matching: strip tashkeel/diacritics, unify alef/yaa/taa, collapse spaces. */
 export function normalizeAr(input: string): string {

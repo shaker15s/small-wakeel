@@ -233,6 +233,8 @@ export interface StreamHandlers {
   onStep?: (label: string, state: 'active' | 'done') => void
   onCard?: (card: ActionCardDTO) => void
   onCards?: (cards: ResultCardDTO[]) => void
+  /** R28: the read-only plan the agent is about to run (label per step) */
+  onPlan?: (steps: string[]) => void
   onActions?: (actions: ChatActionDTO[]) => void
   onDelta?: (text: string) => void
   /** carried on the done event — R15 self-verification + deep-research metadata */
@@ -287,6 +289,7 @@ export async function streamChat(
           | { event: 'thinking'; steps: ThinkingStep[] }
           | { event: 'step'; label: string; state: 'active' | 'done' }
           | { event: 'card'; card: ActionCardDTO }
+          | { event: 'plan'; steps: string[] }
           | { event: 'cards'; cards: ResultCardDTO[] }
           | { event: 'actions'; actions: ChatActionDTO[] }
           | { event: 'delta'; text: string }
@@ -297,6 +300,7 @@ export async function streamChat(
           case 'thinking': handlers.onThinking?.(ev.steps); break
           case 'step': handlers.onStep?.(ev.label, ev.state); break
           case 'card': handlers.onCard?.(ev.card); break
+          case 'plan': handlers.onPlan?.(ev.steps); break
           case 'cards': handlers.onCards?.(ev.cards); break
           case 'actions': handlers.onActions?.(ev.actions); break
           case 'delta': handlers.onDelta?.(ev.text); break

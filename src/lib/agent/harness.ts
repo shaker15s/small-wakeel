@@ -66,6 +66,14 @@ import { factsFromCards, verifyReply, type VerifyFact } from './verify'
 import { buildAdvisoryPrompt, buildAgentSystemPrompt, buildReplyPrompt, buildSystemPrompt, roleTitle, TONE_AR } from './prompt'
 import { READ_TOOLS, runReadTool, TYPE_AR, type ReadTool } from './tools'
 import {
+  budgetToolHistory,
+  logContextPressure,
+  normalizePlan,
+  runSubAgent,
+  runToolPipeline,
+  type ToolRun,
+} from './pipeline'
+import {
   bumpMemoryUsage,
   creditLimitFor,
   extractForgetRequest,
@@ -89,6 +97,8 @@ export interface TurnEmit {
     | { event: 'step'; label: string; state: 'active' | 'done' }
     | { event: 'card'; card: ActionCardDTO }
     | { event: 'cards'; cards: ResultCardDTO[] }
+    /** R28: a plan the agent is about to execute, shown before it runs */
+    | { event: 'plan'; steps: string[] }
     | { event: 'actions'; actions: ChatActionDTO[] }
     | { event: 'delta'; text: string }): void
 }
@@ -259,6 +269,14 @@ const TOOL_LABEL_AR: Record<string, string> = {
   get_member_status: 'حالة عضو',
   get_activity_history: 'آخر الحركات',
   get_transaction_status: 'حالة عملية',
+  // R28 superpowers
+  get_profit_margin: 'حساب الربح',
+  forecast_stockout: 'توقّع النقص',
+  get_customer_history: 'ملف العميل',
+  compare_periods: 'مقارنة الفترات',
+  expense_breakdown: 'تفصيل المصروفات',
+  run_plan: 'خطة متعددة الخطوات',
+  deep_dive: 'تحقيق عميق',
   sale: 'مسودة بيع',
   purchase: 'مسودة شرا',
   expense: 'مسودة مصروف',
@@ -345,6 +363,16 @@ interface ExtractedIntent {
   replyHint?: string
 }
 
+/**
+ * The deterministic rule ladder. Exported under a test-only name because the
+ * ladder IS the offline contract: when every provider is down, these rules are
+ * what still answers the owner. `tests/integration/superpowers.test.ts` pins the
+ * routing of the five superpower questions to this function.
+ */
+export function ruleBasedIntentForTest(text: string, businessType: string): ExtractedIntent {
+  return ruleBasedIntent(text, businessType)
+}
+
 function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
   const s = normalizeAr(text)
   const isGym = businessType === 'gym'
@@ -370,6 +398,31 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
   if (/(مديون|اللي ليا|تحصيلات|مين عليها|عليها فلوس|عليهم فلوس|العملاء)/.test(s)) return { intent: 'read', tool: 'list_receivables', fields: {} }
   if (/(اللي علينا|للمورد|الموردين|مستحق)/.test(s)) return { intent: 'read', tool: 'list_payables', fields: {} }
   if (/(ملخص|كويس اليوم|حال اليوم|عملت ايه النهارده)/.test(s)) return { intent: 'read', tool: 'get_daily_summary', fields: {} }
+  // ---- R28 superpowers: money & future questions (deterministic, offline-safe)
+  // «بربح كام؟ / الهامش؟ / إيه اللي مش مربح؟»
+  if (/(بربح|بكسب|مكسب|ربح|هامش|مربح|بيكسب)/.test(s) && !/(بعت|بيع|شرا|اشتري)/.test(s)) {
+    return { intent: 'read', tool: 'get_profit_margin', fields: {} }
+  }
+  // «إيه اللي هيخلص؟ / هينقص إمتى؟ / توقّع»
+  if (/(هيخلص|هينقص|هتخلص|توقع|متوقع|نفض|معدل البيع|كم يوم باقي)/.test(s)) {
+    return { intent: 'read', tool: 'forecast_stockout', fields: {} }
+  }
+  // «بيحاسب إزاي؟ / بيسدد كل قد إيه؟ / ملف العميل»
+  if (/(بيسدد|بيحاسب|ملف العميل|تاريخ العميل|بيدفع كل)/.test(s)) {
+    // name = the words after «العميل»/«ملف» or after the verb, e.g.
+    // «ملف العميل أم حسن» / «أم حسن بتسدد كل قد إيه؟»
+    const mName = s.match(/(?:ملف|تاريخ)\s+(?:العميل\s+)?([^ ،,؟?]+(?:\s+[^ ،,؟?]+)?)/) ?? s.match(/^\s*([^ ،,؟?]+(?:\s+[^ ،,؟?]+)?)\s+(?:بتسدد|بيسدد|بيحاسب|بيدفع)/)
+    const name = mName ? mName[1].replace(/^(العميل|بتاع|من)\s*/, '').trim() : ''
+    return { intent: 'read', tool: 'get_customer_history', fields: name && name.length >= 2 ? { name } : {} }
+  }
+  // «أنا أحسن من الأسبوع اللي فات؟ / قارن»
+  if (/(احسن من|أحسن من|قارن|مقارنه|مقارنة|اللي فات|الشهر اللي فات|الاسبوع اللي فات)/.test(s)) {
+    return { intent: 'read', tool: 'compare_periods', fields: {} }
+  }
+  // «فلوسي بتتصرف في إيه؟ / المصروفات على إيه؟»
+  if (/(بتتصرف|بيتصرف|مصاريف|مصروفات|بنصرف)/.test(s) && !/(سجل|دفعت|مصروف جديد)/.test(s)) {
+    return { intent: 'read', tool: 'expense_breakdown', fields: {} }
+  }
   // Price query («ايه سعر عود كمبودي؟» / «بكام المسك؟») → catalog search (R0 read)
   if (/(سعر|بكام)/.test(s) && !/(بعت|بيع|بع |خرج|سلف|دفع|سجل)/.test(s)) {
     const q = s
@@ -700,6 +753,47 @@ function deterministicReadReply(cards: ResultCardDTO[]): string {
   const text = cards.find((c) => c.kind === 'text') as Extract<ResultCardDTO, { kind: 'text' }> | undefined
   if (text && text.body.trim()) return text.body.trim().slice(0, 220)
   return 'دي النتايج من سجل الشغل، التفاصيل في الكارت تحت.'
+}
+
+/**
+ * «الدقة» — does the spoken reply actually reference the cards it ships with?
+ *
+ * Live evidence (2026-10-17): the screen showed a real profit table AND a real
+ * sale draft while the reply said «من رسالتك مفيش عملية محددة». A model that
+ * ignores the numbers its own tools produced must not get to phrase the answer:
+ * the deterministic composer says «دي أرقام «الربح الحقيقي» من سجلك: …» instead.
+ *
+ * Grounding is checked on normalized text, by EITHER a shared figure (a number
+ * of ≥2 digits that appears in both the reply and the card) OR a distinctive
+ * word (≥4 letters) taken from the card's title/rows. Deliberately permissive:
+ * a fluent reply that mentions any real figure passes.
+ */
+function replyGroundsCards(text: string, cards: ResultCardDTO[]): boolean {
+  const t = toWesternDigits(normalizeAr(text))
+  const keys: string[] = []
+  for (const c of cards.slice(0, 2)) {
+    keys.push(c.title)
+    if (c.kind === 'kv') for (const r of c.rows.slice(0, 4)) keys.push(String(r.value), r.label)
+    else if (c.kind === 'table')
+      for (const row of c.rows.slice(0, 3)) for (const val of Object.values(row)) keys.push(String(val))
+    else if (c.kind === 'sources') keys.push(c.sources[0]?.title ?? '')
+    else if (c.kind === 'text') keys.push(c.body.slice(0, 60))
+  }
+  const norm = keys.map((k) => toWesternDigits(normalizeAr(k))).join(' ')
+  const replyNums = new Set(t.match(/\d[\d.,]*/g) ?? [])
+  for (const num of norm.match(/\d[\d.,]*/g) ?? []) {
+    if (num.replace(/[.,]/g, '').length >= 2 && replyNums.has(num)) return true
+  }
+  const shared = new Set(
+    norm
+      .split(/[^\p{L}\p{N}]+/u)
+      .filter((w) => w.length >= 4)
+      .map((w) => w.replace(/^(ال|و)/, '')),
+  )
+  return t
+    .split(/[^\p{L}\p{N}]+/u)
+    .map((w) => w.replace(/^(ال|و)/, ''))
+    .some((w) => w.length >= 4 && shared.has(w))
 }
 
 /** Deterministic numbered multi-intent reply — answers EVERY sub-request, no LLM. */
@@ -1592,6 +1686,10 @@ function brainStepLabel(call: BrainToolCall): { label: string; icon: ThinkingSte
   if (call.tool === 'calculate') return { label: 'بحسب في الحاسبة', icon: 'verify' }
   if (call.tool === 'schedule_task') return { label: 'بجدّل مهمة', icon: 'plan' }
   if (call.tool === 'set_persona') return { label: 'بظبط نبرتي', icon: 'plan' }
+  // R28 orchestration tools get their own verbs — the owner sees a plan being
+  // executed, not a mystery «tool call»
+  if (call.tool === 'run_plan') return { label: 'بنفّذ خطة من كذا خطوة', icon: 'plan' }
+  if (call.tool === 'deep_dive') return { label: 'قاعد أحقّق في السؤال', icon: 'search' }
   const w = BRAIN_WRITE_TOOLS[call.tool]
   if (w) return { label: `بجهّز مسودة: ${TYPE_AR[w.opType] ?? w.opType}`, icon: 'plan' }
   return { label: `بجيب: ${TOOL_LABEL_AR[call.tool] ?? call.tool}`, icon: 'search' }
@@ -1831,12 +1929,17 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   // Catalog comes from the 5-second cache (invalidated on every committed
   // write); memories/notes/tools stay live because they change mid-conversation.
   const { items, customers, suppliers } = await getCatalog(business.id)
+  // «سرعة»: the recall pass is timed like every other pass — «فتكرت من ذاكرتي»
+  // used to be the ONE step with no milliseconds, which made the trace look
+  // like it had skipped work it had actually done.
+  const recallClock = Date.now()
   const [memories, pendingCount, notesSection, userTools] = await Promise.all([
     db.agentMemory.findMany({ where: { businessId: business.id, userId: user.id, active: true }, orderBy: { createdAt: 'desc' }, take: 12 }),
     db.operation.count({ where: { businessId: business.id, status: 'AWAITING_APPROVAL' } }),
     notesContext(ctx.conversationId),
     activeTools(business.id),
   ])
+  const recallMs = Math.max(0, Date.now() - recallClock)
   const userToolsLine = userToolsPromptLine(userTools)
   const rules = memories.filter((m) => m.kind === 'rule')
   const memCtx: MemoryContext = {
@@ -1857,6 +1960,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             detail: memories[0].text.slice(0, 60) + (memories[0].text.length > 60 ? '…' : ''),
             state: 'done',
             icon: 'verify',
+            ms: recallMs,
           },
         ]
       : []
@@ -2153,9 +2257,19 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       emit({ event: 'step', label, state: 'active' })
       const toolClock = Date.now()
       try {
-        // ---- READ tools (R0 — direct, safe) ----
+        // ---- READ tools (R0 — direct, safe, BUDGETED) ----
+        // dsh's guarded pipeline + Claude Code's per-result budget: the UI gets
+        // the whole card, the MODEL gets a digest capped at 1.6k chars, and the
+        // call can never hang the turn (9s hard timeout → reported failure).
         if (READ_TOOLS.has(call.tool)) {
-          const subCards = await runReadTool(call.tool as ReadTool, business.id, call.args)
+          const run = await runToolPipeline(call.tool, business.id, call.args)
+          if (!run.ok) {
+            step.detail = run.error?.slice(0, 80) ?? 'الأداة فشلت'
+            resultsForModel.push({ tool: call.tool, ok: false, error: run.error ?? 'فشل' })
+            replyParts.push(`مش قادر أجيب ${TOOL_LABEL_AR[call.tool] ?? call.tool} دلوقتي — قول للمستخدم إن في مشكلة مؤقتة.`)
+            return
+          }
+          const subCards = run.cards
           allCards.push(...subCards)
           emit({ event: 'cards', cards: allCards })
           usedTools.push(call.tool)
@@ -2172,12 +2286,105 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
               return c.title
             })
             .join('؛ ')
-          step.detail = summary.slice(0, 90) || 'رجعت ببيانات'
-          resultsForModel.push({ tool: call.tool, ok: true, result: subCards })
+          step.detail = (run.trimmed ? `${summary.slice(0, 70)}… (اتقصّرت للسياق)` : summary.slice(0, 90)) || 'رجعت ببيانات'
+          resultsForModel.push({
+            tool: call.tool,
+            ok: true,
+            ms: run.ms,
+            // the MODEL sees the budgeted digest, not the raw card array
+            result: run.output,
+          })
           replyParts.push(deterministicReadReply(subCards))
           await trackUsage(business.id, user.id, 'tool', call.tool)
           return
         }
+
+        // ---- run_plan: Programmatic Tool Calling, in a safe subset ----
+        // DeepSeek's PTC idea without code execution: the model sends ONE call
+        // describing several read-only queries, the harness runs them as a
+        // batch (parallel, budgeted, timeout-guarded) and returns one compact
+        // result. Three round trips become one — the biggest latency win for
+        // compound questions like «مبيعات الأسبوع وربحه والنواقص».
+        if (call.tool === 'run_plan') {
+          const plan = normalizePlan(call.args)
+          if (plan.length === 0) {
+            step.detail = 'الخطة فاضية أو فيها أداة غير مسموحة'
+            resultsForModel.push({
+              tool: 'run_plan',
+              ok: false,
+              error: 'الخطة لازم تكون أدوات قراءة معروفة بس (من غير أي كتابة)',
+            })
+            replyParts.push('الخطة اللي جت من غير خطوات قراءة صالحة — حاول تاني بأدوات القراءة.')
+            return
+          }
+          emit({ event: 'plan', steps: plan.map((p) => TOOL_LABEL_AR[p.tool] ?? p.tool) })
+          const runs = await Promise.all(
+            plan.map((p) => runToolPipeline(p.tool, business.id, p.args ?? {}, { budgetChars: 1_200 })),
+          )
+          const doneRuns = runs.filter((r) => r.ok)
+          for (const r of runs) {
+            usedTools.push(r.tool)
+            for (const c of r.cards) allCards.push(c)
+            brainFacts.push(...factsFromCards(r.cards))
+            meta.notesJotted += jotFactsFromCards(
+              { businessId: business.id, userId: user.id, conversationId: ctx.conversationId },
+              r.cards,
+            )
+            if (r.cards.length > 0) replyParts.push(deterministicReadReply(r.cards))
+          }
+          if (allCards.length > 0) emit({ event: 'cards', cards: allCards })
+          step.detail = `نفّذت ${toArabicNum(doneRuns.length)}/${toArabicNum(runs.length)} استعلام في خطوة واحدة`
+          resultsForModel.push({
+            tool: 'run_plan',
+            ok: true,
+            steps: runs.map((r) => ({ tool: r.tool, ok: r.ok, ms: r.ms, error: r.error, output: r.output })),
+          })
+          await trackUsage(business.id, user.id, 'tool', `plan:${plan.length}`)
+          return
+        }
+
+        // ---- deep_dive: an ISOLATED researcher (summary-only return) ----
+        if (call.tool === 'deep_dive') {
+          const question = String(call.args.question ?? call.args.q ?? text).slice(0, 300)
+          const snapshot = await getSnapshot(business)
+          const sub = await runSubAgent({
+            businessId: business.id,
+            question,
+            context: [
+              `النشاط: ${business.name} (${business.type})`,
+              `الخزنة: ${egp(snapshot?.cash ?? 0)}`,
+              `مبيعات النهاردة: ${egp(snapshot?.salesToday ?? 0)}`,
+            ].join(' — '),
+            complete: (messages) => completeChat(model, messages),
+            onStep: (tool, detail) => {
+              const sub2: ThinkingStep = {
+                label: `تحقيق: ${TOOL_LABEL_AR[tool] ?? tool}`,
+                detail: detail.slice(0, 60),
+                state: 'done',
+                icon: 'search',
+              }
+              toolSteps.push(sub2)
+              syncSteps()
+              emit({ event: 'step', label: sub2.label, state: 'done' })
+            },
+          })
+          // only the SUMMARY enters the parent's context — the intermediate
+          // reads stay inside the sub-agent (Claude Code's summary-only return)
+          step.detail = sub.summary.slice(0, 80)
+          resultsForModel.push({
+            tool: 'deep_dive',
+            ok: true,
+            rounds: sub.rounds,
+            tools: sub.toolsUsed,
+            summary: sub.summary,
+            numbers: sub.facts.slice(0, 8),
+          })
+          replyParts.push(sub.summary)
+          usedTools.push('deep_dive')
+          await trackUsage(business.id, user.id, 'tool', 'deep_dive')
+          return
+        }
+
         // ---- WRITE tools → drafts (R2/R3 — NEVER auto-executed) ----
         const w = BRAIN_WRITE_TOOLS[call.tool]
         if (w) {
@@ -2448,14 +2655,40 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       while (calls && totalCalls < 6) {
         rounds++
         convo.push({ role: 'assistant', content: raw.slice(0, 1200) })
-        for (const call of calls.slice(0, 4)) {
-          await execBrainCall(call)
+        const batch = calls.slice(0, 4)
+        // ---- independent reads run CONCURRENTLY; anything that can change the
+        // ledger (drafts, memory, scheduling, tone) stays strictly sequential —
+        // order is part of the money contract.
+        const isSafeParallel = (c: BrainToolCall) =>
+          READ_TOOLS.has(c.tool) || c.tool === 'run_plan' || c.tool === 'deep_dive' || c.tool === 'calculate'
+        const parallel = batch.filter(isSafeParallel)
+        const sequential = batch.filter((c) => !isSafeParallel(c))
+        if (parallel.length > 1) {
+          await Promise.all(parallel.map((c) => execBrainCall(c)))
+          totalCalls += parallel.length
+        } else {
+          for (const c of parallel) {
+            await execBrainCall(c)
+            totalCalls++
+          }
+        }
+        for (const c of sequential) {
+          if (totalCalls >= 6) break
+          await execBrainCall(c)
           totalCalls++
         }
         const last = totalCalls >= 6 || rounds >= 3
+        // ---- context pressure, the CHEAP layer first (dsh compaction listener):
+        // older tool results are digested instead of re-sent whole to the model.
+        const { kept, budget } = budgetToolHistory(resultsForModel, 3)
+        if (budget.compressed) void logContextPressure(business.id, user.id, { ...budget, rounds })
         convo.push({
           role: 'user',
-          content: `نتايج الأدوات (JSON):\n${JSON.stringify(resultsForModel.slice(-4)).slice(0, 2400)}\n\n${
+          content: `نتايج الأدوات (JSON):\n${
+            kept.length === resultsForModel.length
+              ? JSON.stringify(kept).slice(0, 2400)
+              : `${JSON.stringify(kept).slice(0, 2000)}\n[${resultsForModel.length - kept.length} نتيجة أقدم اتقصّرت للحفاظ على السياق]`
+          }\n\n${
             last
               ? 'اكتب ردك النهائي للمستخدم دلوقتي كنص عادي بلا JSON خالص.'
               : 'قرر بنفسك: لو محتاج أدوات تانية رد بـ JSON بنفس الشكل، ولو خلصت اكتب ردك النهائي كنص عادي.'
@@ -2479,6 +2712,21 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       console.error('[brain] loop failed → fallback ladder:', err)
       if (!executedAnyTool) return null // clean bail-out — PASS 1 re-handles the turn
       finalText = '' // tools ran → finish here, deterministically
+    }
+
+    // ---------- «الدقة»: a model that only TALKED cannot override the ledger --
+    // Live evidence (2026-10-17, preview host): a thin provider answered «بعت ٢
+    // علبة زيت … بـ٦٥٠» with fluent prose — «جهّزتلك كارت العملية» — while NO
+    // tool ran and nothing was drafted, and answered «أنا بربح كام؟» with small
+    // talk instead of the real margin table. The rules are decisive on both, and
+    // the deterministic engine has the exact numbers, so when a turn ends with
+    // ZERO tool calls and the rule ladder knows what this request IS, we hand the
+    // turn to the proven PASS-1 pipeline instead of shipping prose that lies.
+    if (!executedAnyTool && usedTools.length === 0 && !anyDraft) {
+      const rule = ruleBasedIntent(text, business.type)
+      const decisiveRead = rule.intent === 'read' && !!rule.tool
+      const decisiveWrite = rule.intent === 'write' && !!rule.opType && VALID_OP_TYPES.has(rule.opType)
+      if (decisiveRead || decisiveWrite) return null
     }
 
     // ---------- final reply: verify BEFORE streaming, then pace it ----------
@@ -2945,6 +3193,12 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         { role: 'user', content: 'اكتب ردك النهائي دلوقتي بناءً على الوضع الحالي والمطلوب فوق.' },
       ]
 
+  // Snapshot of the draft for the reply pass: TypeScript's control-flow
+  // analysis narrows `card` to null across the chain below (it cannot see the
+  // PASS-2 assignment through `multiReplyParts`), so the reply decision reads a
+  // fresh binding instead of fighting the narrowing.
+  const draftCardForReply = card as ActionCardDTO | null
+
   if (multiReplyParts) {
     // ============ MULTI-INTENT: BUFFERED reply pass ============
     // The contract is «يجاوب على الكل» with numbered sections — the streamed
@@ -2970,6 +3224,44 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     const multiVerified = verifyReply(replyText, turnFacts)
     replyText = multiVerified.text
     verifiedLedger = multiVerified.verified
+    await streamDeterministic(replyText, emit, REPLY_PACING_BUDGET_MS)
+  } else if (draftCardForReply) {
+    // ============ DRAFT TURN: the reply is a CONTRACT ============
+    // It must name the operation, the amount and the approval requirement. That
+    // sentence already exists, deterministically, in the house voice — asking a
+    // model to paraphrase it can only add latency and contradiction («مفيش
+    // عملية محددة» next to a draft card, live 2026-10-17). One round trip less,
+    // zero chance of prose that disagrees with the money.
+    const contract = `جهزتلك مسودة «${draftCardForReply.title}» — ${draftCardForReply.summary}. راجعها واعتمدها لو تمام.${draftCardForReply.dangerNote ? `\n${draftCardForReply.dangerNote}` : ''}${draftIssues ? ` بس خد بالك: ${draftIssues.join('؛ ')}.` : ''}`
+    const contractVerified = verifyReply(contract, turnFacts)
+    replyText = contractVerified.text
+    verifiedLedger = contractVerified.verified
+    await streamDeterministic(replyText, emit, REPLY_PACING_BUDGET_MS)
+  } else if (cards && cards.length > 0) {
+    // ============ READ TURN: the model may phrase it — if it is GROUNDED ====
+    // Buffered (like the multi-intent path): a reply that never touches a
+    // single figure from the cards is replaced by the deterministic read
+    // summary. The user reads text and card together; they must agree.
+    let collected = ''
+    try {
+      for await (const chunk of streamChat(model, messages)) {
+        if (chunk.type !== 'content') continue
+        collected += chunk.text
+      }
+    } catch (err) {
+      console.error('[harness] read reply stream failed → deterministic read reply:', err)
+      meta.fallback = true
+    }
+    const grounded = collected.trim().length > 0 && replyGroundsCards(collected, cards)
+    if (!grounded) {
+      if (collected.trim().length > 0) meta.fallback = true
+      replyText = deterministicReadReply(cards)
+    } else {
+      replyText = collected.trim()
+    }
+    const readVerified = verifyReply(replyText, turnFacts)
+    replyText = readVerified.text
+    verifiedLedger = readVerified.verified
     await streamDeterministic(replyText, emit, REPLY_PACING_BUDGET_MS)
   } else {
     try {

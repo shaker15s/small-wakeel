@@ -2,7 +2,7 @@
 // The LLM extracts intent; THESE functions are the only writers of business truth.
 // Every write: idempotency key, state machine, verification read-back, audit event.
 
-import type { Item, Operation, Prisma } from '@prisma/client'
+import type { Operation, Prisma } from '@prisma/client'
 import { db } from '@/lib/db'
 import type { OpType } from '@/lib/types'
 import { invalidateCatalog } from '@/lib/agent/catalog'

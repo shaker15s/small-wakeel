@@ -312,7 +312,7 @@ export function ActionCard({
               <div className="flex flex-wrap items-center gap-2">
                 <Button
                   type="button"
-                  className="press h-11 flex-1 rounded-lg sm:flex-none sm:min-w-44"
+                  className="magnetic ae-sweep press h-11 flex-1 rounded-lg sm:flex-none sm:min-w-44"
                   disabled={busy || !reasonOk}
                   onClick={() => onApprove?.(reason.trim() || undefined)}
                 >
