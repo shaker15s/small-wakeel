@@ -53,7 +53,14 @@ function safeParse(raw: string): Record<string, unknown> {
   }
 }
 
+// Tool the scheduled task runs when it fires. The RESTRICTION is about money —
+// a schedule must never draft or execute a write — but a plain reminder is
+// explicitly allowed: the runner's `remind` branch delivers the title as a
+// message. It used to be missing here, so the API rejected every reminder
+// («مش بنجدول أدوات كتابة فلوس») even though the chat path creates them
+// directly and the zod schema defaults to `remind`.
 const READ_TOOLS = new Set([
+  'remind',
   'get_daily_summary',
   'get_cash_position',
   'list_low_stock',

@@ -68,7 +68,8 @@ async function postAgentMessage(conversationId: string, data: { text: string; ca
   })
 }
 
-function nextRun(from: Date, recurrence: string): Date {
+/** Next occurrence of a recurring task (exported for unit tests). */
+export function nextRun(from: Date, recurrence: string): Date {
   const next = new Date(from)
   if (recurrence === 'daily') next.setDate(next.getDate() + 1)
   else if (recurrence === 'weekly') next.setDate(next.getDate() + 7)
@@ -99,38 +100,41 @@ export async function runDueTasks(limit = 10): Promise<TaskRunSummary> {
     if (claim.count === 0) continue
 
     try {
+      // Completion update is RECURRENCE-AWARE for every task kind. The remind
+      // branch used to hard-code «done», so «فكرني كل يوم…» fired exactly once —
+      // a silently broken promise. A daily/weekly/monthly task now moves to its
+      // next slot and stays `pending`.
+      const finish = (result: string) =>
+        task.recurrence
+          ? db.scheduledTask.update({
+              where: { id: task.id },
+              data: {
+                scheduledFor: nextRun(task.scheduledFor, task.recurrence),
+                executedAt: new Date(),
+                status: 'pending',
+                claimedAt: null,
+                result: result.slice(0, 4000),
+              },
+            })
+          : db.scheduledTask.update({
+              where: { id: task.id },
+              data: { status: 'done', executedAt: new Date(), claimedAt: null, result: result.slice(0, 4000) },
+            })
+
       if (task.tool === 'remind') {
         const conv = await deliverConversation(task.businessId, task.userId, task.conversationId)
         await postAgentMessage(conv.id, {
           text: `⏰ تذكير: ${task.title}\nدي مهمة مجدولة من ${task.whenLabel} — وقتها وصل.`,
           detail: `${task.title} (${task.whenLabel})`,
         })
-        await db.scheduledTask.update({
-          where: { id: task.id },
-          data: { status: 'done', executedAt: new Date(), result: task.title },
-        })
+        await finish(task.title)
         summary.ran++
-        summary.details.push(`remind:${task.title}`)
+        summary.details.push(`remind:${task.title}${task.recurrence ? `→${task.recurrence}` : ''}`)
         continue
       }
 
       const cards = await runReadTool(task.tool as ReadTool, task.businessId, safeParse(task.fields))
-      if (task.recurrence) {
-        await db.scheduledTask.update({
-          where: { id: task.id },
-          data: {
-            scheduledFor: nextRun(task.scheduledFor, task.recurrence),
-            executedAt: new Date(),
-            status: 'pending',
-            result: JSON.stringify(cards).slice(0, 4000),
-          },
-        })
-      } else {
-        await db.scheduledTask.update({
-          where: { id: task.id },
-          data: { status: 'done', executedAt: new Date(), result: JSON.stringify(cards).slice(0, 4000) },
-        })
-      }
+      await finish(JSON.stringify(cards))
 
       const conv = await deliverConversation(task.businessId, task.userId, task.conversationId)
       const summaryText = cards
