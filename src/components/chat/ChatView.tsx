@@ -21,7 +21,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AnimatePresence, motion, MotionConfig } from 'framer-motion'
-import { ChevronDown, History, LayoutGrid, Loader2, Moon, NotebookPen, SquarePen, Sun } from 'lucide-react'
+import { ChevronDown, History, LayoutGrid, Loader2, Moon, NotebookPen, Search, SquarePen, Sun } from 'lucide-react'
 import { useTheme } from 'next-themes'
 
 import { api, messageToTurn, streamChat, type ChatTurnWithMeta } from '@/lib/api'
@@ -37,6 +37,7 @@ import type {
   ResultCardDTO,
   SuggestionDTO,
 } from '@/lib/types'
+import { openCommandPalette } from '@/components/app/CommandPalette'
 import { AgentAvatar, type AgentState } from './AgentAvatar'
 import { MessageBubble } from './MessageBubble'
 import { Composer } from './Composer'
@@ -826,6 +827,17 @@ function FloatingPill({
                 ) : (
                   <SquarePen className="size-4" aria-hidden="true" />
                 )}
+              </Button>
+
+              {/* بحث سريع في كل حاجة (⌘K) */}
+              <Button
+                variant="ghost"
+                className="press-apple icon-seat size-9 shrink-0 text-muted-foreground hover:text-foreground"
+                onClick={openCommandPalette}
+                aria-label="بحث سريع"
+                title="بحث سريع (⌘K)"
+              >
+                <Search className="size-4" aria-hidden="true" />
               </Button>
 
               {/* history */}

@@ -23,6 +23,7 @@ import {
   LayoutGrid,
   MessageCircle,
   Moon,
+  Search,
   Settings,
   Sun,
   Users,
@@ -48,6 +49,7 @@ import { Onboarding } from './Onboarding'
 import { AgentAvatar } from '@/components/chat/AgentAvatar'
 import { BusinessMenu } from './BusinessMenu'
 import { NotificationBell } from './NotificationBell'
+import { openCommandPalette } from './CommandPalette'
 
 const NAV_ITEMS: { key: ViewKey; icon: typeof MessageCircle }[] = [
   { key: 'chat', icon: MessageCircle },
@@ -218,6 +220,19 @@ export function AppShell() {
           </div>
 
           <div className="flex-1" />
+
+          {/* بحث سريع — نفس البحث بيشتغل من أي شاشة (⌘K كمان) */}
+          <Button
+            variant="outline"
+            onClick={openCommandPalette}
+            className="h-9 gap-2 rounded-full px-3 text-xs text-muted-foreground"
+            aria-label="بحث سريع في كل حاجة"
+            title="بحث سريع (⌘K)"
+          >
+            <Search className="size-3.5" aria-hidden />
+            <span className="hidden sm:inline">بحث سريع</span>
+            <span className="num hidden rounded bg-muted px-1.5 py-0.5 text-[10px] md:inline">⌘K</span>
+          </Button>
 
           {/* ذاكرة وكيل — mobile shortcut (the bottom bar stays 5 tabs) */}
           <Button
