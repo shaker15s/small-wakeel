@@ -26,6 +26,7 @@ import { useQuery } from '@tanstack/react-query'
 import { cn } from '@/lib/utils'
 import type { ItemDTO } from '@/lib/types'
 import { EmptyState, ErrorState, Money, ViewHeader, ViewProps, arNum } from './shared'
+import { ImportItemsDialog } from './ImportItemsDialog'
 
 function itemValue(it: ItemDTO): number {
   return it.valueAtCost ?? it.costPrice * it.stockQty
@@ -59,7 +60,7 @@ function ItemBadges({ it }: { it: ItemDTO }) {
   )
 }
 
-export default function InventoryView({ businessId }: ViewProps) {
+export default function InventoryView({ businessId, userId }: ViewProps) {
   const [query, setQuery] = useState('')
   const [category, setCategory] = useState('__all')
 
@@ -119,6 +120,7 @@ export default function InventoryView({ businessId }: ViewProps) {
             ? 'بنجهّز الكتالوج...'
             : `${arNum(items.length)} صنف${lowCount > 0 ? ` — ${arNum(lowCount)} ناقص` : ''} · القيمة: ${egp(allValue)}`
         }
+        action={<ImportItemsDialog businessId={businessId} userId={userId} />}
       />
 
       {/* بحث + تصنيفات */}

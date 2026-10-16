@@ -110,11 +110,48 @@ async function del(url: string): Promise<void> {
   }
 }
 
+export interface ItemImportResult {
+  total: number
+  created: number
+  updated: number
+  skipped: number
+  unknownHeaders: string[]
+  errors: { row: number; message: string }[]
+  dryRun?: boolean
+  preview?: { name: string; sellPrice: number; stockQty: number }[]
+}
+
+export interface SearchHitDTO {
+  kind: 'item' | 'customer' | 'supplier' | 'operation' | 'note'
+  id: string
+  title: string
+  subtitle: string
+  ref?: string
+  tone?: 'good' | 'warn' | 'bad'
+  score: number
+}
+
+export interface SearchResultDTO {
+  query: string
+  total: number
+  groups: Record<string, number>
+  results: SearchHitDTO[]
+}
+
 export const api = {
   bootstrap: () => get<BootstrapDTO>('/api/bootstrap'),
   overview: (businessId: string, userId: string) =>
     get<OverviewDTO>(`/api/overview?businessId=${businessId}&userId=${userId}`),
   items: (businessId: string) => get<ItemDTO[]>(`/api/items?businessId=${businessId}`),
+  importItems: (body: {
+    businessId: string
+    userId: string
+    csv: string
+    updateExisting?: boolean
+    dryRun?: boolean
+  }) => post<ItemImportResult>('/api/items/import', body),
+  search: (businessId: string, q: string, limit = 12) =>
+    get<SearchResultDTO>(`/api/search?businessId=${businessId}&q=${encodeURIComponent(q)}&limit=${limit}`),
   operations: (businessId: string, status?: string) =>
     get<OperationDTO[]>(`/api/operations?businessId=${businessId}${status ? `&status=${status}` : ''}`),
   chat: (
