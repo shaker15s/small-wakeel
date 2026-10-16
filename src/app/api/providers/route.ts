@@ -5,6 +5,8 @@
 import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { badRequest, serverError } from '../_lib/http'
+import { guard } from '../_lib/guard'
+import { parseBody, providerCreateSchema } from '@/lib/security/validate'
 
 export const dynamic = 'force-dynamic'
 
@@ -31,7 +33,11 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
-    const body = (await req.json()) as { name?: string; baseUrl?: string; apiKey?: string }
+    const gate = await guard(req, { scope: 'open' })
+    if (!gate.ok) return gate.res
+    const parsed = await parseBody(req, providerCreateSchema)
+    if (!parsed.ok) return badRequest(parsed.message)
+    const body = parsed.data
     if (!body.name?.trim()) return badRequest('اسم المزوّد مطلوب')
     if (!body.baseUrl?.trim()) return badRequest('رابط الـ Base URL مطلوب')
     if (!body.apiKey?.trim()) return badRequest('مفتاح الـ API مطلوب')

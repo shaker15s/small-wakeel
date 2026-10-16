@@ -1,5 +1,6 @@
 // وكيل — typed client API + SSE chat streaming reader (frontend)
 
+import { useWakil } from './store'
 import type {
   BootstrapDTO,
   OverviewDTO,
@@ -24,8 +25,50 @@ import type {
   CustomToolDTO,
 } from './types'
 
+/**
+ * Access token handling (see docs/SECURITY.md).
+ *
+ * Deployment can require a token (`WAKIL_ACCESS_TOKEN`). The client picks it up
+ * from the URL once (`?token=…`), remembers it, and replays it on every call —
+ * so a protected instance is usable by simply opening the shared link.
+ */
+const TOKEN_LS_KEY = 'wakil.token'
+
+function accessToken(): string | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const fromUrl = new URLSearchParams(window.location.search).get('token')
+    if (fromUrl) {
+      window.localStorage.setItem(TOKEN_LS_KEY, fromUrl)
+      // keep the token out of the address bar / history / referrer
+      const clean = window.location.pathname + window.location.hash
+      window.history.replaceState({}, '', clean)
+      return fromUrl
+    }
+    return window.localStorage.getItem(TOKEN_LS_KEY)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Every request carries the *actor context* the server needs to enforce tenant
+ * isolation: which business and which user the browser is currently acting as,
+ * plus the access token when one is configured. This is what lets
+ * PATCH/DELETE-by-id routes prove ownership without every call site passing ids.
+ */
+function apiHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { ...(extra ?? {}) }
+  const state = useWakil.getState()
+  if (state.businessId) headers['x-wakil-business'] = state.businessId
+  if (state.userId) headers['x-wakil-user'] = state.userId
+  const token = accessToken()
+  if (token) headers['x-wakil-token'] = token
+  return headers
+}
+
 async function get<T>(url: string): Promise<T> {
-  const res = await fetch(url, { cache: 'no-store' })
+  const res = await fetch(url, { cache: 'no-store', headers: apiHeaders() })
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string }
     throw new Error(body.error ?? `فشل الطلب (${res.status})`)
@@ -36,7 +79,7 @@ async function get<T>(url: string): Promise<T> {
 async function post<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: apiHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify(body),
   })
   if (!res.ok) {
@@ -49,7 +92,7 @@ async function post<T>(url: string, body: unknown): Promise<T> {
 async function patch<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(url, {
     method: 'PATCH',
-    headers: { 'content-type': 'application/json' },
+    headers: apiHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify(body),
   })
   if (!res.ok) {
@@ -60,7 +103,7 @@ async function patch<T>(url: string, body: unknown): Promise<T> {
 }
 
 async function del(url: string): Promise<void> {
-  const res = await fetch(url, { method: 'DELETE' })
+  const res = await fetch(url, { method: 'DELETE', headers: apiHeaders() })
   if (!res.ok) {
     const data = (await res.json().catch(() => ({}))) as { error?: string }
     throw new Error(data.error ?? `فشل الطلب (${res.status})`)
@@ -96,7 +139,7 @@ export const api = {
     post<{ provider: import('./types').ProviderDTO }>('/api/providers', p),
   saveProviderModels: (id: string, models: { remoteId: string; label: string; tier: string; enabled: boolean }[]) =>
     post<{ provider: import('./types').ProviderDTO }>(`/api/providers/${id}`, { models }),
-  deleteProvider: (id: string) => fetch(`/api/providers/${id}`, { method: 'DELETE' }),
+  deleteProvider: (id: string) => fetch(`/api/providers/${id}`, { method: 'DELETE', headers: apiHeaders() }),
   createTask: (t: { businessId: string; userId: string; title: string; tool: string; fields?: Record<string, unknown>; whenLabel?: string; recurrence?: string }) =>
     post<{ task: ScheduledTaskDTO }>('/api/tasks', t),
   tickTasks: () => post<{ ran: number; due: number }>('/api/tasks/tick', {}),
@@ -181,7 +224,7 @@ export async function streamChat(
 ): Promise<void> {
   const res = await fetch('/api/chat', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: apiHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify(body),
     signal,
   })

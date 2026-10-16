@@ -3,6 +3,7 @@
 import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { badRequest, notFound, serverError } from '../_lib/http'
+import { guard } from '../_lib/guard'
 
 export const dynamic = 'force-dynamic'
 
@@ -11,6 +12,8 @@ export async function GET(req: Request) {
     const sp = new URL(req.url).searchParams
     const businessId = sp.get('businessId')
     if (!businessId) return badRequest('businessId مطلوب')
+    const gate = await guard(req, { businessId, scope: 'business' })
+    if (!gate.ok) return gate.res
 
     const tasks = await db.scheduledTask.findMany({ where: { businessId } })
     const pending = tasks
@@ -75,6 +78,8 @@ export async function POST(req: Request) {
     }
     if (!body.businessId) return badRequest('businessId مطلوب')
     if (!body.userId) return badRequest('userId مطلوب')
+    const gate = await guard(req, { businessId: body.businessId, userId: body.userId })
+    if (!gate.ok) return gate.res
     if (!body.title?.trim()) return badRequest('عنوان المهمة مطلوب')
     if (!body.tool) return badRequest('الأداة مطلوبة')
 

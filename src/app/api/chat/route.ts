@@ -14,6 +14,8 @@ import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import type { ActionCardDTO, CardOutcomeDTO, ChatActionDTO, MessageDTO } from '@/lib/types'
 import { badRequest, notFound, searchParams, serverError } from '../_lib/http'
+import { parseBody, chatPostSchema } from '@/lib/security/validate'
+import { guard } from '../_lib/guard'
 import { parseJson, serializeMessage } from '../_lib/serialize'
 import { runAgentTurn } from '@/lib/agent/harness'
 import { maybeReflect } from '@/lib/agent/reflection'
@@ -32,18 +34,13 @@ function autoTitle(text: string): string {
 export async function GET(req: Request) {
   try {
     const sp = searchParams(req)
-    const businessId = sp.get('businessId')
-    if (!businessId) return badRequest('businessId مطلوب')
-    const userId = sp.get('userId')
-    if (!userId) return badRequest('userId مطلوب')
+    // guard() loads & validates the tenant pair once — reuse it below instead
+    // of hitting the database again for the same two rows.
+    const gate = await guard(req, { businessId: sp.get('businessId'), userId: sp.get('userId') })
+    if (!gate.ok) return gate.res
+    const businessId = gate.actor.business.id
+    const userId = gate.actor.user.id
     const conversationId = sp.get('conversationId')
-
-    const [business, user] = await Promise.all([
-      db.business.findUnique({ where: { id: businessId }, select: { id: true } }),
-      db.user.findUnique({ where: { id: userId }, select: { id: true } }),
-    ])
-    if (!business) return notFound('النشاط التجاري غير موجود')
-    if (!user) return notFound('المستخدم غير موجود')
 
     let conversation = conversationId
       ? // explicit id MUST belong to the same business AND user — conversations
@@ -117,26 +114,19 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    const body = (await req.json()) as {
-      businessId?: string
-      userId?: string
-      text?: string
-      modelKey?: string | null
-      conversationId?: string | null
-      suggestionId?: string | null
-      /** R15: «بحث عميق» toggle from the composer (Compass) */
-      deepResearch?: boolean
-    }
-    if (!body.businessId) return badRequest('businessId مطلوب')
-    if (!body.userId) return badRequest('userId مطلوب')
-    if (!body.text?.trim()) return badRequest('الرسالة فاضية')
+    const parsed = await parseBody(req, chatPostSchema)
+    if (!parsed.ok) return badRequest(parsed.message)
+    const body = parsed.data
 
-    const [business, user] = await Promise.all([
-      db.business.findUnique({ where: { id: body.businessId } }),
-      db.user.findUnique({ where: { id: body.userId } }),
-    ])
-    if (!business) return notFound('النشاط التجاري غير موجود')
-    if (!user) return notFound('المستخدم غير موجود')
+    // Access token + CSRF + rate limit (class 'chat': agent turns are the
+    // expensive path) + tenant isolation, in ONE call.
+    const gate = await guard(req, {
+      businessId: body.businessId,
+      userId: body.userId,
+      class: 'chat',
+    })
+    if (!gate.ok) return gate.res
+    const { business, user } = gate.actor
 
     // Conversation: explicit, else latest for that user, else new
     // (an explicit id that belongs to another business/user is rejected —
@@ -155,7 +145,7 @@ export async function POST(req: Request) {
 
     // Persist user message immediately
     const userMsg = await db.message.create({
-      data: { conversationId: conversation.id, role: 'user', text: body.text.trim() },
+      data: { conversationId: conversation.id, role: 'user', text: body.text },
     })
     // Auto-title on the FIRST user message of an untitled conversation
     const titleUpdate =
@@ -183,7 +173,7 @@ export async function POST(req: Request) {
     // the PREVIOUS assistant reply extracts a lesson into agent memory.
     // Fire-and-forget by contract — it never throws, never blocks the turn.
     const lastAssistant = [...history].reverse().find((m) => m.role === 'assistant')
-    void maybeReflect(business.id, user.id, body.text.trim(), lastAssistant?.text ?? null)
+    void maybeReflect(business.id, user.id, body.text, lastAssistant?.text ?? null)
 
     const encoder = new TextEncoder()
     const stream = new ReadableStream({
@@ -198,7 +188,7 @@ export async function POST(req: Request) {
               business: business!,
               user: user!,
               conversationId: conversation!.id,
-              text: body.text!.trim(),
+              text: body.text,
               modelKey: body.modelKey ?? null,
               history: history.map((m) => ({ role: m.role, text: m.text })),
               deepResearch: body.deepResearch === true,

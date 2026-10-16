@@ -5,6 +5,7 @@ import type { Prisma } from '@prisma/client'
 import { db } from '@/lib/db'
 import type { OperationDTO } from '@/lib/types'
 import { badRequest, searchParams, serverError } from '../_lib/http'
+import { guard } from '../_lib/guard'
 import { serializeOp, userNameMap } from '../_lib/serialize'
 
 export const dynamic = 'force-dynamic'
@@ -24,6 +25,8 @@ export async function GET(req: Request) {
     const sp = searchParams(req)
     const businessId = sp.get('businessId')
     if (!businessId) return badRequest('businessId مطلوب')
+    const gate = await guard(req, { businessId, scope: 'business' })
+    if (!gate.ok) return gate.res
 
     const status = sp.get('status')
     const where: Prisma.OperationWhereInput = { businessId }

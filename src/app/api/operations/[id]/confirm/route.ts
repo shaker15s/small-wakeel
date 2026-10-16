@@ -5,22 +5,27 @@ import { db } from '@/lib/db'
 import { executeOperation, rejectOperation } from '@/lib/domain/executors'
 import { canApprove } from '@/lib/domain/risk'
 import { badRequest, notFound, serverError } from '../../../_lib/http'
+import { guard } from '../../../_lib/guard'
 import { parseJson, serializeOp } from '../../../_lib/serialize'
+import { confirmOpSchema, parseBody } from '@/lib/security/validate'
 
 export const dynamic = 'force-dynamic'
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params
-    const body = (await req.json()) as { action?: string; reason?: string; userId?: string }
-    if (!body.userId) return badRequest('userId مطلوب')
+    const parsed = await parseBody(req, confirmOpSchema)
+    if (!parsed.ok) return badRequest(parsed.message)
+    const body = parsed.data
 
     const op = await db.operation.findUnique({ where: { id } })
     if (!op) return notFound('العملية غير موجودة')
 
-    const user = await db.user.findUnique({ where: { id: body.userId } })
-    if (!user) return notFound('المستخدم غير موجود')
-    if (user.businessId !== op.businessId) return badRequest('العملية مش في نفس المنشأة')
+    // Tenant isolation: the approver must belong to the business that owns the
+    // operation (checked here and again by the canApprove role rule below).
+    const gate = await guard(req, { businessId: op.businessId, userId: body.userId })
+    if (!gate.ok) return gate.res
+    const user = gate.actor.user
 
     if (body.action === 'approve') {
       if (!canApprove(user.role, op.risk as never)) {

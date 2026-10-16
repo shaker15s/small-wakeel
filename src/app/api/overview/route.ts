@@ -6,6 +6,7 @@ import { db } from '@/lib/db'
 import { egp } from '@/lib/format'
 import type { AlertDTO, OverviewDTO } from '@/lib/types'
 import { badRequest, notFound, searchParams, serverError } from '../_lib/http'
+import { guard } from '../_lib/guard'
 import { daysFromTodayCairo, startOfCairoDay } from '../_lib/dates'
 import { payloadTotalPiastres, serializeCustomer, serializeItem, serializeOp, serializeSupplier, userNameMap } from '../_lib/serialize'
 
@@ -19,10 +20,12 @@ const arNum = (n: number) => new Intl.NumberFormat('ar-EG').format(n)
 export async function GET(req: Request) {
   try {
     const sp = searchParams(req)
-    const businessId = sp.get('businessId')
+        const businessId = sp.get('businessId')
     if (!businessId) return badRequest('businessId مطلوب')
     const userId = sp.get('userId')
     if (!userId) return badRequest('userId مطلوب')
+    const gate = await guard(req, { businessId, userId })
+    if (!gate.ok) return gate.res
 
     const business = await db.business.findUnique({ where: { id: businessId } })
     if (!business) return notFound('النشاط التجاري غير موجود')

@@ -4,11 +4,16 @@ import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { runReadTool, type ReadTool } from '@/lib/agent/tools'
 import { serverError } from '../../_lib/http'
+import { guard } from '../../_lib/guard'
 
 export const dynamic = 'force-dynamic'
 
-export async function POST() {
+export async function POST(req: Request) {
   try {
+    // System job (the in-process scheduler calls it too): token + origin +
+    // rate limit apply, tenant scoping does not — it sweeps every business.
+    const gate = await guard(req, { scope: 'open' })
+    if (!gate.ok) return gate.res
     const due = await db.scheduledTask.findMany({
       where: { status: 'pending', scheduledFor: { lte: new Date() } },
       orderBy: { scheduledFor: 'asc' },

@@ -17,6 +17,7 @@ import type { CustomToolDTO } from '@/lib/types'
 import { parseToolConfig } from '@/lib/agent/userTools'
 import { ensurePrismaFresh } from '@/lib/agent/scratchpad'
 import { badRequest, notFound, searchParams, serverError } from '../_lib/http'
+import { guard } from '../_lib/guard'
 
 export const dynamic = 'force-dynamic'
 
@@ -129,10 +130,12 @@ export async function GET(req: Request) {
   ensurePrismaFresh()
   try {
     const sp = searchParams(req)
-    const businessId = sp.get('businessId')
+        const businessId = sp.get('businessId')
     if (!businessId) return badRequest('businessId مطلوب')
     const userId = sp.get('userId')
     if (!userId) return badRequest('userId مطلوب')
+    const gate = await guard(req, { businessId, userId })
+    if (!gate.ok) return gate.res
 
     const invalid = await validatePair(businessId, userId)
     if (invalid) return invalid
@@ -161,8 +164,8 @@ export async function POST(req: Request) {
     if (!body.businessId) return badRequest('businessId مطلوب')
     if (!body.userId) return badRequest('userId مطلوب')
 
-    const invalid = await validatePair(body.businessId, body.userId)
-    if (invalid) return invalid
+    const gate = await guard(req, { businessId: body.businessId, userId: body.userId })
+    if (!gate.ok) return gate.res
 
     const name = String(body.name ?? '').trim().replace(/\s+/g, ' ')
     if (name.length < NAME_MIN || name.length > NAME_MAX) {
@@ -209,6 +212,8 @@ export async function PATCH(req: Request) {
 
     const existing = await db.customTool.findUnique({ where: { id: body.id } })
     if (!existing) return notFound('الأداة مش موجودة')
+    const gate = await guard(req, { businessId: existing.businessId })
+    if (!gate.ok) return gate.res
 
     const data: { active?: boolean; name?: string; kind?: string; config?: string } = {}
 
@@ -254,8 +259,10 @@ export async function DELETE(req: Request) {
     const id = sp.get('id')
     if (!id) return badRequest('id مطلوب')
 
-    const existing = await db.customTool.findUnique({ where: { id }, select: { id: true } })
+    const existing = await db.customTool.findUnique({ where: { id } })
     if (!existing) return notFound('الأداة مش موجودة')
+    const gate = await guard(req, { businessId: existing.businessId })
+    if (!gate.ok) return gate.res
 
     await db.customTool.delete({ where: { id } })
     return NextResponse.json({ ok: true })

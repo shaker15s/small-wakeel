@@ -102,6 +102,11 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
   // One effect owns the transcript: it applies the fetched history whenever
   // the data or the target conversation changes, and drops the old transcript
   // while a NEW key has no cached data yet (so stale messages never linger).
+  /* eslint-disable react-hooks/set-state-in-effect -- Deliberate: this effect
+     mirrors an EXTERNAL store (the React Query cache) into the local transcript,
+     which is exactly the pattern the rule's docs call out as valid. Every branch
+     runs only when the query data / conversation key actually changed, so no
+     cascading render loop is possible (the rule cannot see that invariant). */
   useEffect(() => {
     if (!data) {
       setTurns([])
@@ -115,6 +120,7 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
     setRevealId(null)
     setFailedId(null)
   }, [data, business.id, userId, activeConversationId])
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // ---- smart scroll: follow only while the user is near the bottom ----
   const scrollToBottom = useCallback((smooth = true) => {
@@ -392,7 +398,11 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
   )
 
   // ---- «محادثة جديدة» → create + activate + empty hero ----
-  const startNewChat = useCallback(async () => {
+  // Not wrapped in useCallback on purpose: the React Compiler cannot preserve
+  // the manual memoization here (ref-guarded async handler) and the eslint
+  // rule flags the mismatch. A plain handler is correct and cheaper to reason
+  // about; it is only passed to click targets that re-render anyway.
+  const startNewChat = async () => {
     if (creatingRef.current) return
     creatingRef.current = true
     setCreating(true)
@@ -414,7 +424,7 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
       creatingRef.current = false
       setCreating(false)
     }
-  }, [business.id, userId, setActiveConversation, queryClient, toast])
+  }
 
   // ---- approvals (R2+ / R3 reason flow) ----
   const approve = useCallback(

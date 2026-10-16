@@ -9,6 +9,7 @@ import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import type { QuickCommandDTO } from '@/lib/types'
 import { badRequest, notFound, searchParams, serverError } from '../_lib/http'
+import { guard } from '../_lib/guard'
 
 export const dynamic = 'force-dynamic'
 
@@ -77,6 +78,8 @@ export async function GET(req: Request) {
     const sp = searchParams(req)
     const businessId = sp.get('businessId')
     if (!businessId) return badRequest('businessId مطلوب')
+    const gate = await guard(req, { businessId, scope: 'business' })
+    if (!gate.ok) return gate.res
 
     const rows = await db.quickCommand.findMany({
       where: { businessId },
@@ -100,8 +103,8 @@ export async function POST(req: Request) {
     if (!body.businessId) return badRequest('businessId مطلوب')
     if (!body.userId) return badRequest('userId مطلوب')
 
-    const invalid = await validatePair(body.businessId, body.userId)
-    if (invalid) return invalid
+    const gate = await guard(req, { businessId: body.businessId, userId: body.userId })
+    if (!gate.ok) return gate.res
 
     const label = body.label?.trim()
     const prompt = body.prompt?.trim()
@@ -149,6 +152,8 @@ export async function PATCH(req: Request) {
 
     const existing = await db.quickCommand.findUnique({ where: { id: body.id } })
     if (!existing) return notFound('الأداة مش موجودة')
+    const gate = await guard(req, { businessId: existing.businessId })
+    if (!gate.ok) return gate.res
 
     // usage ping from the composer — bump usageCount, ignore other fields
     if (body.touch === true) {
@@ -183,8 +188,10 @@ export async function DELETE(req: Request) {
     const id = sp.get('id')
     if (!id) return badRequest('id مطلوب')
 
-    const existing = await db.quickCommand.findUnique({ where: { id }, select: { id: true } })
+    const existing = await db.quickCommand.findUnique({ where: { id } })
     if (!existing) return notFound('الأداة مش موجودة')
+    const gate = await guard(req, { businessId: existing.businessId })
+    if (!gate.ok) return gate.res
 
     await db.quickCommand.delete({ where: { id } })
     return NextResponse.json({ ok: true })
