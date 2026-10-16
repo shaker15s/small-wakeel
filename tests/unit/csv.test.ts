@@ -68,3 +68,13 @@ describe('csv.parseFlexibleDate', () => {
     expect(parseFlexibleDate('مش تاريخ')).toBeNull()
   })
 })
+
+describe('csv → catalog identity', () => {
+  test('Arabic-Indic digits fold, so «شاي ٢٥٠» matches «شاي 250»', async () => {
+    // mirrors the importer's nameKey (normalise letters, «ال», digits, spaces)
+    const { normalizeAr, toWesternDigits } = await import('../../src/lib/agent/arabic')
+    const key = (s: string) => normalizeAr(toWesternDigits(s)).replace(/^ال/, '').replace(/\s+/g, ' ').trim()
+    expect(key('شاي العروسة ٢٥٠ جرام')).toBe(key('شاي العروسة 250 جرام'))
+    expect(key('اللبن كرتونة')).toBe(key('لبن كرتونة'))
+  })
+})

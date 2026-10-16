@@ -16,7 +16,7 @@
 //   • one audit event for the whole import (who imported what, when)
 import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
-import { normalizeAr } from '@/lib/agent/arabic'
+import { normalizeAr, toWesternDigits } from '@/lib/agent/arabic'
 import { mapCsv, parseFlexibleDate, parseFlexibleNumber } from '@/lib/csv'
 import { guard } from '../../_lib/guard'
 import { badRequest, notFound, serverError } from '../../_lib/http'
@@ -40,9 +40,21 @@ const SYNONYMS: Record<string, string[]> = {
 
 const MAX_ROWS = 2000
 
-/** Arabic-normalised key used to match an item to an existing row. */
+/**
+ * Matching key for an item name.
+ *
+ * Digit folding matters as much as letter folding: a spreadsheet with «شاي
+ * العروسة ٢٥٠ جرام» and an existing row «شاي العروسة 250 جرام» are the SAME
+ * product — without folding we imported a duplicate catalog entry (found while
+ * smoke-testing the importer against the demo data).
+ */
 function nameKey(name: string): string {
-  return normalizeAr(name).replace(/^ال/, '').replace(/\s+/g, ' ').trim()
+  return normalizeAr(toWesternDigits(name)).replace(/^ال/, '').replace(/\s+/g, ' ').trim()
+}
+
+/** Store names with ASCII digits so the catalog stays consistent. */
+function cleanName(name: string): string {
+  return toWesternDigits(name).replace(/\s+/g, ' ').trim()
 }
 
 export async function POST(req: Request) {
@@ -110,7 +122,7 @@ export async function POST(req: Request) {
         return
       }
       const record = {
-        name: name.slice(0, 120),
+        name: cleanName(name).slice(0, 120),
         category: (row.category || 'منوع').slice(0, 60),
         unit: (row.unit || 'piece').slice(0, 20),
         costPrice: costPiastres,
