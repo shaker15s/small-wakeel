@@ -379,3 +379,31 @@ Stage Summary — BINDING CONTRACTS for the R14 team (parallel, disjoint ownersh
 - OWNERSHIP: R14-brain → src/lib/agent/** + NEW src/lib/agent/{memory,suggest,radar}.ts + api/{chat,suggestions,radar,memories,providers/probe}/route.ts + UsageEvent writes. R14-convs → src/components/chat/{ChatView,Composer}.tsx + NEW ConversationDrawer.tsx + src/lib/{api,store}.ts + api/{conversations,quick-commands}/route.ts + SettingsView (quick-commands section ONLY). R14-ux → src/components/app/{AppShell,Onboarding}.tsx + NEW MemoryView.tsx + views/{TodayView,shared}.tsx polish + globals.css. Shared files (types/schema/store/serialize) frozen by orchestrator — done.
 - API contracts (paths + shapes): GET /api/conversations?businessId&userId → ConversationSummaryDTO[] (pinned first, then lastMessageAt desc); POST /api/conversations {businessId,userId,title?} → summary; PATCH /api/conversations {id,title?,pinned?,archived?}; DELETE /api/conversations?id. GET /api/chat?businessId&userId&conversationId (R14-brain adds optional conversationId param — currently latest-only). POST /api/chat accepts conversationId (already supported). GET /api/suggestions?businessId&userId → SuggestionDTO[] (max 8, ranked: alert-driven > frequent(UsageEvent top) > memory/vertical > time; MUST change over usage). GET /api/quick-commands?businessId → QuickCommandDTO[]; POST {businessId,userId,label,prompt,icon}; PATCH {id,...}; DELETE ?id=. GET /api/radar?businessId → RadarInsightDTO[] (owner-only logic: if user.role !== 'owner' → []). POST /api/providers/probe {modelConfigId} → ProbeResultDTO (persist ProviderCapability). /api/memories upgraded: GET → MemoryDTO[] (new fields); PATCH {id,text?,active?,category?}; DELETE ?id= (also used by «انسى» agent path).
 - Agent must answer multi-part requests FULLY («لو طلبت منه اكتر من طلب يجاوب علي الكل») and switch to advisory free-chat (موظف حقيقي يتكلم عن الشغل + نصايح + ودود) instead of chip-fallback when no tool matches.
+
+---
+Task ID: round-14-qa (orchestrator)
+Agent: Z.ai Code (orchestrator)
+Task: Full E2E verification of the R14 parallel delivery (R14-brain + R14-convs + R14-ux) — the «موظف حقيقي» vision: multi-conversation, adaptive suggestions, memory evolution, radar, probe.
+
+Work Log:
+- State audit: all R14 files present (agent/{memory,suggest,radar}.ts, api/{conversations,quick-commands,suggestions,radar,providers/probe}, chat/{ConversationDrawer,QuickCommandsManager}, views/MemoryView). tsc src-scope CLEAN, dev :3000 + mock :3031 both running.
+- agent-browser E2E golden path: onboarding (عطارة→سوبر ماركت النور) → app shell. Zero console errors / zero page errors throughout the whole session.
+- Identity: «انت مين» → personalized reply (يا خالد + vertical + memory rule «أرقام مختصرة في جدول») + live counters (٤ نواقص، ٦ مستنية، ٤٧٣ ج.م) + deep-link actions (لوحة اليوم/شوف المخزون).
+- Multi-intent: «بعت ٢ لبن جهينة لمحمود وقولي الخزنة بقت كام وقولي ايه النواقص» → 7 thinking steps, numbered reply ١/٢/٣ answering ALL three sub-requests (draft WKL-2027 + خزنة balance + 4 low-stock items). Approved the draft → impact preview (٥٧←٥٥ علبة) + undo toast.
+- Advisory: «رأيك ايه في شغلنا النهاردة؟» → work-data reply + ملخص اليوم card (no chip-fallback).
+- Conversations: drawer (pin/rename/delete/search/preview/count/relative time), created محادثة جديدة → fresh welcome + NEW suggestion chips appeared (memory-driven «اللي فاكره عنك» + «طلب بيتي»).
+- Suggestions API: alert > frequent (ملخص اليوم — ١١ مرة from UsageEvent) > memory ordering confirmed.
+- Memory view: categories (تفضيلاتك/معلومات/…), stats (٤ حاجة فاكرها، استخدمت ١ مرة), per-row عدّل/وقّف/احذف.
+- Settings: quick-commands manager (reorder لفوق/لتحت + عدّل + امسح) + hosted models + external providers (kiosapi 30 models) + deferred tasks + manual memory add.
+- Radar: BUG FOUND & FIXED — TodayView fetched /api/radar without userId while the route (owner gate) requires it → section silently never rendered. Fixed fetch to include userId; «رادار الأمانة — مراقبة لصالحك، محدش شايفها غيرك» now renders with journal deep-link evidence (WKL-refs).
+- Probe: POST /api/providers/probe → {ok, supportsStreaming, supportsTools, ttftMs:4, tps:24} persisted.
+- Model selector: switched عميق مفكّر→خفيف سريع → reply header changed to «خفيف سريع · glm-4.5-air» (routing actually follows selection) + toast.
+- Notifications bell: 3 alerts each with deep-link (راجع المخزون → navigated to المخزون view).
+- Dark mode ON (bg rgb(15,26,43)); mobile 390px: NO horizontal overflow, main nav collapses → «التنقل السريع» bottom bar (w:390, y:788); desktop 1440 back.
+- dev.log: only 429 rate-limits from the shared hosted SDK — harness fallbacks fired (rule-based intent, deterministic numbered reply, graceful stream fail) → NO user-facing errors. Resilience working as designed.
+- tsc src CLEAN + bun run lint CLEAN after the radar fix.
+
+Stage Summary:
+- R14 «الموظف الحقيقي» vision FULLY DELIVERED & browser-verified: multi-conversation architecture, adaptive suggestions that change with usage (UsageEvent-driven), evolving memory (5 kinds + usage counting + pause/edit/delete), owner-only رادار الأمانة, capability probe, working model routing, zero console errors, RTL+dark+mobile all pass.
+- 1 integration bug fixed (radar userId param — classic parallel-ownership seam between R14-ux frontend and R14-brain API).
+- Next candidates (from master PDF, not yet built): PDF deep-research pipeline (awaiting user's PDF), user-extensible tool registry (custom tools UI), sector packs depth (FEFO pharmacy, attar blends), WhatsApp loop, offline queue, byte-identical prefix caching.

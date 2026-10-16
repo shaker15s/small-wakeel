@@ -462,7 +462,7 @@ function RadarDigest({
   const { data, isPending } = useQuery({
     queryKey: QUERY_KEYS.radar(businessId),
     queryFn: async (): Promise<RadarInsightDTO[]> => {
-      const res = await fetch(`/api/radar?businessId=${businessId}`, { cache: 'no-store' })
+      const res = await fetch(`/api/radar?businessId=${businessId}&userId=${userId}`, { cache: 'no-store' })
       if (!res.ok) throw new Error(`radar ${res.status}`)
       const body = (await res.json()) as RadarInsightDTO[] | { insights?: RadarInsightDTO[] }
       return Array.isArray(body) ? body : (body.insights ?? [])
