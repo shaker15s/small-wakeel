@@ -58,6 +58,22 @@ Guards are declared **per route with an explicit scope**, so forgetting one is a
 | No encryption at rest | The file lives on the shop's own machine | Disk encryption / managed DB encryption |
 | Arabic free-text audit reasons | Human review by the owner | Structured reasons + notifications on R3/R4 |
 
-## 7. Reporting a vulnerability
+## 7. Dependency hygiene
+
+* Dependencies are pinned by `bun.lock`; CI installs with `--frozen-lockfile` where the
+  environment allows it, so a build never silently picks up a new transitive version.
+* `package.json` carries `overrides` for the dev-tooling chains (eslint → minimatch/ajv, the
+  Babel chain behind `eslint-config-next`, `humanfs`, `baseline-browser-mapping`). Those
+  advisories are DoS-in-a-linter, i.e. **not** reachable from the running app, but they turn
+  Dependabot red and train people to ignore alerts — so they are pinned to the patched
+  releases and the alert noise stays meaningful.
+* Runtime dependencies (`next`, `@prisma/client`, `@libsql/client`, `zod`, `framer-motion`)
+  are deliberately few; the browser bundle never talks to a model provider, so a provider-side
+  compromise cannot reach the client.
+* `bun audit` on the stale lockfile in an offline sandbox is **not** a security signal: it
+  audits whatever the lock still lists. Read Dependabot on the default branch, or regenerate
+  the lock first.
+
+## 8. Reporting a vulnerability
 
 Open a private security advisory on the repository (GitHub → Security → Advisories) with reproduction steps. Please do not post exploits publicly before a fix ships.
