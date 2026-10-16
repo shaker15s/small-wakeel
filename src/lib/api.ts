@@ -268,7 +268,16 @@ export async function streamChat(
     signal,
   })
   if (!res.ok || !res.body) {
-    handlers.onError?.('مش قادر أوصل للسيرفر — جرّب تاني')
+    // «الرد الصح للخطأ الصح»: 429 is the one status the owner can fix himself
+    // (he typed too fast), and the server already says how long to wait — a
+    // generic «مش قادر أوصل» made a working server look broken (live R29).
+    if (res.status === 429) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string; retryAfter?: number }
+      const secs = Number(body.retryAfter ?? 0) || 0
+      handlers.onError?.(body.error ?? `طلبات كتير في وقت قصير — استنى ${secs || 5} ثانية وجرّب تاني`)
+      return
+    }
+    handlers.onError?.(res.status === 401 ? 'الجلسة انتهت — حدّث الصفحة' : 'مش قادر أوصل للسيرفر — جرّب تاني')
     return
   }
   const reader = res.body.getReader()

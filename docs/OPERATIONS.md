@@ -86,6 +86,26 @@ Every operation stores read-back `checks[]`. Open the operation in سجل الع
 **Database locked / corrupt**
 SQLite + libsql retries locks automatically. If a query keeps failing: stop the server, `bun run db:snapshot`, then `sqlite3 db/custom.db 'PRAGMA integrity_check;'`. Restore the latest snapshot if it fails. Run `bun run db:sync` afterwards to re-apply any missing schema additions.
 
+**The agent named the wrong product / answered a lookup with «تحب نعمل إيه؟»**
+Those are accuracy regressions, not taste. Two commands reproduce the whole day:
+`bun run sweep` (41 owner turns across the four verticals — drafts, cards, grounding,
+speed) and `bun run smoke` (88 API probes). Both print a per-turn verdict; run them
+against a live dev server (`bun run dev`) with the mock provider up
+(`bun mini-services/mock-provider/index.ts`).
+
+**An alias in the memory list looks wrong**
+Names are matched on WORD boundaries and every alias is verified against the item's
+current name before it is used (`aliasFitsEntity` / `pruneLexicon`), so a junk row
+never resolves a sale. To clean the data too:
+
+```
+bun run db:prune-lexicon            # report
+bun run db:prune-lexicon -- --apply # deactivate (kept, not deleted)
+```
+
+A category word («شوكولاتة»، «زيت»، «دوا») is never learned as an alias, and a
+customer's name is never an item alias.
+
 ## 5. Performance notes
 
 * 28+ composite indexes cover the hot paths; if you add a list endpoint, add its index to `prisma/schema.prisma` and run `bun run db:sync`.

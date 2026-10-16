@@ -41,6 +41,8 @@ const TYPE_AR: Record<string, string> = {
   stock_adjustment: 'تسوية مخزون',
   membership: 'اشتراك',
   attendance: 'حضور',
+  customer_add: 'عميل جديد',
+  supplier_add: 'مورد جديد',
   reversal: 'عكس عملية',
 }
 

@@ -180,6 +180,22 @@ the total, so «بطيء» becomes a measurement: a dead provider is immediately
 
 ---
 
+## 2b. Name matching — «لازم نقصد نفس الصنف» (R29)
+
+Every money path resolves names through `matchEntity` (`src/lib/agent/arabic.ts`) and
+`lexiconResolve` (`src/lib/agent/memory.ts`), and both are **word-bounded**:
+
+* containment counts only when the needle sits on word boundaries — `«شوكولاتة»`
+  contains the letters of `«كولا»`, and a raw `includes()` turned a chocolate
+  sentence into a Coca-Cola draft;
+* the deterministic per-item scan (`harness.ts`, sale/purchase) uses
+  `wordBoundedAt` for the same reason;
+* a learned alias must FIT its entity (`aliasFitsEntity`), must not be a category
+  word, must not be a customer/supplier name, and must not be claimed by two
+  catalog entities (`pruneLexicon`) — otherwise the agent asks instead of guessing;
+* loans of trust are one-way: an alias only ever resolves the item whose name it
+  actually resembles, and `bun run db:prune-lexicon` keeps the stored rows honest.
+
 ## 3. Money & time
 
 * **Integer piastres** end to end; `src/lib/format.ts` renders Arabic numerals and «ج.م». Floats never enter the ledger.

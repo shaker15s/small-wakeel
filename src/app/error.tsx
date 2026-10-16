@@ -7,7 +7,8 @@
 // was on. Here he gets an Arabic explanation, a retry that re-renders the view,
 // and — importantly — the error id so support can find it in the logs.
 import { useEffect } from 'react'
-import { RotateCcw, TriangleAlert } from 'lucide-react'
+import { RefreshCw, RotateCcw, TriangleAlert } from 'lucide-react'
+import { hardReload, isChunkLoadFailure } from '@/components/app/ChunkRecovery'
 
 export default function AppError({
   error,
@@ -34,14 +35,36 @@ export default function AppError({
       {error.digest ? (
         <code className="num rounded bg-muted px-2 py-1 text-xs text-muted-foreground">{error.digest}</code>
       ) : null}
-      <button
-        type="button"
-        onClick={reset}
-        className="press inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground"
-      >
-        <RotateCcw className="size-4" aria-hidden />
-        جرّب تاني
-      </button>
+      {isChunkLoadFailure(error.message) ? (
+        // a stale module graph is not a «try again» problem: the fix is a reload
+        <button
+          type="button"
+          onClick={hardReload}
+          className="press ae-sweep inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground"
+        >
+          <RefreshCw className="size-4" aria-hidden />
+          حدّث الصفحة
+        </button>
+      ) : (
+        <div className="flex flex-wrap items-center justify-center gap-2">
+          <button
+            type="button"
+            onClick={reset}
+            className="press inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground"
+          >
+            <RotateCcw className="size-4" aria-hidden />
+            جرّب تاني
+          </button>
+          <button
+            type="button"
+            onClick={hardReload}
+            className="press inline-flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium"
+          >
+            <RefreshCw className="size-4" aria-hidden />
+            حدّث الصفحة
+          </button>
+        </div>
+      )}
     </main>
   )
 }

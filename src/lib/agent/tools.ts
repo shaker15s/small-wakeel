@@ -2,6 +2,8 @@
 // Results are structured ResultCardDTOs the UI renders as tables/kv cards.
 
 import type { Item, Customer, Supplier, Operation } from '@prisma/client'
+import { normalizeAr } from './arabic'
+import { searchWeb } from './websearch'
 import { db } from '@/lib/db'
 import type { ResultCardDTO } from '@/lib/types'
 import { egp, qty as fmtQty, arDate, arTime } from '@/lib/format'
@@ -28,6 +30,8 @@ export type ReadTool =
   | 'get_customer_history'
   | 'compare_periods'
   | 'expense_breakdown'
+  | 'search_web'
+  | 'business_advice'
 
 /** Valid read-tool names — validation set for intent parsing (multi-intent). */
 export const READ_TOOLS: ReadonlySet<string> = new Set<string>([
@@ -48,7 +52,21 @@ export const READ_TOOLS: ReadonlySet<string> = new Set<string>([
   'get_customer_history',
   'compare_periods',
   'expense_breakdown',
+  'search_web',
+  'business_advice',
 ])
+
+/**
+ * «مين اللي …» / «ايه …» / «كام …» are question words, not names. Without this
+ * guard a question became a lookup for a customer/member literally called
+ * «مين اللي» and the agent answered «ملقيتش عضو بالاسم «مين اللي»» (live R29).
+ */
+const QUESTION_WORDS =
+  /^(مين|من|ايه|إيه|كام|قد|قدايه|قد\s*ايه|اللي|هو|هي|هما|دول|دي|ده|فين|امتى|إمتى|ازاي|إزاي|ليه|ليه|على|عن|العميل|العميله|العضو|الاعضاء|الاعضاء|بتاع|بتاعت|كل|أي|اي)$/
+export function isQuestionWord(name: string): boolean {
+  const words = normalizeAr(name).replace(/\s+/g, ' ').trim().split(' ')
+  return words.length > 0 && words.every((w) => QUESTION_WORDS.test(w))
+}
 
 function itemRow(it: Item): Record<string, string> {
   return {
@@ -80,6 +98,8 @@ export const TYPE_AR: Record<string, string> = {
   stock_adjustment: 'تسوية مخزون',
   membership: 'اشتراك',
   attendance: 'حضور',
+  customer_add: 'عميل جديد',
+  supplier_add: 'مورد جديد',
   reversal: 'عكس عملية',
 }
 export const STATUS_AR: Record<string, string> = {
@@ -220,6 +240,46 @@ export async function runReadTool(
     }
 
     case 'list_expiring': {
+      // «ايه اللي قرب ينتهي؟» means a MEMBERSHIP at a gym and a BATCH at a shop.
+      // Answering a gym owner with the pharmacy's expiry table (live bug: the
+      // gym's question returned «الأصناف اللي صلاحيتها قربت تخلص») is exactly the
+      // wrong-tool class the owner notices immediately.
+      const business = await db.business.findUnique({ where: { id: businessId }, select: { type: true } })
+      const isGym = business?.type === 'gym'
+      if (isGym) {
+        const members = await db.customer.findMany({
+          where: { businessId, expiresAt: { not: null } },
+          orderBy: { expiresAt: 'asc' },
+        })
+        const soon = members
+          .map((m) => ({ m, days: Math.ceil(((m.expiresAt as Date).getTime() - Date.now()) / 86400000) }))
+          .filter((r) => r.days <= 30)
+        const expired = soon.filter((r) => r.days < 0)
+        return [
+          {
+            kind: 'table',
+            title: 'العضويات اللي قربت تخلص (30 يوم)',
+            columns: [
+              { key: 'name', label: 'العضو' },
+              { key: 'plan', label: 'الاشتراك' },
+              { key: 'expiry', label: 'بينتهي' },
+              { key: 'days', label: 'فاضل' },
+              { key: 'balance', label: 'عليه' },
+            ],
+            rows: soon.slice(0, 12).map(({ m, days }) => ({
+              name: m.name,
+              plan: m.plan ?? '—',
+              expiry: arDate(m.expiresAt as Date),
+              days: days < 0 ? `متأخر ${fmtQty(Math.abs(days))} يوم` : `${fmtQty(days)} يوم`,
+              balance: m.balance > 0 ? egp(m.balance) : '—',
+            })),
+            footer: [
+              { label: 'إجمالي', value: `${fmtQty(soon.length)} عضوية` },
+              { label: 'منتهية بالفعل', value: `${fmtQty(expired.length)}` },
+            ],
+          },
+        ]
+      }
       const items = await db.item.findMany({
         where: { businessId, expiresAt: { not: null } },
         orderBy: { expiresAt: 'asc' },
@@ -333,9 +393,33 @@ export async function runReadTool(
     }
 
     case 'get_member_status': {
-      const name = String(args.name ?? '')
+      const name = String(args.name ?? '').trim()
       const members: Customer[] = await db.customer.findMany({ where: { businessId }, orderBy: { name: 'asc' } })
-      const found = members.find((m) => m.name.includes(name) || name.includes(m.name.split(' ')[0]))
+      // Same money rule as the customer file: an exact name wins; a partial one
+      // is accepted only when it is unambiguous (multi-word or 6+ chars), and a
+      // near miss is REPORTED rather than answered with another member's plan.
+      // normalized on both sides (see get_customer_history) — and a QUESTION word
+      // («مين اللي عضويته قربت تخلص؟») is not a member name: it must fall to the
+      // list, never to «ملقيتش عضو بالاسم «مين اللي»» (live R29).
+      const flat = (x: string) => normalizeAr(x).replace(/\s+/g, ' ').trim()
+      const asked = isQuestionWord(name)
+      const strong = members.filter((m) => {
+        if (!name || asked || !flat(m.name).includes(flat(name))) return false
+        return flat(name).split(' ').filter(Boolean).length >= 2 || flat(name).length >= 6
+      })
+      const exact = name && !asked ? members.find((m) => flat(m.name) === flat(name)) : undefined
+      const found = exact ?? (strong.length === 1 ? strong[0] : undefined)
+      const near =
+        found || !name
+          ? []
+          : members
+              .filter((m) => {
+                // «عمر الشناوي عضويته باقي قد إيه؟» — the member is the words
+                // BEFORE «عضويته/اشتراكه»: token-overlap, longest first
+                const tokens = name.split(' ').filter((t) => t.length >= 2)
+                return tokens.length > 0 && tokens.every((t) => flat(m.name).includes(t))
+              })
+              .slice(0, 3)
       const daysLeft = found?.expiresAt ? Math.ceil((found.expiresAt.getTime() - Date.now()) / 86400000) : null
       return [
         {
@@ -348,7 +432,12 @@ export async function runReadTool(
                 { label: 'فاضل', value: daysLeft != null ? `${daysLeft} يوم` : '—' },
                 { label: 'مديونية', value: egp(found.balance) },
               ]
-            : [{ label: 'النتيجة', value: `ملقيتش عضو بالاسم «${name}»` }],
+            : [
+                { label: 'النتيجة', value: name ? `ملقيتش عضو بالاسم «${name}»` : 'اكتبلي اسم العضو' },
+                ...(near.length > 0
+                  ? [{ label: 'قصدت؟', value: near.map((m) => `${m.name}${m.expiresAt ? ` — لحد ${arDate(m.expiresAt)}` : ''}`).join(' · ') }]
+                  : []),
+              ],
         },
       ]
     }
@@ -512,12 +601,46 @@ export async function runReadTool(
 
     case 'get_customer_history': {
       // «العميل ده بيحاسب إزاي؟» — balance, cadence, last movements.
-      const name = String(args.name ?? '')
+      const name = String(args.name ?? '').trim()
       const customers = await db.customer.findMany({ where: { businessId } })
-      const found = customers.find((c) => c.name.includes(name) || name.includes(c.name.split(' ')[0]))
-      if (!found) {
-        return [{ kind: 'kv', title: 'ملف العميل', rows: [{ label: 'النتيجة', value: `ملقيتش عميل بالاسم «${name}»` }] }]
+      // Money answers must name the RIGHT person: an exact name wins, and a
+      // partial hit is used only when nothing exact exists. A near miss is
+      // REPORTED («مفيش أحمد — بس فيه أحمد عبد الرحمن») instead of silently
+      // landing on someone else's debt (live R29 bug: «أحمد» answered with the
+      // balance of «أحمد عبد الرحمن»).
+      // The name arrives NORMALIZED (normalizeAr folds ى→ي, ة→ه, أ→ا) while the
+      // DB stores the raw spelling — comparing them directly meant «مستشفى الرحمة»
+      // (typed) never matched «مستشفى الرحمة» (stored). Normalize BOTH sides.
+      const flat = (x: string) => normalizeAr(x).replace(/\s+/g, ' ').trim()
+      const wordCount = (x: string) => flat(x).split(' ').filter(Boolean).length
+      // (1) EXACT name. (2) else a STRONG partial only: a word-boundary match
+      // that is multi-word or long enough to be unambiguous. «أم حسن» resolves,
+      // «أحمد» does NOT — it is a first name shared by several people, and
+      // answering one man with another man's debt is the one mistake an
+      // accountant must never make (live R29: «أحمد عليه كام؟» answered with
+      // «أحمد عبد الرحمن»'s balance).
+      const exact = customers.find((c) => flat(c.name) === flat(name))
+      const strong = customers.filter((c) => {
+        if (!flat(c.name).includes(flat(name))) return false
+        return wordCount(name) >= 2 || flat(name).length >= 6
+      }).filter((c) => !isQuestionWord(name))
+      const partial = exact ?? (strong.length === 1 ? strong[0] : undefined)
+      if (!partial) {
+        const near = customers.filter((c) => flat(c.name).includes(flat(name))).slice(0, 3)
+        return [
+          {
+            kind: 'kv',
+            title: 'ملف العميل',
+            rows: [
+              { label: 'النتيجة', value: `ملقيتش عميل بالاسم «${name}» — مفيش عميل بالاسم ده في السجل` },
+              ...(near.length > 0
+                ? [{ label: 'قصدت؟', value: `${near.map((c) => `${c.name} (عليه ${egp(c.balance)})`).join(' · ')} — اكتب الاسم زي ما هو في السجل` }]
+                : [{ label: 'الخطوة', value: `قولّي «ضيف ${name}» وأنا أسجله في السجل` }]),
+            ],
+          },
+        ]
       }
+      const found = partial
       const ops = await db.operation.findMany({
         where: { businessId, status: 'SUCCEEDED', OR: [{ summary: { contains: found.name } }, { type: { in: ['collection', 'sale'] } }] },
         orderBy: { createdAt: 'desc' },
@@ -653,6 +776,130 @@ export async function runReadTool(
                   { label: 'أكبر بند', value: `${ranked[0][0]} — ${egp(ranked[0][1])}` },
                   { label: 'عدد المصروفات', value: String(expenses.length) },
                 ],
+        },
+      ]
+    }
+
+    case 'search_web': {
+      // «ابحث في الويب عن سعر الجبنة» — pluggable backend (see websearch.ts).
+      // The ledger stays the source of truth; the web enters as SOURCES with a
+      // snippet and a host, never as a number the agent pretends to know.
+      const query = String(args.query ?? args.q ?? '').trim()
+      if (query.length < 2) {
+        return [{ kind: 'kv', title: 'بحث في الويب', rows: [{ label: 'النتيجة', value: 'محتاج كلمة أبحث بيها' }] }]
+      }
+      const outcome = await searchWeb(query, 5)
+      if (outcome.results.length === 0) {
+        return [
+          {
+            kind: 'kv',
+            title: `بحث في الويب: ${query}`,
+            rows: [
+              { label: 'النتيجة', value: 'مفيش نتايج' },
+              { label: 'السبب', value: outcome.error ?? 'المزوّد مرجّعش حاجة' },
+              { label: 'الحل', value: 'ظبّط WAKIL_SEARCH_URL أو .z-ai-config عشان البحث يشتغل' },
+            ],
+          },
+        ]
+      }
+      return [
+        {
+          kind: 'sources',
+          title: `نتايج البحث: ${query}`,
+          sources: outcome.results.map((r) => ({ title: r.title, url: r.url, snippet: r.snippet, host: r.host })),
+        },
+        {
+          kind: 'kv',
+          title: 'خلاصة البحث',
+          rows: [
+            { label: 'أول نتيجة', value: outcome.results[0].snippet.slice(0, 180) },
+            { label: 'المصادر', value: `${fmtQty(outcome.results.length)} مصدر · ${outcome.backend}` },
+          ],
+        },
+      ]
+    }
+
+    case 'business_advice': {
+      // «انصحني» / «حلل شغلي» — a deterministic advisor. It reads the ledger and
+      // states what is measurably true (or nothing at all): no invented advice,
+      // no generic business-school filler.
+      const days = Math.min(90, Math.max(7, Number(args.days ?? 30) || 30))
+      const since = startOfCairoDay(-(days - 1))
+      const prevStart = startOfCairoDay(-(days * 2 - 1))
+      const [ops, prevOps, items, entries] = await Promise.all([
+        db.operation.findMany({ where: { businessId, status: 'SUCCEEDED', createdAt: { gte: since } }, orderBy: { createdAt: 'desc' } }),
+        db.operation.findMany({ where: { businessId, status: 'SUCCEEDED', createdAt: { gte: prevStart, lt: since } } }),
+        db.item.findMany({ where: { businessId } }),
+        db.cashEntry.findMany({ where: { businessId } }),
+      ])
+      const sum = (list: typeof ops, type: string) => list.filter((o) => o.type === type).reduce((acc, o) => acc + opAmount(o.payload), 0)
+      const sales = sum(ops, 'sale')
+      const prevSales = sum(prevOps, 'sale')
+      const expenses = sum(ops, 'expense')
+      const collections = sum(ops, 'collection')
+      const cash = biz.openingCash + entries.reduce((acc, e) => acc + (e.direction === 'in' ? e.amount : -e.amount), 0)
+
+      // Velocity per item (last `days`) → what is about to run out.
+      const sold = new Map<string, number>()
+      for (const op of ops) {
+        if (op.type !== 'sale') continue
+        for (const line of opLines(op.payload)) {
+          if (!line.itemId) continue
+          sold.set(line.itemId, (sold.get(line.itemId) ?? 0) + line.qty)
+        }
+      }
+      const atRisk = items
+        .map((it) => {
+          const perDay = (sold.get(it.id) ?? 0) / days
+          return { it, daysLeft: perDay > 0 ? it.stockQty / perDay : null }
+        })
+        .filter((r) => r.daysLeft != null && r.daysLeft <= 7)
+        .sort((a, b) => (a.daysLeft ?? 0) - (b.daysLeft ?? 0))
+
+      // Dead stock: real money sitting on the shelf with no movement.
+      const dead = items
+        .filter((it) => !sold.has(it.id) && it.stockQty > 0 && it.costPrice > 0)
+        .map((it) => ({ it, value: it.stockQty * it.costPrice }))
+        .sort((a, b) => b.value - a.value)
+
+      const customers = await db.customer.findMany({ where: { businessId, balance: { gt: 0 } }, orderBy: { balance: 'desc' } })
+      const receivables = customers.reduce((acc, c) => acc + c.balance, 0)
+      const salesDelta = prevSales > 0 ? Math.round(((sales - prevSales) / prevSales) * 100) : null
+      const collectionRate = sales > 0 ? Math.round((collections / sales) * 100) : null
+      const expenseShare = sales > 0 ? Math.round((expenses / sales) * 100) : null
+
+      const findings: string[] = []
+      if (salesDelta != null && salesDelta <= -10) findings.push(`المبيعات نزلت ${Math.abs(salesDelta)}٪ عن الفترة اللي قبلها — راجع الأصناف اللي بطّلت تتحرك`)
+      if (salesDelta != null && salesDelta >= 15) findings.push(`المبيعات زادت ${salesDelta}٪ عن الفترة اللي قبلها — كمّل على نفس التشكيلة`)
+      if (expenseShare != null && expenseShare >= 25) findings.push(`المصروفات واخدة ${expenseShare}٪ من المبيعات — ده رقم عالي، بص على البنود الكبيرة`)
+      if (collectionRate != null && collectionRate < 60) findings.push(`بتحصّل ${collectionRate}٪ بس من مبيعات الفترة — الفلوس قاعدة عند العملاء مش في الخزنة`)
+      if (atRisk.length > 0) findings.push(`${fmtQty(atRisk.length)} صنف هتخلص في أقل من أسبوع (أسرعهم ${atRisk[0].it.name})`)
+      if (dead.length > 0) findings.push(`رأس مال راكد ${egp(dead.reduce((acc, d) => acc + d.value, 0))} في ${fmtQty(dead.length)} صنف مش بيتحرك`)
+      if (cash < 0) findings.push('الخزنة بالسالب — راجع التحصيلات المسجلة')
+      if (findings.length === 0) findings.push('مفيش مؤشر خطر واضح في الفترة دي — الأرقام ماشية في نطاقها الطبيعي')
+
+      return [
+        {
+          kind: 'kv',
+          title: `قراءة شغلك — آخر ${days} يوم`,
+          rows: [
+            { label: 'المبيعات', value: egp(sales) },
+            { label: 'المصروفات', value: egp(expenses) },
+            { label: 'التحصيل', value: egp(collections) },
+            { label: 'المتاح في الخزنة', value: egp(cash) },
+            { label: 'مديونيات العملاء', value: egp(receivables) },
+            { label: 'أهم ملاحظة', value: findings[0] },
+          ],
+        },
+        {
+          kind: 'table',
+          title: 'التوصيات المرتبة بالأولوية',
+          columns: [
+            { key: 'n', label: '#' },
+            { key: 'advice', label: 'نصيحة مبنية على أرقامك' },
+          ],
+          rows: findings.map((f, i) => ({ n: String(i + 1), advice: f })),
+          footer: [{ label: 'المصادر', value: 'سجل عملياتك الحقيقي' }],
         },
       ]
     }

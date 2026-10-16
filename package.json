@@ -21,7 +21,10 @@
     "start": "NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log",
     "test": "bun test tests",
     "test:watch": "bun test --watch tests",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "sweep": "bun scripts/user-sweep.ts",
+    "smoke": "bun scripts/api-smoke.ts",
+    "db:prune-lexicon": "bun scripts/db-prune-lexicon.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.15.15",

@@ -21,6 +21,9 @@ export type OpType =
   | 'stock_adjustment'
   | 'membership'
   | 'attendance'
+  /** R29: master data the owner can create by talking — «ضيف أحمد وعليه ٥٠٠» */
+  | 'customer_add'
+  | 'supplier_add'
   | 'reversal'
 
 export interface BusinessLite {

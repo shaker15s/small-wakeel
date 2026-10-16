@@ -52,7 +52,7 @@ import type {
 import type { VerticalDef } from '@/lib/verticals'
 import { egp, qty as fmtQty, arDate } from '@/lib/format'
 import { arUnit, getVertical } from '@/lib/verticals'
-import { convertToBaseUnit, matchEntity, normalizeAr, parseQuantity, toWesternDigits, unitToCode } from './arabic'
+import { wordBoundedAt, convertToBaseUnit, matchEntity, normalizeAr, parseQuantity, toWesternDigits, unitToCode } from './arabic'
 import { createDraft } from '@/lib/domain/executors'
 import { auditDraft } from '@/lib/domain/audit'
 import { getCatalog } from './catalog'
@@ -85,6 +85,7 @@ import {
   learnableAlias,
   lexiconResolve,
   parseLexicon,
+  pruneLexicon,
   preferenceCategory,
   ruleCategory,
   saveLexiconMemory,
@@ -277,6 +278,8 @@ const TOOL_LABEL_AR: Record<string, string> = {
   expense_breakdown: 'تفصيل المصروفات',
   run_plan: 'خطة متعددة الخطوات',
   deep_dive: 'تحقيق عميق',
+  search_web: 'بحث في الويب',
+  business_advice: 'قراءة شغلك',
   sale: 'مسودة بيع',
   purchase: 'مسودة شرا',
   expense: 'مسودة مصروف',
@@ -380,6 +383,44 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
   if (/(السلام|اهلا|هلا|صباح|مساء|ازيك|عامل ايه|شكرا)/.test(s) && s.length < 25) {
     return { intent: 'chat', fields: {}, replyHint: 'تحية' }
   }
+  // ---- R29 (1) WEB SEARCH beats every local keyword: the owner EXPLICITLY asked
+  // the internet, and answering him from the catalog is a wrong-answer class.
+  const webAsk =
+    /(ابحث|ادور|دور|فتش|فتّش|شوف)\s*(لي|ليا|ليّ)?\s*(في|على|ع|ف)?\s*(النت|نت|الويب|الانترنت|الإنترنت|جوجل|google|اونلاين|online)/.test(s) ||
+    /(في|على|ع)\s*(النت|الويب|الانترنت|جوجل)/.test(s) ||
+    /(اخبار|اسعار)\s*(السوق|الدولار|العالم)/.test(s) ||
+    /سعر\s*السوق/.test(s)
+  if (webAsk) {
+    const q = s
+      .replace(/^(ابحث|ادور|دور|فتش|فتّش|شوف)\s*(لي|ليا|ليّ)?\s*(في|على|ع|ف)?\s*(النت|نت|الويب|الانترنت|الإنترنت|جوجل|google|اونلاين|online)\s*(عن|على)?\s*/, '')
+      .replace(/[؟?].*$/, '')
+      .trim()
+    return { intent: 'read', tool: 'search_web', fields: q.length >= 2 ? { query: q.slice(0, 80) } : {} }
+  }
+  // ---- R29 (2) «انصحني / حلل / إزاي أطوّر» → the ADVISOR, grounded in the
+  // ledger. It must beat «مصاريف» (else «إزاي أقلل المصاريف» returns a table and
+  // no advice — the R29 sweep caught exactly that).
+  if (
+    /(انصحني|انصح|انصحي|نصيحه|نصائح|نصايح|ازاي اطور|ازاي ازود|ازاي اقلل|ازاي احسن|ازاي اكسب|حلل|حللي|راجعلي|راجع لي|قيم|تقييم شغلي|قراءه شغلي|شايف شغلي|خطط ليا|اقترح عليا)/.test(s) &&
+    !/(بعت|بيع|سجل بيع|اشتريت|حصلت)/.test(s)
+  ) {
+    return { intent: 'read', tool: 'business_advice', fields: {} }
+  }
+  // ---- R29 (3) GROW THE LEDGER: «ضيف/اضف (...) أحمد ...» is a WRITE and must
+  // beat the receivables read («من اللي عليهم فلوس»).
+  if (/(^|\s)(ضيف|اضف|اضيف|ضف)\s/.test(s) && /(عميل|عضو|زبون|مورد|راجل|ست|حاج|من اللي عليهم|من اللي علينا|جديد)/.test(s)) {
+    const parsed = parsePartyAdd(s)
+    const kind: 'customer' | 'supplier' = /مورد/.test(s) ? 'supplier' : 'customer'
+    const opType: OpType = kind === 'supplier' ? 'supplier_add' : 'customer_add'
+    const fields: Record<string, unknown> = {
+      ...(parsed ? { name: parsed.name } : {}),
+      ...(parsed?.balance != null ? { balance: parsed.balance } : {}),
+      ...(parsed?.phone ? { phone: parsed.phone } : {}),
+      ...(parsed?.plan ? { plan: parsed.plan } : {}),
+      ...(parsed?.months ? { months: parsed.months } : {}),
+    }
+    return { intent: 'write', opType, fields }
+  }
   // Opinion/decision-seeking → ADVISORY free-chat (the real-employee mode).
   // Must beat the price-query rule below so «رأيك أزود سعر الكمون؟» is a
   // conversation about the decision, never a bare catalog scan.
@@ -394,7 +435,20 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
   // «النواقص» / «نواقص» are the broken plurals an Egyptian owner actually uses —
   // a substring test for «ناقص» misses them entirely.
   if (/(مخزون|ناقص|نواقص|استوك|تحت الحد)/.test(s) && !/(بعت|بيع|شرا|اشتري)/.test(s)) return { intent: 'read', tool: 'list_low_stock', fields: {} }
-  if (/(صلاحيت|صلاحيه|منتهي|قربت|تنتهي|قرب تخلص)/.test(s)) return { intent: 'read', tool: 'list_expiring', fields: {} }
+  if (/(صلاحيت|صلاحيه|منتهي|قربت|تنتهي|ينتهي|بينتهي|هينتهي|قربت تخلص|هتخلص صلاحيت|قرب يخلص)/.test(s)) {
+    return { intent: 'read', tool: 'list_expiring', fields: {} }
+  }
+  // ---- R29: a NAME + «عليه/عليها كام» → that customer's real statement, not
+  // the whole receivables list. «أحمد عليه كام؟» is the owner's most common
+  // question and it used to fall through to free chat.
+  const mWhose = s.match(/(?:^|\s)((?:[^\s،,؟?]+\s+){0,2}[^\s،,؟?]+)\s+(?:عليه|عليها|عليهم|عليا|علينا)\s*(?:كام|قد ايه|قدايه|بكام|فلوس|الف|اد ايه)/)
+  if (mWhose) {
+    const name = mWhose[1].replace(/^(و|هو|هي|العميل|العميله|بتاع|بتاعت)\s+/, '').trim()
+    if (name.length >= 2 && name.length <= 30 && !/^(على|مين|اللي|هما|هو|هي)$/.test(name)) {
+      return { intent: 'read', tool: 'get_customer_history', fields: { name } }
+    }
+    return { intent: 'read', tool: 'list_receivables', fields: {} }
+  }
   if (/(مديون|اللي ليا|تحصيلات|مين عليها|عليها فلوس|عليهم فلوس|العملاء)/.test(s)) return { intent: 'read', tool: 'list_receivables', fields: {} }
   if (/(اللي علينا|للمورد|الموردين|مستحق)/.test(s)) return { intent: 'read', tool: 'list_payables', fields: {} }
   if (/(ملخص|كويس اليوم|حال اليوم|عملت ايه النهارده)/.test(s)) return { intent: 'read', tool: 'get_daily_summary', fields: {} }
@@ -423,6 +477,17 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
   if (/(بتتصرف|بيتصرف|مصاريف|مصروفات|بنصرف)/.test(s) && !/(سجل|دفعت|مصروف جديد)/.test(s)) {
     return { intent: 'read', tool: 'expense_breakdown', fields: {} }
   }
+  // «الجبنة الرومي عندي كام كيلو؟» / «رصيد اللبن كام؟» → THAT item's stock.
+  // Live R29: this fell through to free chat and the owner got «قولّي تحب نعمل
+  // إيه» for the most ordinary question in the shop.
+  if (/(عندي|معايا|فاضل|باقي|رصيد)\s+(كام|قد ايه|قدايه)/.test(s) || /كام\s+(كيلو|علبه|كرتونه|قطعه|شريط|جرام)/.test(s)) {
+    const mItem = s
+      .replace(/\?|؟/g, ' ')
+      .match(/(?:^|\s)(?:رصيد|مخزون)\s+([^\s،,]+(?:\s+[^\s،,]+)?)/) ??
+      s.match(/(?:^|\s)([^\s،,؟?]+(?:\s+[^\s،,؟?]+)?)\s+(?:عندي|معايا|فاضل|باقي)/)
+    const q = mItem?.[1]?.replace(/^(اللي|اللي\s)/, '').trim() ?? ''
+    if (q.length >= 2) return { intent: 'read', tool: 'get_item_stock', fields: { name: q.slice(0, 40) } }
+  }
   // Price query («ايه سعر عود كمبودي؟» / «بكام المسك؟») → catalog search (R0 read)
   if (/(سعر|بكام)/.test(s) && !/(بعت|بيع|بع |خرج|سلف|دفع|سجل)/.test(s)) {
     const q = s
@@ -440,8 +505,13 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
   // «عضوية عمر باقي قد ايه؟» → get_member_status for عمر (name word follows
   // عضويه/اشتراك); renewal verbs (جدد/تجديد/سجل) keep the WRITE path.
   if (isGym && !/(جدد|تجديد|سجل|اعمل)/.test(s)) {
+    // «عمر الشناوي عضويته باقي قد إيه؟» — Egyptian owners put the NAME first and
+    // the noun after it («عضويته»), which the old «عضوية X» pattern read as the
+    // member «باقي». Both orders are tried, name-first wins when it is a name.
+    const mBefore = s.match(/(^|\s)([^\s،,؟?]+(?:\s+[^\s،,؟?]+)?)\s+(?:عضويته|اشتراكه|عضويته\s*باقي|عضويه|اشتراك)(\s|$)/)
     const mMember = s.match(/(?:عضويه|اشتراك)\s+([^ ،,؟?]+)/)
-    const name = mMember && !/^(اللي|التي|بتاع|دي|ده|الاشتراكات)$/.test(mMember[1]) ? mMember[1] : ''
+    const candidate = mBefore?.[2]?.trim() || mMember?.[1]
+    const name = candidate && !/^(اللي|التي|بتاع|دي|ده|الاشتراكات|باقي|قد|كام|فاضل|قربت|خلص|حاله|وضع)$/.test(candidate) ? candidate : ''
     const isQuestion = /(باقي|قد ايه|متبقي|فاضل|تنتهي|خلص|حاله|وضع|اوضه)/.test(s)
     if (name && (isQuestion || /عضويه/.test(s))) {
       return { intent: 'read', tool: 'get_member_status', fields: { name } }
@@ -496,6 +566,8 @@ interface RawIntentJson {
 
 const VALID_OP_TYPES: ReadonlySet<string> = new Set([
   'sale', 'purchase', 'expense', 'collection', 'payment', 'stock_adjustment', 'membership', 'attendance', 'reversal',
+  // R29: the owner grows the ledger by talking
+  'customer_add', 'supplier_add',
 ])
 
 /** Parse the LLM JSON contract: single intent OR the "intents" array (multi). */
@@ -740,6 +812,15 @@ function proactiveHintFor(tool: string, cards: ResultCardDTO[]): string {
  */
 function deterministicReadReply(cards: ResultCardDTO[]): string {
   for (const c of cards) {
+    // «مفيش عميل بالاسم ده» — an ABSENCE is the answer; padding it with «دي
+    // أرقام من سجلك» makes the agent sound like it did not listen (live R29).
+    if (c.kind === 'kv') {
+      const verdict = c.rows.find((r) => r.label === 'النتيجة')
+      if (verdict) {
+        const extra = c.rows.find((r) => r.label === 'قصدت؟' || r.label === 'الخطوة')
+        return `${verdict.value}${extra ? ` — ${extra.value}` : ''}.`
+      }
+    }
     if (c.kind === 'kv' && c.rows.length > 0) {
       const parts = c.rows.slice(0, 4).map((r) => `${r.label} ${r.value}`).join(' · ')
       return `دي أرقام «${c.title}» من سجلك: ${parts}.`
@@ -768,7 +849,18 @@ function deterministicReadReply(cards: ResultCardDTO[]): string {
  * word (≥4 letters) taken from the card's title/rows. Deliberately permissive:
  * a fluent reply that mentions any real figure passes.
  */
-function replyGroundsCards(text: string, cards: ResultCardDTO[]): boolean {
+/**
+ * A reply that answers a satisfied lookup with «تحب نعمل إيه؟» is wrong by
+ * construction — it is the canned chip-wall, not an answer. Detected by shape so
+ * the fix holds whatever phrasing a provider invents.
+ */
+export function isCannedReply(text: string): boolean {
+  const t = normalizeAr(text)
+  return /(تحب نعمل ايه|تحب نجرب|مفيش عمليه محدده|تحت امرك يا فندم|مش لاقي حاجه محدده|قوليلي ايه اللي محتاجه|مفيش عمليه واضحه)/.test(t)
+}
+
+/** Exported for tests: the «spoken reply ↔ its cards» contract. */
+export function replyGroundsCards(text: string, cards: ResultCardDTO[]): boolean {
   const t = toWesternDigits(normalizeAr(text))
   const keys: string[] = []
   for (const c of cards.slice(0, 2)) {
@@ -784,6 +876,33 @@ function replyGroundsCards(text: string, cards: ResultCardDTO[]): boolean {
   for (const num of norm.match(/\d[\d.,]*/g) ?? []) {
     if (num.replace(/[.,]/g, '').length >= 2 && replyNums.has(num)) return true
   }
+  // ---- VERDICT RULE: a card that says «ملقيتش» / «مفيش» IS the answer ----
+  // Live R29: «أحمد عليه كام؟» returned a «ملقيتش عميل بالاسم» card while the
+  // spoken reply said «أكيد — دي بيانات السجل الحقيقي». The owner reads the text
+  // first, so a NEGATIVE verdict must be echoed as a negative — the reply may
+  // not chat past its own finding.
+  const VERDICT_MARKERS = ['ملقيتش', 'مفيش', 'معرفش', 'مش', 'ممنوع', 'فشل', 'مرفوض', 'غير', 'ماتسجلتش', 'ناقص']
+  const verdicts = cards
+    .filter((c): c is Extract<ResultCardDTO, { kind: 'kv' }> => c.kind === 'kv')
+    .flatMap((c) => c.rows.filter((r) => r.label === 'النتيجة' || r.label === 'الحالة').map((r) => r.value))
+  for (const v of verdicts) {
+    const vn = toWesternDigits(normalizeAr(v))
+    const marker = VERDICT_MARKERS.find((m) => vn.includes(m))
+    if (marker && !t.includes(marker)) return false
+  }
+  // Generic nouns are NOT evidence of grounding: «أكيد — دي بيانات السجل الحقيقي»
+  // shares «بيانات» with almost any card and used to pass the check while saying
+  // nothing (live R29). A real grounding word is specific: a name, an item, a
+  // label — never the vocabulary of the UI itself.
+  const GENERIC = new Set([
+    'بيانات', 'سجل', 'كارت', 'كروت', 'تفاصيل', 'نتيجه', 'نتائج', 'حاله', 'تقرير',
+    'معلومات', 'الرد', 'تحت', 'جاهز', 'تمام', 'اكيد', 'طبعا', 'اقول', 'قول',
+    'الشغل', 'شغل', 'صفحه', 'شاشه', 'ملف', 'مرفق', 'جاهزه', 'موجود', 'متاح',
+    // operation vocabulary: «تحصيل» sits in every ledger table, so a chip-wall
+    // sentence offering «بيع، شرا، تحصيل» used to look «grounded» (live R29).
+    'تحصيل', 'تحصيلات', 'بيع', 'مبيعات', 'شرا', 'مشتريات', 'مصروف', 'مصروفات', 'سداد',
+    'حضور', 'اشتراك', 'خزنه', 'مخزون', 'نواقص', 'مستحقات', 'مديونيه', 'عملاء', 'موردين', 'مورد',
+  ])
   const shared = new Set(
     norm
       .split(/[^\p{L}\p{N}]+/u)
@@ -793,7 +912,7 @@ function replyGroundsCards(text: string, cards: ResultCardDTO[]): boolean {
   return t
     .split(/[^\p{L}\p{N}]+/u)
     .map((w) => w.replace(/^(ال|و)/, ''))
-    .some((w) => w.length >= 4 && shared.has(w))
+    .some((w) => w.length >= 4 && !GENERIC.has(w) && shared.has(w))
 }
 
 /** Deterministic numbered multi-intent reply — answers EVERY sub-request, no LLM. */
@@ -939,6 +1058,31 @@ function fieldsToCard(ref: string, type: OpType, risk: Risk, summary: string, fi
  * Runs on WESTERN-digit normalized text (normalizeAr already ate the ـ tatweel
  * in «بـ20»). Requires a real money word (جنيه/ج) after the number so a bare
  * quantity («بعت 20 فلفل») can never fire it. */
+/**
+ * «ضيف أحمد كمان من اللي عليهم فلوس وعليه ٢٥٠ من أيام كذا» → the party and the
+ * opening balance. Deterministic because this is the ONE sentence an owner uses
+ * to grow the ledger, and a wrong name/amount here corrupts real accounting.
+ * Runs on normalizeAr'd text (Arabic-Indic digits already folded to western).
+ */
+function parsePartyAdd(rawNorm: string): { name: string; balance?: number; phone?: string; plan?: string; months?: number; kind: 'customer' | 'supplier' } | null {
+  const norm = toWesternDigits(rawNorm)
+  const m = norm.match(/(?:^|\s)(?:ضيف|اضف|اضيف|ضف|سجل)\s+(?:لي\s+|ليا\s+)?(?:عميل(?:ه)?\s+|مورد\s+|موردين\s+|عضو\s+|زبون\s+)?(.+)$/)
+  if (!m) return null
+  const tail = m[1]
+  const STOP = /\s+(?:كمان|كمان\s+عشان|من\s+اللي|من\s+الذين|وعليه|وعليها|عليه|عليها|وبيدفع|وبيتعامل|لحد|عشان)\s+/
+  let name = tail.split(STOP)[0]
+  name = name.replace(/[،,؟?].*$/, '').replace(/\s+/g, ' ').trim()
+  const mb = norm.match(/(?:وعليه|وعليها|عليه|عليها|مديونيته|رصيده|الرصيد|بمديونيه)\s*(?:بـ|ب)?\s*([0-9]+(?:[.,][0-9]+)?)/)
+  const mM = norm.match(/([0-9]{2,})\s*(?:جنيه|ج\b)/)
+  const raw = mb?.[1] ?? mM?.[1] ?? null
+  const balance = raw != null ? Number(raw.replace(',', '.')) : undefined
+  const phone = norm.match(/(01[0-9]{9})/)?.[1]
+  const plan = norm.match(/(?:اشتراك|باقه|خطه)\s+([^\s،,؟?]{2,20})/)?.[1]
+  const months = Number(norm.match(/([0-9]{1,2})\s*(?:شهر|شهور)/)?.[1] ?? 0) || undefined
+  if (name.length < 2 || name.length > 40) return null
+  return { name, balance, ...(phone ? { phone } : {}), ...(plan ? { plan } : {}), ...(months ? { months } : {}), kind: /مورد/.test(norm) ? 'supplier' : 'customer' }
+}
+
 function matchReverseSellAmount(normWestern: string): number | null {
   const m = normWestern.match(/(?:^|\s)(?:بال|بمبلغ|ب)([0-9]+(?:[.,][0-9]+)?)\s*(?:جنيه|جنيهات|ج)(?=\s|$)/)
   if (!m) return null
@@ -1008,7 +1152,9 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
           for (const n of names) {
             const nn = normalizeAr(n)
             if (nn.length >= 3) {
-              const at = segNorm.indexOf(nn)
+              // WORD-BOUNDED: «شوكولاتة» contains the letters of «كولا», so a raw
+              // indexOf scanned a chocolate sentence as a Coca-Cola sale (live R29)
+              const at = wordBoundedAt(segNorm, nn)
               if (at >= 0 && (!best || nn.length > best.token.length)) best = { token: nn, at }
             }
           }
@@ -1111,7 +1257,12 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
         memCtx.referencedIds.push(lexHit.entry.id)
       } else if (item) {
         // LEXICON learning: a dialect token that overlaps the canonical name
-        const alias = learnableAlias(text, item)
+        const alias = learnableAlias(text, item, {
+          others: items
+            .filter((i) => i.id !== item.id)
+            .flatMap((i) => [i.name, ...(i.aliases ? i.aliases.split(',').map((a) => a.trim()) : [])]),
+          partyNames: [...customers.map((c) => c.name), ...suppliers.map((s) => s.name)],
+        })
         if (alias) await saveLexiconMemory({ businessId: business.id, userId: user.id }, alias, item)
       }
       if (!item) {
@@ -1330,10 +1481,18 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
         }
       }
       if (amount == null || amount <= 0) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'المبلغ', failMessage: `هتحصّل قد إيه من ${customer.name}؟` }
-      if (amount > customer.balance) {
-        return { ok: false, opType: type, payload: {}, summary: '', card: null as never, failMessage: `${customer.name} عليه ${egp(customer.balance)} بس — مش ممكن تحصّل ${egp(amount)}` }
+      // «الدقة قبل الاعتذار»: the owner asked to collect more than the debt.
+      // Refusing outright (the R29 behaviour) meant NO draft and a chat-style
+      // «قولّي تحب نعمل إيه» — useless. We NEVER invent a debt, so the draft is
+      // for the real outstanding balance, and the difference is stated loudly
+      // (the excess is usually a deposit / the debt was already settled).
+      const requested = amount
+      let overNote = ''
+      if (requested > customer.balance) {
+        amount = customer.balance
+        overNote = `${customer.name} عليه ${egp(amount)} بس — قللت المبلغ للمستحق الفعلي`
       }
-      const payload = { customerId: customer.id, customerName: customer.name, amount }
+      const payload = { customerId: customer.id, customerName: customer.name, amount, ...(overNote ? { requestedAmount: requested } : {}) }
       const risk = computeRisk(type, amount)
       const summary = `تحصيل ${egp(amount)} من ${customer.name}`
       const card = fieldsToCard('', type, risk, summary, [
@@ -1341,8 +1500,9 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
         { label: 'المبلغ', value: egp(amount) },
         { label: 'المديونية الحالية', value: egp(customer.balance) },
         { label: 'بعد التحصيل', value: egp(customer.balance - amount) },
+        ...(overNote ? [{ label: 'خد بالك', value: `طلبك كان ${egp(requested)} — ${overNote}`, hint: 'لو الزيادة عربون أو مقدم قولّي وأسجلها' }] : []),
       ], [{ label: 'الخزنة', value: egp(amount), tone: 'good' }], RISK_META[risk].hint)
-      return { ok: true, opType: type, payload, summary, card }
+      return { ok: true, opType: type, payload, summary, card, ...(overNote ? { issues: [overNote] } : {}) }
     }
 
     case 'payment': {
@@ -1455,6 +1615,53 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
         { label: 'السبب', value: reason },
       ], [{ label: `مخزون ${item.name}`, value: `${fmtQty(item.stockQty, arUnit(item.unit))} ← ${fmtQty(item.stockQty + delta, arUnit(item.unit))}`, tone: delta >= 0 ? 'good' : 'bad' }], 'تسوية المخزون عملية حساسة (R3) — محتاجة سبب واعتماد')
       return { ok: true, opType: type, payload, summary, card }
+    }
+
+    // ---- R29: the owner GROWS the ledger by talking («ضيف أحمد كمان») ----
+    case 'customer_add':
+    case 'supplier_add': {
+      const isCustomer = type === 'customer_add'
+      const partyAr = isCustomer ? 'عميل' : 'مورد'
+      const explicit = String(f.name ?? f.customerName ?? f.supplierName ?? '').trim()
+      const scanned = parsePartyAdd(norm)
+      // the LLM's own extraction wins; the deterministic scan is the safety net
+      const name = (explicit.length >= 2 ? explicit : scanned?.name ?? '').trim()
+      if (name.length < 2) {
+        return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'الاسم', failMessage: `اسم ال${partyAr} إيه؟` }
+      }
+      // duplicate guard mirrors the executor's: never silently overwrite a balance
+      const list: { name: string; balance: number; phone?: string | null }[] = isCustomer ? customers : suppliers
+      const dup = list.find((x) => normalizeAr(x.name) === normalizeAr(name))
+      if (dup) {
+        return {
+          ok: false,
+          opType: type,
+          payload: {},
+          summary: '',
+          card: null as never,
+          missing: '',
+          failMessage: `فيه ${partyAr} بالاسم ده بالفعل (${isCustomer ? 'عليه' : 'علينا'} ${egp(dup.balance)}) — استخدم ${isCustomer ? 'التحصيل' : 'السداد'} أو عدّل الرصيد بدل الإضافة`,
+        }
+      }
+      // balance arrives in EGP (owner speaking) — the ledger stores piastres
+      const balanceEgp = typeof f.balance === 'number' && Number.isFinite(f.balance) ? f.balance : scanned?.balance
+      const balance = Math.round((balanceEgp ?? 0) * 100)
+      const phone = typeof f.phone === 'string' ? f.phone.trim() : scanned?.phone
+      const plan = typeof f.plan === 'string' ? f.plan.trim() : scanned?.plan
+      const months = typeof f.months === 'number' ? f.months : scanned?.months
+      const payload = { name, balance, ...(phone ? { phone } : {}), ...(plan ? { plan } : {}), ...(months ? { months } : {}) }
+      const risk = computeRisk(type, balance)
+      const summary = `${isCustomer ? 'عميل جديد' : 'مورد جديد'}: ${name}${balance > 0 ? ` — ${isCustomer ? 'عليه' : 'علينا'} ${egp(balance)}` : ''}`
+      const card = fieldsToCard('', type, risk, summary, [
+        { label: isCustomer ? 'العميل' : 'المورد', value: name },
+        { label: isCustomer ? 'عليه (افتتاحي)' : 'علينا (افتتاحي)', value: egp(balance) },
+        ...(phone ? [{ label: 'التليفون', value: phone }] : []),
+        ...(plan ? [{ label: 'الاشتراك', value: `${plan}${months ? ` — ${fmtQty(months)} شهر` : ''}` }] : []),
+        ...(balanceEgp == null
+          ? [{ label: 'خد بالك', value: 'مقلتليش عليه كام — سجلته برصيد صفر، قولّي المبلغ وأعدّله', hint: 'أو اكتب «عليه ٣٠٠» وأنا أسجله' }]
+          : []),
+      ], [{ label: isCustomer ? 'عميل جديد في السجل' : 'مورد جديد في السجل', value: name, tone: 'good' }], RISK_META[risk].hint)
+      return { ok: true, opType: type, payload, summary, card, ...(balanceEgp == null ? { issues: [`${name} اتسجل برصيد صفر — قولّي عليه كام لو فيه فلوس`] } : {}) }
     }
 
     case 'reversal': {
@@ -1677,6 +1884,56 @@ const BRAIN_WRITE_TOOLS: Record<
     fields: (a) => ({ name: brainArgStr(a, 'name', 'memberName'), plan: brainArgStr(a, 'plan'), months: brainArgNum(a, 'months') }),
   },
   record_attendance: { opType: 'attendance', fields: (a) => ({ name: brainArgStr(a, 'name', 'memberName') }) },
+  // Aliases + the tools the WRITE contract advertises under another name. A
+  // model that follows the prompt exactly (`adjust_stock`, `create_member`) or a
+  // provider that renames a tool (`record_stock_adjustment`) must still land on
+  // the real executor — an unknown name silently produced NO draft.
+  adjust_stock: {
+    opType: 'stock_adjustment',
+    fields: (a) => ({ itemName: brainArgStr(a, 'item', 'itemName', 'name'), qty: brainArgNum(a, 'qty', 'quantity', 'delta', 'newQty', 'count') }),
+  },
+  record_stock_adjustment: {
+    opType: 'stock_adjustment',
+    fields: (a) => ({ itemName: brainArgStr(a, 'item', 'itemName', 'name'), qty: brainArgNum(a, 'qty', 'quantity', 'delta', 'newQty', 'count') }),
+  },
+  create_member: {
+    opType: 'membership',
+    fields: (a) => ({ name: brainArgStr(a, 'name', 'memberName'), plan: brainArgStr(a, 'plan'), months: brainArgNum(a, 'months') }),
+  },
+  renew_membership: {
+    opType: 'membership',
+    fields: (a) => ({ name: brainArgStr(a, 'name', 'memberName'), plan: brainArgStr(a, 'plan'), months: brainArgNum(a, 'months') }),
+  },
+  // R29 «ضيف أحمد من اللي عليهم فلوس» — the owner grows the ledger by talking.
+  register_customer: {
+    opType: 'customer_add',
+    fields: (a) => ({
+      name: brainArgStr(a, 'name', 'customerName', 'customer', 'client'),
+      phone: brainArgStr(a, 'phone', 'mobile', 'telephone'),
+      balance: brainArgNum(a, 'balance', 'amount', 'debt', 'opening'),
+      plan: brainArgStr(a, 'plan'),
+      months: brainArgNum(a, 'months'),
+    }),
+  },
+  add_customer: {
+    opType: 'customer_add',
+    fields: (a) => ({
+      name: brainArgStr(a, 'name', 'customerName', 'customer', 'client'),
+      phone: brainArgStr(a, 'phone', 'mobile', 'telephone'),
+      balance: brainArgNum(a, 'balance', 'amount', 'debt', 'opening'),
+      plan: brainArgStr(a, 'plan'),
+      months: brainArgNum(a, 'months'),
+    }),
+  },
+  register_supplier: {
+    opType: 'supplier_add',
+    fields: (a) => ({ name: brainArgStr(a, 'name', 'supplierName', 'supplier', 'vendor'), phone: brainArgStr(a, 'phone', 'mobile'), balance: brainArgNum(a, 'balance', 'amount', 'debt') }),
+  },
+  add_supplier: {
+    opType: 'supplier_add',
+    fields: (a) => ({ name: brainArgStr(a, 'name', 'supplierName', 'supplier', 'vendor'), phone: brainArgStr(a, 'phone', 'mobile'), balance: brainArgNum(a, 'balance', 'amount', 'debt') }),
+  },
+  reverse_operation: { opType: 'reversal', fields: (a) => ({ ref: brainArgStr(a, 'ref', 'reference', 'opRef', 'id') }) },
 }
 
 /** Arabic step label + icon for a brain tool call (thinking timeline UX). */
@@ -1943,7 +2200,14 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   const userToolsLine = userToolsPromptLine(userTools)
   const rules = memories.filter((m) => m.kind === 'rule')
   const memCtx: MemoryContext = {
-    lexicon: parseLexicon(memories),
+    // Verified before use: an alias must still FIT its entity name and be
+    // unambiguous in this catalog (live R29: a legacy row mapped «شوكولاتة» to
+    // «كوكاكولا 1 لتر» and the draft billed a cola for a chocolate sentence).
+    lexicon: pruneLexicon(
+      parseLexicon(memories),
+      [...items, ...customers, ...suppliers],
+      [...customers.map((c) => c.name), ...suppliers.map((s) => s.name)],
+    ),
     rules,
     referencedIds: [],
   }
@@ -2064,7 +2328,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     emit({ event: 'step', label: 'بحفظ في ذاكرتي', state: 'done' })
     done(IDX.reply)
     const replyText = isDuplicate
-      ? `دي محفوظة عندي أصلًا ✅ — «${saveRequest.text}». مطمن، مش هنسيها.`
+      ? `دي محفوظة في ذاكرتي أصلًا ✅ — «${saveRequest.text}». مطمن، مش هنسيها.`
       : isRule
         ? `اتحفظت قانون من قوانين المحل ✅ — «${saveRequest.text}».\nمن دلوقتي أي عملية تخص الموضوع ده هتتنبه عليه قبل الاعتماد.`
         : `اتحفظت في ذاكرتي ✅ — هفتكرها: «${saveRequest.text}». لما الموقف ده يتكرر هرفعها على طول.`
@@ -2179,6 +2443,9 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     let anyDraft = false
     const replyParts: string[] = []
     const resultsForModel: Record<string, unknown>[] = []
+    // A tool that FAILED (missing money, over-debt collection, unknown item) —
+    // the owner must hear about it even if the model answers with small talk.
+    const brainFailures: string[] = []
     let rounds = 0
     // R18 dedupe: the same tool+args signature must never execute twice in
     // ONE turn (the model sometimes re-issues its earlier call when it
@@ -2267,6 +2534,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             step.detail = run.error?.slice(0, 80) ?? 'الأداة فشلت'
             resultsForModel.push({ tool: call.tool, ok: false, error: run.error ?? 'فشل' })
             replyParts.push(`مش قادر أجيب ${TOOL_LABEL_AR[call.tool] ?? call.tool} دلوقتي — قول للمستخدم إن في مشكلة مؤقتة.`)
+            brainFailures.push(`مش قادر أجيب ${TOOL_LABEL_AR[call.tool] ?? call.tool} دلوقتي — جرّب تاني بعد شوية`)
             return
           }
           const subCards = run.cards
@@ -2403,6 +2671,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
               error: `${resolved.failMessage ?? resolved.missing ?? 'ناقصة بيانات'} — العملية دي ماتسجلتش خالص، ولازم تقول للمستخدم كده بصراحة في ردك`,
             })
             replyParts.push(`طلب ناقص بيانات: ${resolved.failMessage ?? resolved.missing ?? ''}`)
+            brainFailures.push(resolved.failMessage ?? `ناقص ${resolved.missing ?? 'بيانات'} — ${TYPE_AR[resolved.opType] ?? resolved.opType} ماتسجلتش`)
             return
           }
           const idem = `${business.id}:${user.id}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
@@ -2471,8 +2740,12 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
               replyParts.push(`وسجلت في ذاكرتي الموعد: ${memText}`)
             }
           }
-          resultsForModel.push({ tool: call.tool, ok: true, ref: draft.ref, summary: resolved.summary, note: 'مسودة مستنية اعتماد — مبتنفذش لوحدها' })
+          resultsForModel.push({ tool: call.tool, ok: true, ref: draft.ref, summary: resolved.summary, note: 'مسودة مستنية اعتماد — مبتنفذش لوحدها', ...(resolved.issues?.length ? { تنبيه: resolved.issues.join('؛ ') } : {}) })
           replyParts.push(`جهزت مسودة «${TYPE_AR[resolved.opType] ?? resolved.opType}» (${draft.ref}): ${resolved.summary} — مستنية اعتمادك.`)
+          // A draft can carry a caveat the owner MUST read (e.g. the amount was
+          // lowered to the real debt) — it goes through the same failure guard so
+          // a chatty model can never bury it.
+          if (resolved.issues?.length) brainFailures.push(...resolved.issues)
           await trackUsage(business.id, user.id, 'tool', resolved.opType)
           return
         }
@@ -2726,7 +2999,62 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       const rule = ruleBasedIntent(text, business.type)
       const decisiveRead = rule.intent === 'read' && !!rule.tool
       const decisiveWrite = rule.intent === 'write' && !!rule.opType && VALID_OP_TYPES.has(rule.opType)
-      if (decisiveRead || decisiveWrite) return null
+      // …and the OTHER deterministic lanes: «افتكر إن…» (memory), a shop rule,
+      // and «انت مين» must reach their handlers instead of being answered with a
+      // model sentence that does none of them (live R29: the owner asked the
+      // agent to remember a payment habit and got small talk back).
+      const deterministicLane =
+        decisiveRead ||
+        decisiveWrite ||
+        !!extractSaveRequest(text, norm) ||
+        !!extractRuleRequest(text, norm) ||
+        isIdentityQuestion(norm)
+      if (deterministicLane) return null
+    }
+
+    // ---------- «مفيش رقم بيدخل غلط»: a FAILED tool may not be glossed over ----
+    // Live evidence (R29): «حصلت ٢٠٠ من أم حسن» while she owed ١٢٥ → the tool
+    // refused (correct) but the model answered with a friendly «قولّي تحب نعمل
+    // إيه» and the owner never learned the operation was rejected. Any tool
+    // failure the model's prose does not acknowledge is stated verbatim.
+    if (brainFailures.length > 0) {
+      const digitGroups = (t: string) => (toWesternDigits(t).match(/[0-9]+/g) ?? []).filter((d) => d.length >= 2)
+      const told = brainFailures.every((f) => {
+        if (finalText.includes(f.slice(0, 24))) return true
+        const g = digitGroups(f)
+        return g.length > 0 && g.some((d) => toWesternDigits(finalText).includes(d))
+      })
+      if (!told) {
+        finalText = [finalText.trim(), ...brainFailures].filter(Boolean).join('\n\n')
+        meta.fallback = true
+      }
+    }
+
+    // ---------- «الدقة»: the SAME grounding contract the deterministic path
+    // enforces, applied to the brain lane. Live R29: the model answered «أكيد —
+    // دي بيانات السجل الحقيقي» while the card above it said «ملقيتش عميل
+    // بالاسم «أحمد»» — the owner reads the sentence first, so a reply that
+    // ignores its own cards/verdict is replaced by the deterministic composer.
+    // (the cast defeats TS's closure-blind narrowing — `draftCard` is assigned
+    //  inside execBrainCall, so control-flow analysis still believes it is null)
+    const draftSnapshot = draftCard as ActionCardDTO | null
+    const brainDraftContract = draftSnapshot
+      ? `جهزتلك مسودة «${draftSnapshot.title}» — ${draftSnapshot.summary}. راجعها واعتمدها لو تمام.${draftSnapshot.dangerNote ? `\n${draftSnapshot.dangerNote}` : ''}`
+      : null
+    if (finalText.trim() && draftSnapshot && brainDraftContract) {
+      const t2 = toWesternDigits(normalizeAr(finalText))
+      const refOk = !!draftSnapshot.ref && t2.includes(draftSnapshot.ref)
+      const words = toWesternDigits(normalizeAr(draftSnapshot.summary))
+        .split(/[^\p{L}\p{N}]+/u)
+        .filter((w) => w.length >= 4)
+      const grounded = refOk || words.some((w) => t2.includes(w))
+      if (!grounded) {
+        finalText = brainDraftContract
+        meta.fallback = true
+      }
+    } else if (finalText.trim() && allCards.length > 0 && (isCannedReply(finalText) || !replyGroundsCards(finalText, allCards))) {
+      finalText = deterministicReadReply(allCards)
+      meta.fallback = true
     }
 
     // ---------- final reply: verify BEFORE streaming, then pace it ----------
@@ -2846,7 +3174,18 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     // «this is a sale»; the model is the first word (its write reads still win).
     const rule = ruleBasedIntent(text, business.type)
     const ruleIsWrite = rule.intent === 'write' && !!rule.opType && VALID_OP_TYPES.has(rule.opType)
+    const ruleIsRead = rule.intent === 'read' && !!rule.tool
+    // A model that answered «chat» said «no tools needed» — but when the
+    // deterministic ladder is POSITIVE that this sentence needs a tool, the
+    // ladder wins. Live R29 evidence: «ايه اللي ناقص عندي؟», «الجبنة الرومي عندي
+    // كام كيلو؟» and «عمرو عضويته باقي قد إيه؟» all came back as a cheerful «قولّي
+    // تحب نعمل إيه» while list_low_stock / get_item_stock / get_member_status were
+    // sitting right there. Exception: opinion/advice questions stay chat — they
+    // are conversations, not lookups.
+    const looksConversational = /(رايك|رأيك|تنصحني|نصيحه|نصائح|اعمل ايه|ايه رايك|شايف ايه|استشاره|بتفكر في ايه)/.test(normalizeAr(text))
     if (ruleIsWrite && llmSingle?.intent !== 'write') {
+      llmSingle = rule
+    } else if (ruleIsRead && llmSingle?.intent === 'chat' && !looksConversational) {
       llmSingle = rule
     } else if (!llmSingle) {
       llmSingle = rule
@@ -3252,7 +3591,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       console.error('[harness] read reply stream failed → deterministic read reply:', err)
       meta.fallback = true
     }
-    const grounded = collected.trim().length > 0 && replyGroundsCards(collected, cards)
+    const grounded = collected.trim().length > 0 && !isCannedReply(collected) && replyGroundsCards(collected, cards)
     if (!grounded) {
       if (collected.trim().length > 0) meta.fallback = true
       replyText = deterministicReadReply(cards)

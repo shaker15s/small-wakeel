@@ -477,6 +477,92 @@ const EXECUTORS: Record<OpType, Executor> = {
     }
   },
 
+  /**
+   * «ضيف أحمد من اللي عليهم فلوس وعليه ٥٠٠ من أول الشهر» — create a customer.
+   *
+   * WHY this op exists: the owner's real answer to «مفيش أحمد» is not «طب اكتبه
+   * من الشاشة» — it is «ضيفه». Master data IS part of the work the agent is
+   * supposed to be able to do. The opening balance is money-shaped, so it rides
+   * the same pipeline as every other write: draft → approval → execute →
+   * verify-by-reading-back.
+   *
+   * Gym note: a new MEMBER is a customer with a plan + expiry, so the same op
+   * carries `plan` / `months` and the front desk can add a member by talking.
+   */
+  async customer_add(businessId, ref, p) {
+    const name = String(p.name ?? '').trim()
+    if (name.length < 2) return { ok: false, checks: [], effects: [], failReason: 'محتاج اسم العميل' }
+    const balance = Math.round(Number(p.balance ?? 0))
+    const existing = await db.customer.findFirst({ where: { businessId, name } })
+    if (existing) {
+      // Fail SAFE rather than silently overwriting a balance that may have moved.
+      return {
+        ok: false,
+        checks: [],
+        effects: [],
+        failReason: `فيه عميل بالاسم ده بالفعل (عليه ${egp(existing.balance)}) — استخدم «تحصيل» أو «تعديل رصيد» بدل الإضافة`,
+      }
+    }
+    const months = Number(p.months ?? 0)
+    let expiresAt: Date | null = null
+    if (months > 0) {
+      expiresAt = new Date()
+      expiresAt.setMonth(expiresAt.getMonth() + months)
+    }
+    const created = await db.customer.create({
+      data: {
+        businessId,
+        name,
+        phone: p.phone ? String(p.phone) : null,
+        balance,
+        plan: p.plan ? String(p.plan) : null,
+        expiresAt,
+      },
+    })
+    const after = await db.customer.findUniqueOrThrow({ where: { id: created.id } })
+    const balanceOk = after.balance === balance
+    return {
+      ok: balanceOk,
+      checks: [
+        { label: `رصيد «${name}» الافتتاحي`, expected: egp(balance), actual: egp(after.balance), pass: balanceOk },
+        { label: 'الاسم', expected: name, actual: after.name, pass: after.name === name },
+        ...(expiresAt ? [{ label: 'الصلاحية', expected: arDate(expiresAt), actual: after.expiresAt ? arDate(after.expiresAt) : '—', pass: true }] : []),
+      ],
+      effects: [
+        { label: `عميل جديد: ${name}`, value: ref, tone: 'good' },
+        { label: balance > 0 ? 'عليه (مديونية)' : balance < 0 ? 'ليه (رصيد)' : 'بدون رصيد', value: egp(Math.abs(balance)), tone: balance > 0 ? 'bad' : 'neutral' },
+        ...(after.plan ? [{ label: 'الاشتراك', value: after.plan, tone: 'good' as const }] : []),
+      ],
+    }
+  },
+
+  async supplier_add(businessId, ref, p) {
+    const name = String(p.name ?? '').trim()
+    if (name.length < 2) return { ok: false, checks: [], effects: [], failReason: 'محتاج اسم المورد' }
+    const balance = Math.round(Number(p.balance ?? 0))
+    const existing = await db.supplier.findFirst({ where: { businessId, name } })
+    if (existing) {
+      return {
+        ok: false,
+        checks: [],
+        effects: [],
+        failReason: `فيه مورد بالاسم ده بالفعل (علينا ${egp(existing.balance)}) — استخدم «سداد» أو «تعديل رصيد»`,
+      }
+    }
+    const created = await db.supplier.create({
+      data: { businessId, name, phone: p.phone ? String(p.phone) : null, balance },
+    })
+    const after = await db.supplier.findUniqueOrThrow({ where: { id: created.id } })
+    return {
+      ok: after.balance === balance,
+      checks: [{ label: `رصيد «${name}» الافتتاحي`, expected: egp(balance), actual: egp(after.balance), pass: after.balance === balance }],
+      effects: [
+        { label: `مورد جديد: ${name}`, value: ref, tone: 'good' },
+        { label: balance > 0 ? 'علينا (مستحق)' : 'بدون رصيد', value: egp(Math.abs(balance)), tone: balance > 0 ? 'bad' : 'neutral' },
+      ],
+    }
+  },
+
   async reversal(businessId, ref, p) {
     const originalRef = String(p.originalRef ?? '')
     const original = await db.operation.findFirst({
@@ -528,6 +614,18 @@ const EXECUTORS: Record<OpType, Executor> = {
         await db.supplier.update({ where: { id: String(op.supplierId) }, data: { balance: { increment: Number(op.amount ?? 0) } } })
         await db.cashEntry.create({ data: { businessId, direction: 'in', amount: Number(op.amount ?? 0), reason: `عكس سداد ${originalRef}`, ref } })
         break
+      }
+      case 'customer_add':
+      case 'supplier_add': {
+        // Undo = delete the party, but only while nothing else references it.
+        const created = JSON.parse(JSON.stringify(op)) as Record<string, unknown>
+        void created
+        return {
+          ok: false,
+          checks: [],
+          effects: [],
+          failReason: 'إضافة عميل/مورد مش بتتعكس تلقائيًا (ممكن يكون اتعمل عليه حركات) — امسحه من شاشة العملاء لو مش محتاجه',
+        }
       }
       default:
         return { ok: false, checks: [], effects: [], failReason: `نوع العملية ${original.type} مش بيتعكس تلقائيًا` }

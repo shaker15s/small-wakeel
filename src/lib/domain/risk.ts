@@ -15,6 +15,10 @@ const BASE_RISK: Record<OpType, Risk> = {
   stock_adjustment: 'R3',
   membership: 'R2',
   attendance: 'R1',
+  // Creating a party with an OPENING BALANCE changes receivables/payables — it
+  // is money-shaped master data, so it needs an approval like the rest.
+  customer_add: 'R2',
+  supplier_add: 'R2',
   reversal: 'R3',
 }
 
@@ -42,6 +46,9 @@ const DRAFT_ALLOWED: Record<string, string[]> = {
   stock_adjustment: ['owner', 'supervisor'],
   membership: ['owner', 'supervisor', 'reception'],
   attendance: ['owner', 'supervisor', 'reception'],
+  // front-desk roles add members/walk-in customers all day long
+  customer_add: ['owner', 'supervisor', 'cashier', 'reception'],
+  supplier_add: ['owner', 'supervisor'],
   reversal: ['owner', 'supervisor'],
 }
 

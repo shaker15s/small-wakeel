@@ -14,7 +14,7 @@
 
 import ZAI from 'z-ai-web-dev-sdk'
 import { db } from '@/lib/db'
-import { withBreaker, withRetry } from './resilience'
+import { breakerIsOpen, withBreaker, withRetry } from './resilience'
 
 export interface LLMMessage {
   role: 'system' | 'user' | 'assistant'
@@ -55,6 +55,42 @@ export const BUILTIN_MODELS: ModelInfo[] = [
   { key: 'builtin-air', label: 'خفيف سريع', tier: 'air', source: 'builtin' },
 ]
 
+/**
+ * Is the built-in gateway usable AT ALL?
+ *
+ * The built-in source is `z-ai-web-dev-sdk`, which needs a `.z-ai-config` file
+ * (project / home / etc). In a fresh checkout, a container or an air-gapped
+ * install there is none — and then EVERY default turn paid for it: an exception
+ * per call, a `retry` log line per attempt, a scary «فشل «عميق مفكّر»» notice in
+ * the UI and a ladder hop that only existed to discover a missing file. The
+ * answer is a 1-line fs probe, cached for a minute, so the ladder can leave the
+ * built-in source out entirely instead of failing into it.
+ */
+let zaiProbe: { at: number; ok: boolean } | null = null
+export function zaiAvailable(): boolean {
+  if (zaiProbe && Date.now() - zaiProbe.at < 60_000) return zaiProbe.ok
+  const candidates = [
+    `${process.cwd()}/.z-ai-config`,
+    `${process.env.HOME ?? ''}/.z-ai-config`,
+    '/etc/.z-ai-config',
+  ]
+  let ok = false
+  for (const path of candidates) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const fs = require('node:fs') as typeof import('node:fs')
+      if (path && fs.existsSync(path)) {
+        ok = true
+        break
+      }
+    } catch {
+      /* keep probing the rest */
+    }
+  }
+  zaiProbe = { at: Date.now(), ok }
+  return ok
+}
+
 export function modelLabelFor(model: ModelInfo): string {
   if (model.source === 'builtin') {
     // air is glm-4.5-air — labeling it glm-4.6 (the deep model) confuses owners
@@ -65,9 +101,34 @@ export function modelLabelFor(model: ModelInfo): string {
 }
 
 /** Resolve a modelKey ('builtin-deep' | 'builtin-air' | 'ext:<modelConfigId>') into full model info. */
+/**
+ * Resolve the model for a turn.
+ *
+ * `null` used to mean «builtin-deep» — the z-ai gateway. In this sandbox that is
+ * the one source that CANNOT work (no `.z-ai-config`), so every default turn
+ * opened with a failure notice and a ladder hop before the real answer started.
+ * With no explicit choice we now prefer the best enabled **external** model whose
+ * provider is not circuit-broken, and only fall back to the built-in when the
+ * gateway is actually configured (or no provider exists at all).
+ */
 export async function resolveModel(modelKey: string | null | undefined): Promise<ModelInfo> {
-  if (!modelKey || modelKey === 'builtin-deep' || modelKey === 'builtin-air') {
-    return BUILTIN_MODELS.find((m) => m.key === (modelKey ?? 'builtin-deep')) ?? BUILTIN_MODELS[0]
+  if (!modelKey) {
+    const externals = await externalModels()
+    const healthy = externals.find((m) => !breakerIsOpen(breakerKeyFor(m)))
+    if (healthy) return healthy
+    if (!zaiAvailable() && externals.length > 0) return externals[0]
+    return BUILTIN_MODELS.find((m) => m.key === 'builtin-deep') ?? BUILTIN_MODELS[0]
+  }
+  if (modelKey === 'builtin-deep' || modelKey === 'builtin-air') {
+    const builtin = BUILTIN_MODELS.find((m) => m.key === modelKey) ?? BUILTIN_MODELS[0]
+    // The UI can still ask for the built-in explicitly; if it is not configured
+    // we serve the request from a reachable provider instead of failing.
+    if (!zaiAvailable()) {
+      const externals = await externalModels()
+      const healthy = externals.find((m) => !breakerIsOpen(breakerKeyFor(m)))
+      if (healthy) return healthy
+    }
+    return builtin
   }
   if (modelKey.startsWith('ext:')) {
     const configId = modelKey.slice(4)
@@ -287,7 +348,10 @@ async function externalModels(): Promise<ModelInfo[]> {
 /** Ordered alternatives to `model`: same tier first, opposite source next. */
 export async function fallbackLadder(model: ModelInfo): Promise<ModelInfo[]> {
   const externals = (await externalModels()).filter((m) => m.key !== model.key)
-  const builtins = BUILTIN_MODELS.filter((m) => m.key !== model.key)
+  // A built-in gateway with no config file is not a fallback, it is a detour:
+  // drop it from the ladder (the turn then falls to the next provider or the
+  // deterministic engine in milliseconds instead of after an exception).
+  const builtins = zaiAvailable() ? BUILTIN_MODELS.filter((m) => m.key !== model.key) : []
   const wanted = tierRank(model.tier)
   const byTier = (a: ModelInfo, b: ModelInfo) => Math.abs(tierRank(a.tier) - wanted) - Math.abs(tierRank(b.tier) - wanted)
   const primary = model.source === 'builtin' ? externals : builtins

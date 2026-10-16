@@ -49,6 +49,9 @@ export const AGENT_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   'get_customer_history',
   'compare_periods',
   'expense_breakdown',
+  // R29 (chat→world): the agent can look OUTSIDE the ledger and ADVISE
+  'search_web',
+  'business_advice',
   // R28 orchestration: one call that runs a whole read-only plan (PTC-lite)
   'run_plan',
   'deep_dive',
@@ -95,6 +98,8 @@ export const TOOL_STEP_LABEL: Record<string, string> = {
   get_customer_history: 'ملف العميل',
   compare_periods: 'مقارنة الفترات',
   expense_breakdown: 'تفصيل المصروفات',
+  search_web: 'بحث في الويب',
+  business_advice: 'قراءة شغلك',
   run_plan: 'خطة متعددة الخطوات',
   deep_dive: 'تحقيق عميق',
   calculate: 'الحاسبة',

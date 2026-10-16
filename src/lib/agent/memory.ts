@@ -18,7 +18,7 @@
 import type { AgentMemory, Business } from '@prisma/client'
 import { db } from '@/lib/db'
 import { egp } from '@/lib/format'
-import { normalizeAr, toWesternDigits, matchEntity } from './arabic'
+import { normalizeAr, toWesternDigits, matchEntity, wordBoundedAt } from './arabic'
 import { startOfCairoDay } from '@/app/api/_lib/dates'
 
 // ---------------------------------------------------------------------------
@@ -27,7 +27,10 @@ import { startOfCairoDay } from '@/app/api/_lib/dates'
 // ---------------------------------------------------------------------------
 
 /** «احفظ …» / «خليك فاكر …» / «أنا بفضل …» — the R13 preference path (verbatim). */
-export const MEMORY_SAVE_RE = /(احفظ|خليك فاكر|افتكر اني|انا بفضل|بستحب)/
+// «افتكر إن أم حسن بتسدد كل أول شهر» — the owner names a THIRD PARTY, so the
+// trigger is «افتكر إن …», not only the first-person «افتكر إني …» (live R29:
+// this fell to free chat and nothing was remembered).
+export const MEMORY_SAVE_RE = /(احفظ|خليك فاكر|افتكر|اتعلم|خد بالك من|مانساش)/
 
 /** R18 hijack guard: a message carrying BOTH a write verb and a number is
  *  WORK («حسن اشترى بـ١٠٠ دفع ٤٠ والباقي... خليك فاكر الميعاد وذكرني») —
@@ -102,7 +105,10 @@ export function extractSaveRequest(text: string, norm: string): SaveRequest | nu
   if (!MEMORY_SAVE_RE.test(norm) || norm.length > 260) return null
   // R18: compound work + memory ask → the brain handles the memory itself
   if (WORK_BEARING_RE.test(norm) && DIGIT_RE.test(toWesternDigits(norm))) return null
-  for (const kw of ['خليك فاكر اني', 'خليك فاكر', 'افتكر اني', 'احفظ', 'انا بفضل', 'بستحب']) {
+  // A QUESTION that merely starts with «افتكر» («افتكر إن أم حسن بتسدد إمتى؟») is
+  // a lookup, not a save.
+  if (/[؟?]/.test(text) && /(امتي|امتى|إمتى|كام|قد\s*ايه|قدايه|مين|فين|ازاي|إزاي|ليه|ليش|هو كام)/.test(norm)) return null
+  for (const kw of ['خليك فاكر اني', 'خليك فاكر', 'افتكر اني', 'افتكر', 'احفظ', 'انا بفضل', 'بستحب', 'اتعلم']) {
     const m = flexiblePattern(kw).exec(text)
     if (!m) continue
     const raw = text.slice(m.index + m[0].length)
@@ -246,17 +252,104 @@ export function parseLexicon(memories: AgentMemory[]): LexiconEntry[] {
   return out
 }
 
+/* ---------------------------------------------------------------- lexicon QA */
+/**
+ * Words that name a CATEGORY of goods, never one specific item. A learned alias
+ * like «شوكولاتة» = «كوكاكولا 1 لتر» is not a dialect shortcut, it is a wrong
+ * sale: the owner says chocolate, the draft bills a cola (live R29 — the demo DB
+ * shipped exactly that row). Category words are refused at learn time and
+ * pruned at load time.
+ */
+const ALIAS_CATEGORY_WORDS = new Set([
+  'شوكولاته', 'شوكولاطه', 'بسكوت', 'شيبسي', 'شيبس', 'حلوي', 'حلويات', 'سكاكر', 'لبان', 'ايس كريم', 'ايسكريم',
+  'مياه', 'ميه', 'عصير', 'مشروب', 'مشروبات', 'مشروب غازي', 'كولا', 'صودا', 'شاي', 'قهوه', 'سكر', 'ملح', 'دقيق',
+  'رز', 'مكرونه', 'زيت', 'سمن', 'زبده', 'جبن', 'جبنه', 'البن', 'لبن', 'زبادي', 'بيض', 'عيش', 'خبز', 'فينو',
+  'لحمه', 'فراخ', 'سمك', 'معلبات', 'تونة', 'صلصه', 'مكرونة', 'بهارات', 'توابل', 'فلفل', 'كمون', 'كركم', 'قرفه',
+  'صابون', 'مناديل', 'معجون', 'فرشه', 'شامبو', 'مطهر', 'كلور', 'مسحوق', 'منظف', 'حفاضات', 'فوط',
+  'دوا', 'دواء', 'ادويه', 'شراب', 'اقراص', 'كبسولات', 'فيتامين', 'فيتامينات', 'مسكن', 'مضاد', 'مضاد حيوي',
+  'مرهم', 'قطره', 'بخاخ', 'مستلزمات', 'اكسسوار', 'بروتين', 'كرياتين', 'مكمل',
+  'ورد', 'زهور', 'بخور', 'دهن', 'عطر', 'زيوت', 'اعشاب', 'مطحون', 'مجفف', 'بودره', 'خلطه',
+])
+
+/** First `n` characters shared by both normalized strings. */
+function commonPrefix(a: string, b: string): number {
+  let i = 0
+  while (i < a.length && i < b.length && a[i] === b[i]) i++
+  return i
+}
+
+/**
+ * «Does this alias plausibly belong to THIS entity name?» — the single rule that
+ * keeps a dirty/legacy lexicon from turning into a wrong sale. True when the
+ * name contains the alias (≥4 chars), the alias contains the name, or the two
+ * share a ≥4-char head («جهينه» ↔ «جهينة ١ لتر», «كوكا» ↔ «كوكاكولا»).
+ */
+export function aliasFitsEntity(aliasRaw: string, entityNameRaw: string): boolean {
+  const a = normalizeAr(aliasRaw).trim()
+  const n = normalizeAr(entityNameRaw).trim()
+  if (a.length < 3 || n.length < 3) return false
+  if (ALIAS_CATEGORY_WORDS.has(a)) return false
+  if (a === n) return true
+  if (n.includes(a) && a.length >= 4) return true
+  if (a.includes(n)) return true
+  if (commonPrefix(a, n) >= 4) return true
+  // multi-word name whose HEAD is the alias («شيبسي» → «شيبسي عائلي 150 جم»)
+  const head = n.split(' ')[0]
+  return head === a || (head.length >= 4 && commonPrefix(a, head) >= 4)
+}
+
+/**
+ * Load-time verification: keep a lexicon row only if its alias still fits the
+ * entity's CURRENT name, no other catalog entity competes for it, and it is not
+ * a person's name. Self-healing on a legacy DB — the bad row never resolves
+ * again, even before a human deletes it.
+ */
+export function pruneLexicon(
+  entries: LexiconEntry[],
+  entities: { id: string; name: string; aliases?: string | null }[],
+  partyNames: string[] = [],
+): LexiconEntry[] {
+  const flat = (x: string) => normalizeAr(x).replace(/\s+/g, ' ').trim()
+  const parties = new Set(partyNames.map(flat))
+  const out: LexiconEntry[] = []
+  for (const e of entries) {
+    const entity = entities.find((x) => x.id === e.entityRef)
+    if (!entity) continue
+    if (!aliasFitsEntity(e.alias, entity.name)) continue
+    // a person's name is never an item alias: exact, or the alias is the FIRST
+    // word of a party name («أحمد» → «أحمد عبد الرحمن» — the demo DB shipped
+    // «أحمد» = «قهوة أحمد» and it captured the owner's own customer)
+    if (parties.has(flat(e.alias))) continue
+    const aliasNorm = flat(e.alias)
+    if (!aliasNorm.includes(' ') && aliasNorm.length >= 4 && [...parties].some((p) => p.split(' ')[0] === aliasNorm)) continue
+    // ambiguity: ≥2 catalog entities answer to the same alias → ask, never guess
+    const claims = entities.filter((x) => {
+      const names = [x.name, ...(x.aliases ? x.aliases.split(',').map((a) => a.trim()) : [])]
+      return names.some((nm) => flat(nm).includes(flat(e.alias)))
+    })
+    if (claims.length > 1) continue
+    out.push(e)
+  }
+  return out
+}
+
 /** Lexicon-first resolution: does the user's normalized text contain a known alias? */
-export function lexiconResolve<T extends { id: string }>(
+export function lexiconResolve<T extends { id: string; name?: string; aliases?: string | null }>(
   norm: string,
   lexicon: LexiconEntry[],
   candidates: T[],
 ): { entity: T; entry: LexiconEntry } | null {
   for (const entry of lexicon) {
     if (entry.alias.length < 3) continue
-    if (!norm.includes(entry.alias)) continue
+    // word-bounded: «شوكولاتة» contains «كولا» — a raw includes() turned a
+    // chocolate sentence into a Coca-Cola sale (live R29)
+    if (wordBoundedAt(norm, entry.alias) < 0) continue
     const entity = candidates.find((c) => c.id === entry.entityRef)
-    if (entity) return { entity, entry }
+    if (!entity) continue
+    // Defence in depth: even an un-pruned entry may not claim an entity it does
+    // not describe («شوكولاتة» ↛ «كوكاكولا 1 لتر»).
+    if (entity.name && !aliasFitsEntity(entry.alias, entity.name)) continue
+    return { entity, entry }
   }
   return null
 }
@@ -274,7 +367,17 @@ const ALIAS_STOPWORDS = /^(بعت|بعته|بيع|سجل|اكتب|قول|جم|ج
 export function learnableAlias(
   userText: string,
   entity: { name: string; aliases?: string | null },
+  opts?: { others?: string[]; partyNames?: string[] },
 ): string | null {
+  const flat = (x: string) => normalizeAr(x).replace(/\s+/g, ' ').trim()
+  const otherNames = (opts?.others ?? []).map(flat).filter((x) => x.length >= 3)
+  const partyNames = (opts?.partyNames ?? []).map(flat).filter((x) => x.length >= 3)
+  const clashes = (t: string): boolean => {
+    const tn = flat(t)
+    if (ALIAS_CATEGORY_WORDS.has(tn)) return true
+    if (partyNames.some((p) => p === tn || p.includes(tn) || tn.includes(p))) return true
+    return otherNames.some((o) => o === tn)
+  }
   const known = [entity.name, ...(entity.aliases ? entity.aliases.split(',').map((a) => a.trim()) : '')]
     .map((n) => normalizeAr(String(n)))
     .filter((n) => n.length >= 3)
@@ -291,11 +394,35 @@ export function learnableAlias(
   for (const t of candidates) {
     const tn = normalizeAr(t)
     if (tn.length < 2 || known.includes(tn)) continue
+    // A category word, a person's name or a token another item already answers
+    // to is never learned as this item's alias (live R29 bug class).
+    if (clashes(t)) continue
     for (const kn of known) {
-      if (kn.includes(tn) || tn.includes(kn)) return t
+      if (kn === tn) continue
+      if (kn.includes(tn) && tn.length >= 4) return t
+      if (tn.includes(kn) && tn.length - kn.length <= 6) return t
+      if (commonPrefix(kn, tn) >= 4) return t
     }
   }
   return null
+}
+
+/** Which lexicon rows are junk for this catalog? (used by scripts/db-prune-lexicon) */
+export function staleLexiconRows(
+  rows: { id: string; text: string; entityRef: string | null }[],
+  entities: { id: string; name: string; aliases?: string | null }[],
+  partyNames: string[] = [],
+): string[] {
+  const entries: LexiconEntry[] = rows
+    .filter((r) => r.entityRef)
+    .map((r) => ({
+      id: r.id,
+      alias: normalizeAr((r.text.match(/«([^»]+)»/)?.[1] ?? r.text.split('=')[0]).trim()),
+      entityRef: r.entityRef as string,
+      displayName: (r.text.split('=')[1] ?? '').trim(),
+    }))
+  const keep = new Set(pruneLexicon(entries, entities, partyNames).map((e) => e.id))
+  return rows.filter((r) => !keep.has(r.id)).map((r) => r.id)
 }
 
 /** Persist a learned lexicon memory (deduped by entityRef + alias text). */
