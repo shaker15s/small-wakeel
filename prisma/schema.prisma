@@ -62,11 +62,13 @@ model Item {
   sellPrice         Int       @default(0) // piastres per unit
   stockQty          Int       @default(0) // in base unit (gram for attar, etc.)
   lowStockThreshold Int       @default(0)
+  barcode           String? // scanned at the counter (EAN-13 / code-128 / QR)
   batchNo           String? // pharmacy
   expiresAt         DateTime? // pharmacy
   createdAt         DateTime  @default(now())
 
   @@index([businessId, name])
+  @@index([businessId, barcode])
   @@index([businessId, stockQty])
   @@index([expiresAt])
 }

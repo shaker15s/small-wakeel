@@ -78,6 +78,7 @@ export function serializeItem(item: Item): ItemDTO {
     sellPrice: item.sellPrice,
     stockQty: item.stockQty,
     lowStockThreshold: item.lowStockThreshold,
+    barcode: item.barcode,
     batchNo: item.batchNo,
     expiresAt: item.expiresAt ? item.expiresAt.toISOString() : null,
     daysToExpiry: item.expiresAt ? daysFromTodayCairo(item.expiresAt) : null,

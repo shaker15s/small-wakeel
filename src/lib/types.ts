@@ -46,6 +46,7 @@ export interface ItemDTO {
   sellPrice: number
   stockQty: number
   lowStockThreshold: number
+  barcode?: string | null
   batchNo?: string | null
   expiresAt?: string | null
   daysToExpiry?: number | null

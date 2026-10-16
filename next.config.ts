@@ -3,32 +3,62 @@ import type { NextConfig } from "next";
 const isDev = process.env.NODE_ENV !== "production";
 
 /**
+ * Origins allowed to EMBED the app in an iframe.
+ *
+ * Security default is «nobody»: `frame-ancestors 'self'` plus
+ * `X-Frame-Options: DENY` stops clickjacking, which matters because an agent
+ * UI can approve money operations with one tap.
+ *
+ * Hosted previews (Arena/E2B sandboxes, Vercel previews, a shop's intranet
+ * dashboard) legitimately need to frame it, so embedding is opt-in:
+ *   • in development the preview wildcard `https://*.e2b.app` is allowed
+ *   • any deployment can allow its own embedders via WAKIL_EMBED_ORIGINS
+ *     (comma-separated absolute origins, e.g. "https://dash.myshop.eg")
+ * `X-Frame-Options` is omitted whenever a wildcard embedder is allowed, because
+ * the header has no wildcard syntax — CSP frame-ancestors is the modern control
+ * and both browsers and the sandbox honour it.
+ */
+function embedOrigins(): string[] {
+  const fromEnv = (process.env.WAKIL_EMBED_ORIGINS ?? "")
+    .split(",")
+    .map((o) => o.trim())
+    .filter(Boolean);
+  // `*` lets an operator opt into total embedding (public demo builds only).
+  if (fromEnv.includes("*")) return ["*"];
+  return isDev ? ["https://*.e2b.app", ...fromEnv] : fromEnv;
+}
+
+/**
  * Content-Security-Policy.
  *
- * Next's App Router injects inline bootstrap scripts, and Tailwind/framer-motion
+ * Next's App Router injects inline bootstrap scripts and Tailwind/framer-motion
  * write inline styles, so 'unsafe-inline' is required for script/style unless a
- * nonce pipeline is added. Everything else is locked down: no remote script or
- * image origins, no framing, no form posts off-origin. `connect-src 'self'`
- * keeps the agent's LLM traffic server-side (the browser only talks to us).
+ * nonce pipeline is added. Everything else is locked down: no remote script,
+ * image or connect origins — the agent's LLM traffic stays server-side, so the
+ * browser never needs to reach a model provider directly.
  */
-const csp = [
-  "default-src 'self'",
-  `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}`,
-  "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob:",
-  "font-src 'self' data:",
-  "connect-src 'self'",
-  "form-action 'self'",
-  "frame-ancestors 'none'",
-  "base-uri 'self'",
-  "object-src 'none'",
-].join("; ");
+function buildCsp(): string {
+  const embeds = embedOrigins()
+  const frameAncestors = ["'self'", ...embeds].join(" ")
+  return [
+    "default-src 'self'",
+    `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}`,
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self' data:",
+    "connect-src 'self'",
+    "form-action 'self'",
+    `frame-ancestors ${frameAncestors}`,
+    "base-uri 'self'",
+    "object-src 'none'",
+  ].join("; ")
+}
 
 const nextConfig: NextConfig = {
   output: "standalone",
-  // Type errors and lint errors now FAIL the build. They were silenced before
+  // Type errors FAIL the build. They were silenced before
   // (`ignoreBuildErrors: true`), which is how broken code reached production.
-  // (Next 16 dropped the built-in `eslint` build step — `bun run lint` in CI owns it.)
+  // (Next 16 dropped the built-in `eslint` build step — `bun run lint` owns it.)
   typescript: { ignoreBuildErrors: false },
   reactStrictMode: false,
   // The agent runs the SQLite driver adapter in-process; these must stay
@@ -41,14 +71,19 @@ const nextConfig: NextConfig = {
   devIndicators: false,
   poweredByHeader: false,
   async headers() {
+    const embeds = embedOrigins()
+    const wildcardEmbed = embeds.includes("*") || embeds.some((o) => o.includes("*"))
     return [
       {
         source: "/:path*",
         headers: [
-          { key: "Content-Security-Policy", value: csp },
+          { key: "Content-Security-Policy", value: buildCsp() },
           { key: "X-Content-Type-Options", value: "nosniff" },
           { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
-          { key: "X-Frame-Options", value: "DENY" },
+          // X-Frame-Options has no wildcard form; skip it when CSP already
+          // names the allowed embedders (CSP takes precedence in every modern
+          // browser and is what the sandbox preview checks).
+          ...(wildcardEmbed ? [] : [{ key: "X-Frame-Options", value: "DENY" }]),
           {
             key: "Permissions-Policy",
             value: "camera=(), microphone=(self), geolocation=(), payment=()",
