@@ -49,6 +49,8 @@ export const AGENT_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   'get_customer_history',
   'compare_periods',
   'expense_breakdown',
+  // «بعت كام لبن الشهر ده؟ / حصلت كام من أم حسن؟» — period aggregates
+  'get_period_totals',
   // R29 (chat→world): the agent can look OUTSIDE the ledger and ADVISE
   'search_web',
   'business_advice',

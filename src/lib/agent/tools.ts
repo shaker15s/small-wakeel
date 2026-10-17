@@ -30,6 +30,7 @@ export type ReadTool =
   | 'get_customer_history'
   | 'compare_periods'
   | 'expense_breakdown'
+  | 'get_period_totals'
   | 'search_web'
   | 'business_advice'
 
@@ -54,6 +55,7 @@ export const READ_TOOLS: ReadonlySet<string> = new Set<string>([
   'expense_breakdown',
   'search_web',
   'business_advice',
+  'get_period_totals',
 ])
 
 /**
@@ -252,6 +254,96 @@ export async function runReadTool(
             { label: 'اشتراكات', value: egp(sum('membership')) },
             { label: 'عدد العمليات', value: fmtQty(ops.length) },
           ],
+        },
+      ]
+    }
+
+    case 'get_period_totals': {
+      // «بعت كام علبة لبن الشهر ده؟» used to answer with «آخر الحركات» (eight
+      // rows) — technically related, practically useless. The owner asked for a
+      // NUMBER; this tool gives the number, the quantity and the count.
+      const metric = String(args.metric ?? 'sales')
+      const days = Math.max(1, Math.min(365, Number(args.days ?? 30) || 30))
+      // «النهارده» is the Cairo day, not «now − 24h»: the shop's day starts at
+      // midnight, and a 24h window silently includes yesterday evening (live
+      // R31: «صرفت كام النهارده؟» counted 10 old expenses).
+      const from = days === 1 ? startOfCairoDay(0) : new Date(Date.now() - days * 86400000)
+      const types =
+        metric === 'sales'
+          ? ['sale', 'membership']
+          : metric === 'collections'
+            ? ['collection']
+            : metric === 'purchases'
+              ? ['purchase']
+              : ['expense']
+      const label = metric === 'sales' ? 'مبيعات' : metric === 'collections' ? 'تحصيلات' : metric === 'purchases' ? 'مشتريات' : 'مصروفات'
+      const ops = await db.operation.findMany({
+        where: { businessId, status: 'SUCCEEDED', type: { in: types }, createdAt: { gte: from } },
+      })
+      const money = (payload: string): number => {
+        const p = (() => {
+          try {
+            return JSON.parse(payload) as Record<string, unknown>
+          } catch {
+            return {}
+          }
+        })()
+        for (const k of ['total', 'amount', 'paid', 'value']) {
+          const n = Number(p[k])
+          if (Number.isFinite(n) && n > 0) return Math.round(n)
+        }
+        return 0
+      }
+      const flat = (x: string) => normalizeAr(x).replace(/\s+/g, ' ').trim()
+      const query = flat(String(args.query ?? ''))
+      // a name in the question («لبن» / «أم حسن») narrows the same numbers
+      let matched = ops
+      let subject = ''
+      if (query.length >= 2) {
+        const tokens = query.split(' ').filter((t) => t.length >= 3)
+        const candidates = metric === 'collections' ? (await db.customer.findMany({ where: { businessId } })).map((c) => ({ name: c.name })) : (await db.item.findMany({ where: { businessId } })).map((i) => ({ name: i.name }))
+        const hit =
+          candidates.find((c) => tokens.length > 0 && tokens.every((t) => flat(c.name).includes(t))) ??
+          candidates.find((c) => tokens.some((t) => t.length >= 3 && flat(c.name).includes(t)))
+        if (hit) {
+          subject = hit.name
+          const key = flat(hit.name)
+          matched = ops.filter((o) => flat(o.payload).includes(key))
+        }
+      }
+      // a gym «sells» memberships: call them مبيعات in the same number
+      const total = matched.reduce((sum, o) => sum + money(o.payload), 0)
+      let qty = 0
+      if (metric === 'sales') {
+        for (const o of matched) {
+          try {
+            const p = JSON.parse(o.payload) as Record<string, unknown>
+            const n = Number(p.qty)
+            if (Number.isFinite(n) && n > 0) qty += n
+            // a seeded sale is stored as `lines` — the quantity lives there
+            const lines = Array.isArray(p.lines) ? (p.lines as Record<string, unknown>[]) : []
+            for (const l of lines) {
+              const ln = Number(l.qty)
+              if (Number.isFinite(ln) && ln > 0) qty += ln
+            }
+          } catch {
+            /* a payload we cannot read contributes money only */
+          }
+        }
+      }
+      const period = days === 1 ? 'النهارده' : days === 7 ? 'آخر ٧ أيام' : `آخر ${fmtQty(days)} يوم`
+      return [
+        {
+          kind: 'kv',
+          title: `${label}${subject ? ` — ${subject}` : ''} · ${period}`,
+          rows: [
+            { label: 'الإجمالي', value: egp(total) },
+            ...(qty > 0 ? [{ label: 'الكمية', value: fmtQty(qty) }] : []),
+            { label: 'عدد العمليات', value: fmtQty(matched.length) },
+          ],
+          ...(matched.length === 0
+            ? { rows: [{ label: 'النتيجة', value: `مفيش ${label} مسجلة ${period}${subject ? ` ل${subject}` : ''}` }] }
+            : {}),
         },
       ]
     }

@@ -456,6 +456,34 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
   if (/(صلاحيت|صلاحيه|منتهي|قربت|تنتهي|ينتهي|بينتهي|هينتهي|قربت تخلص|هتخلص صلاحيت|قرب يخلص)/.test(s)) {
     return { intent: 'read', tool: 'list_expiring', fields: {} }
   }
+  // ---- «بعت كام …؟» is a QUESTION, not a sale. Live R31: «بعت كام علبة لبن
+  // الشهر ده؟» came back as «آخر الحركات» (eight rows) — related, useless. The
+  // owner wants one number, and the sale verb must not reach the write rule.
+  if (/(كام|قد\s*ايه|قدايه)/.test(s)) {
+    const metric = /(حصلت|تحصيل|قبضت|استلمت)/.test(s)
+      ? 'collections'
+      : /(اشتريت|مشتريات|الشرا|شراء)/.test(s)
+        ? 'purchases'
+        : /(صرفت|مصروف|مصاريف|مصروفات)/.test(s)
+          ? 'expenses'
+          : /(بعت|مبيعات|اتبيع|بيع)/.test(s)
+            ? 'sales'
+            : null
+    if (metric) {
+      const days = /(النهارده|اليوم|دلوقتي)/.test(s) ? 1 : /(اسبوع|الأسبوع|7 ايام|سبعة ايام)/.test(s) ? 7 : 30
+      const query = s
+        .replace(/(بعت|مبيعات|اتبيع|بيع|حصلت|تحصيل|قبضت|استلمت|اشتريت|مشتريات|الشرا|شراء|صرفت|مصروفات|مصاريف|مصروف)/g, ' ')
+        .replace(/(كام|قد\s*ايه|قدايه|النهارده|اليوم|الشهر|هذا|ده|دي|الاسبوع|الأسبوع|الفتره|الفترة|الماضي|الجاي|علبه|علبة|كرتونه|كرتونة|كيلو|قطعه|قطعة|جرام|شريط|لتر)/g, ' ')
+        .replace(/[؟?]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+      return {
+        intent: 'read',
+        tool: 'get_period_totals',
+        fields: { metric, days, ...(query.length >= 2 ? { query } : {}) },
+      }
+    }
+  }
   // ---- R29: a NAME + «عليه/عليها كام» → that customer's real statement, not
   // the whole receivables list. «أحمد عليه كام؟» is the owner's most common
   // question and it used to fall through to free chat.
@@ -3264,7 +3292,14 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     }
   }
 
-  const brainTurn = await runBrainTurn()
+  // «بعت كام لبن الشهر ده؟» is ARITHMETIC over the ledger. A weak model picks
+  // «آخر الحركات» and the owner gets eight rows instead of the number he asked
+  // for (live R31). High-confidence sums skip the brain entirely.
+  const arithmeticRule = (() => {
+    const r = ruleBasedIntent(text, business.type)
+    return r.intent === 'read' && r.tool === 'get_period_totals' ? r : null
+  })()
+  const brainTurn = arithmeticRule ? null : await runBrainTurn()
   if (brainTurn) return brainTurn
 
   // ---- PASS 1: Understand (LLM with deterministic multi-split + rule fallback) ----
@@ -3289,6 +3324,13 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
 
   // Deterministic compound split — beats a single-LLM read when the user
   // stacked requests («ملخص اليوم ومين عليها فلوس وايه الناقص»).
+  // A high-confidence arithmetic question is ONE intent by definition — the
+  // model's multi-intent guess («اشتريت كام» + «الموردين») must not add a
+  // second card nobody asked for.
+  if (arithmeticRule) {
+    llmRaws = []
+    llmSingle = arithmeticRule
+  }
   const detSubs = splitSubIntents(text, business.type)
 
   let subs: SubIntent[] = []
@@ -3326,7 +3368,10 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     // sitting right there. Exception: opinion/advice questions stay chat — they
     // are conversations, not lookups.
     const looksConversational = /(رايك|رأيك|تنصحني|نصيحه|نصائح|اعمل ايه|ايه رايك|شايف ايه|استشاره|بتفكر في ايه)/.test(normalizeAr(text))
-    if (ruleIsWrite && llmSingle?.intent !== 'write') {
+    if (arithmeticRule) {
+      // the ladder's arithmetic read is the LAST word for this sentence shape
+      llmSingle = arithmeticRule
+    } else if (ruleIsWrite && llmSingle?.intent !== 'write') {
       llmSingle = rule
     } else if (ruleIsRead && llmSingle?.intent === 'chat' && !looksConversational) {
       llmSingle = rule
