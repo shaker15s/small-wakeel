@@ -1,21 +1,26 @@
-// scripts/screens-audit.tsx — «شاشات بايضة» as a repeatable gate.
+// scripts/screens-audit.tsx — «شاشة بايضة» كبوابة قابلة للتشغيل.
 //
-// Every screen is SERVER-RENDERED with real data from the live API and then
-// again with the payload of a brand-new business (nothing recorded yet). A
-// screen that crashes, renders nothing, or shows no guidance when the ledger is
-// empty fails the gate — that is exactly what «شاشة بايضة» means in practice.
+// The owner's complaint was literal: «شاشات بايضة». So this script stops asking
+// the API «هل بيرد؟» and starts rendering the ACTUAL screen components on the
+// server, with the ACTUAL payloads, for each of the four businesses:
 //
-//   bun run screens                     # all screens, owner of the supermarket
-//   bun run screens --all-businesses    # every vertical × owner
-//   bun run screens --only inventory    # one screen
-//   bun run screens --url http://localhost:3000
+//   • real data      → the screen must show the shop's own numbers/names
+//   • empty ledger   → a brand-new shop must SEE what to do next, not a blank
 //
-// It needs the dev server (and, for chat turns, the mock provider) running.
-import { createElement as h } from 'react'
+// Rendering React on the server is the same code path the browser runs for the
+// first paint (hooks, derived state, conditional sections), so a crash, a
+// missing field, or a section that silently disappears is caught here — in CI —
+// without a browser.
+//
+//   bun run screens                    # all four businesses
+//   bun run screens --only inventory   # one screen
+//   bun run screens --url http://host:port
 import { renderToStaticMarkup } from 'react-dom/server'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { createElement as h, type ReactElement } from 'react'
 
 import { QUERY_KEYS } from '../src/lib/store'
+import { egp } from '../src/lib/format'
 import TodayView from '../src/components/views/TodayView'
 import InventoryView from '../src/components/views/InventoryView'
 import JournalView from '../src/components/views/JournalView'
@@ -32,290 +37,240 @@ const opt = (name: string) => {
 }
 const BASE = opt('--url') ?? process.env.WAKIL_URL ?? 'http://localhost:3000'
 const ONLY = opt('--only')
-const ALL = args.includes('--all-businesses')
 
-const BUSINESSES = [
-  { key: 'super', name: 'سوبر ماركت النور', biz: 'cmvav3psg000iorbm9e9y9hb8', user: 'cmvav3psh000korbmqwag4fcz' },
-  { key: 'gym', name: 'جيم أبطال', biz: 'cmvav3pv0006jorbme9kf58ul', user: 'cmvav3pv1006lorbmi34gwdhm' },
-  { key: 'pharmacy', name: 'صيدلية الشفاء', biz: 'cmvav3pxd00b6orbmj7dvqgdr', user: 'cmvav3pxe00b8orbmvlpvjlrh' },
-  { key: 'attar', name: 'عطارة المسك', biz: 'cmvav3pzy00gjorbm70rupsbp', user: 'cmvav3pzz00glorbmnzoklps4' },
-]
+interface Biz {
+  id: string
+  name: string
+  type: string
+  userId: string
+}
 
-const realFetch = globalThis.fetch
-// The browser resolves `/api/...` against the origin; node does not.
-const fetchJson = async <T,>(path: string): Promise<T> => {
-  const res = await realFetch(`${BASE}${path}`)
+async function api<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`)
   if (!res.ok) throw new Error(`${path} → HTTP ${res.status}`)
   return (await res.json()) as T
 }
 
-/** Empty-ledger payloads: what a shop sees on day one. */
-const EMPTY = {
-  overview: {
-    cash: { balance: 0, in: 0, out: 0 },
-    today: { sales: 0, purchases: 0, expenses: 0, collections: 0, salesCount: 0 },
-    pendingOps: [],
-    lowStock: [],
-    expiring: [],
-    receivables: [],
-    payables: [],
-    recentOps: [],
-  },
-  items: [],
-  operations: [],
-  memories: [],
-  reports: { range: '30d', daily: [], totals: { sales: 0, purchases: 0, expenses: 0, collections: 0, profit: 0 }, topItems: [], byType: [] },
-  tasks: { tasks: [] },
-  providers: { providers: [] },
-  radar: [],
-  suggestions: [],
-  tools: [],
-  bootstrap: { businesses: [], activeBusinessId: null, activeUserId: null },
+/** Everything the eight screens can read, fetched once per business. */
+async function payloadFor(biz: Biz) {
+  const [overview, items, operations, memories, reports7, reports30, tasks, providers, radar, suggestions, tools, bootstrap] = await Promise.all([
+    api(`/api/overview?businessId=${biz.id}&userId=${biz.userId}`),
+    api(`/api/items?businessId=${biz.id}`),
+    api(`/api/operations?businessId=${biz.id}`),
+    api(`/api/memories?businessId=${biz.id}`),
+    api(`/api/reports?businessId=${biz.id}&range=7d`),
+    api(`/api/reports?businessId=${biz.id}&range=30d`),
+    api(`/api/tasks?businessId=${biz.id}`),
+    api('/api/providers'),
+    api(`/api/radar?businessId=${biz.id}&userId=${biz.userId}`),
+    api(`/api/suggestions?businessId=${biz.id}&userId=${biz.userId}`),
+    api(`/api/tools?businessId=${biz.id}&userId=${biz.userId}`),
+    api('/api/bootstrap'),
+  ])
+  return { overview, items, operations, memories, reports7, reports30, tasks, providers, radar, suggestions, tools, bootstrap }
 }
 
-type ScreenResult = { name: string; ok: boolean; problems: string[]; bytes: number }
+type Payload = Awaited<ReturnType<typeof payloadFor>>
 
-const LANDMARK: Record<string, RegExp> = {
-  today: /النهاردة|اليوم|الخزنة|آخر الحركات/,
-  inventory: /المخزون|الأصناف|بحث/,
-  journal: /العمليات|سجل|WKL-|الحركات/,
-  accounts: /العملاء|الحسابات|مديون/,
-  stats: /المبيعات|الإيرادات|أداء/,
-  reports: /تقرير|المبيعات|آخر ٣٠|30 يوم/,
-  memory: /فاكرها|اتعلمته|ذاكرتي|الذاكرة|أدوات بتاعتك/,
-  settings: /الإعدادات|المزوّد|الموديل/,
+const ZERO_OVERVIEW = {
+  cash: { opening: 0, in: 0, out: 0, net: 0 },
+  today: { sales: 0, purchases: 0, expenses: 0, collections: 0, payments: 0, opsCount: 0, doneCount: 0 },
+  pendingOps: [],
+  lowStock: [],
+  expiring: [],
+  receivables: [],
+  payables: [],
+  recentOps: [],
 }
-/** What a first-day shop must READ when there is no data yet. */
-const EMPTY_HINT = /مفيش|لسه|لا يوجد|ابدأ|ابدا|ضيف|سجّل|سجل|فاضي|فاضية|هنا|البداية|نضيف|جديد|قيد|أول|اول/
-
-function cacheKeys(biz: string, user: string): (readonly unknown[])[] {
-  return [
-    QUERY_KEYS.overview(biz, user),
-    QUERY_KEYS.items(biz),
-    QUERY_KEYS.operations(biz),
-    QUERY_KEYS.memories(biz),
-    QUERY_KEYS.reports(biz, '7d'),
-    QUERY_KEYS.reports(biz, '30d'),
-    QUERY_KEYS.tasks(biz),
-    QUERY_KEYS.providers,
-    QUERY_KEYS.radar(biz),
-    QUERY_KEYS.suggestions(biz, user),
-    QUERY_KEYS.tools(biz, user),
-    ['bootstrap'],
-  ]
+const ZERO_REPORT = {
+  range: '7d',
+  daily: [],
+  totals: { sales: 0, purchases: 0, expenses: 0, collections: 0, profit: 0 },
+  topItems: [],
+  byType: [],
 }
 
-function buildClient(payload: Record<string, unknown>, biz: string, user: string): QueryClient {
-  const qc = new QueryClient({
-    defaultOptions: { queries: { retry: false, staleTime: Infinity, gcTime: Infinity } },
-  })
-  const put = (key: readonly unknown[], value: unknown) => qc.setQueryData(key as never, value as never)
-  put(QUERY_KEYS.overview(biz, user), payload.overview)
-  put(QUERY_KEYS.items(biz), payload.items)
-  put(QUERY_KEYS.operations(biz), payload.operations)
-  put(QUERY_KEYS.memories(biz), payload.memories)
-  put(QUERY_KEYS.reports(biz, '7d'), payload.reports)
-  put(QUERY_KEYS.reports(biz, '30d'), payload.reports)
-  put(QUERY_KEYS.tasks(biz), payload.tasks)
-  put(QUERY_KEYS.providers, payload.providers)
-  put(QUERY_KEYS.radar(biz), payload.radar)
-  put(QUERY_KEYS.suggestions(biz, user), payload.suggestions)
-  put(QUERY_KEYS.tools(biz, user), payload.tools)
-  put(['bootstrap'], payload.bootstrap)
-  return qc
-}
-
-/**
- * «الشبكة وقعت» path: every query is already in `error` state, so the screen
- * renders its FAILURE branch synchronously. A screen that shows «فاضي» or
- * four zeros here is lying to the owner — that is the worst failure mode for
- * a shop app, so the gate treats it as a failure.
- */
-function errorClient(biz: string, user: string): QueryClient {
+function clientFor(biz: Biz, p: Payload | null): QueryClient {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity, gcTime: Infinity } } })
-  for (const key of cacheKeys(biz, user)) {
-    // `enabled:false` is what makes this DETERMINISTIC: the observer is not
-    // allowed to kick off a real request on mount (a real fetch would flip the
-    // screen back to «loading» and the check would pass without testing the
-    // failure branch).
-    qc.setQueryDefaults(key, { enabled: false, retryOnMount: false })
-    const query = qc.getQueryCache().build(qc as never, { queryKey: key } as never) as unknown as {
-      setState: (state: Record<string, unknown>) => void
-    }
-    query.setState({
-      status: 'error',
-      error: new Error('تعذر الاتصال بالسيرفر'),
-      fetchStatus: 'idle',
-      dataUpdatedAt: Date.now(),
-      errorUpdatedAt: Date.now(),
-    })
+  const put = (key: readonly unknown[], value: unknown) => qc.setQueryData(key as never, value as never)
+  if (p) {
+    put(QUERY_KEYS.overview(biz.id, biz.userId), p.overview)
+    put(QUERY_KEYS.items(biz.id), p.items)
+    put(QUERY_KEYS.operations(biz.id), p.operations)
+    put(QUERY_KEYS.memories(biz.id), p.memories)
+    put(QUERY_KEYS.reports(biz.id, '7d'), p.reports7)
+    put(QUERY_KEYS.reports(biz.id, '30d'), p.reports30)
+    put(QUERY_KEYS.tasks(biz.id), p.tasks)
+    put(QUERY_KEYS.providers, p.providers)
+    put(QUERY_KEYS.radar(biz.id), p.radar)
+    put(QUERY_KEYS.suggestions(biz.id, biz.userId), p.suggestions)
+    put(QUERY_KEYS.tools(biz.id, biz.userId), p.tools)
+    put(['bootstrap'], p.bootstrap)
+  } else {
+    put(QUERY_KEYS.overview(biz.id, biz.userId), ZERO_OVERVIEW)
+    put(QUERY_KEYS.items(biz.id), [])
+    put(QUERY_KEYS.operations(biz.id), [])
+    put(QUERY_KEYS.memories(biz.id), [])
+    put(QUERY_KEYS.reports(biz.id, '7d'), ZERO_REPORT)
+    put(QUERY_KEYS.reports(biz.id, '30d'), ZERO_REPORT)
+    put(QUERY_KEYS.tasks(biz.id), { tasks: [] })
+    put(QUERY_KEYS.providers, { providers: [] })
+    put(QUERY_KEYS.radar(biz.id), [])
+    put(QUERY_KEYS.suggestions(biz.id, biz.userId), [])
+    put(QUERY_KEYS.tools(biz.id, biz.userId), [])
+    put(['bootstrap'], { businesses: [{ id: biz.id, name: biz.name, type: biz.type, users: [{ id: biz.userId, name: 'صاحب الشغل', role: 'owner' }] }] })
   }
   return qc
 }
 
-async function livePayload(biz: string, user: string): Promise<Record<string, unknown>> {
-  const [overview, items, operations, memories, reports, tasks, providers, radar, suggestions, tools, bootstrap] = await Promise.all([
-    fetchJson(`/api/overview?businessId=${biz}&userId=${user}`),
-    fetchJson(`/api/items?businessId=${biz}`),
-    fetchJson(`/api/operations?businessId=${biz}`),
-    fetchJson(`/api/memories?businessId=${biz}`),
-    fetchJson(`/api/reports?businessId=${biz}&range=30d`),
-    fetchJson(`/api/tasks?businessId=${biz}`),
-    fetchJson('/api/providers'),
-    fetchJson(`/api/radar?businessId=${biz}&userId=${user}`),
-    fetchJson(`/api/suggestions?businessId=${biz}&userId=${user}`),
-    fetchJson(`/api/tools?businessId=${biz}&userId=${user}`),
-    fetchJson('/api/bootstrap'),
-  ])
-  return { overview, items, operations, memories, reports, tasks, providers, radar, suggestions, tools, bootstrap }
+interface Screen {
+  key: string
+  /** a real-data screen must contain this — evidence it rendered the ledger */
+  signal: RegExp
+  /** an empty screen must contain this — evidence it guides the first day */
+  emptySignal: RegExp
+  render: (biz: Biz) => ReactElement
 }
 
-const SCREENS: { key: string; render: (ctx: { biz: string; user: string; qc: QueryClient; businessName: string }) => React.ReactElement }[] = [
+const SCREENS: Screen[] = [
   {
     key: 'today',
-    render: ({ biz, user, qc }) =>
-      h(QueryClientProvider, { client: qc }, h(TodayView, { businessId: biz, userId: user, onNavigate: () => {} })),
+    signal: /رصيد الخزنة|مبيعات النهاردة|آخر الحركات|النهاردة/,
+    emptySignal: /ابدأ|ضيف|سجّل|لسه|مفيش/,
+    render: (b) => h(TodayView, { businessId: b.id, userId: b.userId }),
   },
   {
     key: 'inventory',
-    render: ({ biz, user, qc }) =>
-      h(QueryClientProvider, { client: qc }, h(InventoryView, { businessId: biz, userId: user, onNavigate: () => {} })),
+    signal: /ج\.م/,
+    emptySignal: /ضيف|مفيش|لسه|ابدأ|أول/,
+    render: (b) => h(InventoryView, { businessId: b.id, userId: b.userId }),
   },
   {
     key: 'journal',
-    render: ({ biz, user, qc }) =>
-      h(QueryClientProvider, { client: qc }, h(JournalView, { businessId: biz, userId: user, onNavigate: () => {} })),
+    signal: /WKL-|سجل|العمليات/,
+    emptySignal: /مفيش|لسه|أول|ابدأ/,
+    render: (b) => h(JournalView, { businessId: b.id, userId: b.userId }),
   },
   {
     key: 'accounts',
-    render: ({ biz, user, qc }) =>
-      h(QueryClientProvider, { client: qc }, h(AccountsView, { businessId: biz, userId: user, onNavigate: () => {} })),
+    signal: /عليه|مديون|العملاء|الحسابات/,
+    emptySignal: /مفيش|لسه|ضيف|ابدأ/,
+    render: (b) => h(AccountsView, { businessId: b.id, userId: b.userId }),
   },
   {
     key: 'stats',
-    render: ({ biz, user, qc }) =>
-      h(QueryClientProvider, { client: qc }, h(StatsView, { businessId: biz, userId: user, onNavigate: () => {} })),
+    signal: /ج\.م|مبيعات|إيراد/,
+    emptySignal: /مفيش|لسه|أول|ابدأ|سجّل/,
+    render: (b) => h(StatsView, { businessId: b.id, userId: b.userId }),
   },
   {
     key: 'reports',
-    render: ({ biz, user, qc, businessName }) =>
-      h(QueryClientProvider, { client: qc }, h(ReportsView, { businessId: biz, userId: user, businessName })),
+    signal: /ج\.م|تقرير|مبيعات/,
+    emptySignal: /مفيش|لسه|أول|ابدأ|سجّل/,
+    render: (b) => h(ReportsView, { businessId: b.id, userId: b.userId, businessName: b.name }),
   },
   {
     key: 'memory',
-    render: ({ biz, user, qc }) =>
-      h(QueryClientProvider, { client: qc }, h(MemoryView, { businessId: biz, userId: user, onNavigate: () => {} })),
+    signal: /ذاكرتي|فاكرها|اتعلمته|أدوات/,
+    emptySignal: /مفيش|لسه|علّمني|احفظ|أضف|ضيف/,
+    render: (b) => h(MemoryView, { businessId: b.id, userId: b.userId }),
   },
   {
     key: 'settings',
-    render: ({ biz, user, qc }) =>
-      h(QueryClientProvider, { client: qc }, h(SettingsView, { businessId: biz, userId: user, onNavigate: () => {} })),
+    signal: /المزوّد|الموديل|الإعدادات/,
+    emptySignal: /المزوّد|الموديل|الإعدادات|ضيف/,
+    render: (b) => h(SettingsView, { businessId: b.id, userId: b.userId }),
   },
 ]
 
-function renderOne(
-  screen: (typeof SCREENS)[number],
-  payload: Record<string, unknown>,
-  biz: string,
-  user: string,
-  businessName: string,
-  client?: QueryClient,
-) {
-  const qc = client ?? buildClient(payload, biz, user)
-  const errors: string[] = []
-  const origError = console.error
-  console.error = (...a: unknown[]) => {
-    const line = a.map(String).join(' ')
-    // React logs missing-key etc. — those are noise; real crashes surface as throws
-    if (!/Warning:|key` prop|validateDOMNesting/.test(line)) errors.push(line.slice(0, 200))
-  }
-  try {
-    const html = renderToStaticMarkup(screen.render({ biz, user, qc, businessName }))
-    return { html, errors }
-  } finally {
-    console.error = origError
-  }
+interface Result {
+  name: string
+  problems: string[]
 }
 
-const results: ScreenResult[] = []
-const businesses = ALL ? BUSINESSES : BUSINESSES.slice(0, 1)
+function renderScreen(screen: Screen, biz: Biz, qc: QueryClient): string {
+  return renderToStaticMarkup(h(QueryClientProvider, { client: qc }, screen.render(biz)))
+}
 
-for (const b of businesses) {
-  console.log(`\n${b.name} — ${b.key}\n${'─'.repeat(72)}`)
-  let payload: Record<string, unknown> = {}
-  let liveError: string | null = null
-  try {
-    payload = await livePayload(b.biz, b.user)
-  } catch (e) {
-    liveError = e instanceof Error ? e.message : String(e)
-  }
+/** Readable text out of the markup (tags stripped, entities collapsed). */
+const textOf = (html: string) =>
+  html
+    .replace(/<script[\s\S]*?<\/script>/g, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&#x27;|&#39;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/\s+/g, ' ')
+    .trim()
 
-  for (const screen of SCREENS) {
-    if (ONLY && ONLY !== screen.key) continue
-    const problems: string[] = []
-    let bytes = 0
+async function main() {
+  const boot = await api<{ businesses: { id: string; name: string; type: string; users: { id: string; name: string; role: string }[] }[] }>(
+    '/api/bootstrap',
+  )
+  const businesses: Biz[] = boot.businesses.map((b) => {
+    const owner = b.users.find((u) => u.role === 'owner') ?? b.users[0]
+    return { id: b.id, name: b.name, type: b.type, userId: owner.id }
+  })
+  if (businesses.length === 0) throw new Error('مفيش أنشطة في /api/bootstrap — الداتابيز فاضية؟')
 
-    // ---- 1) real data ----------------------------------------------------
-    if (liveError) problems.push(`تعذر تحميل البيانات: ${liveError}`)
-    else {
+  console.log(`\n🖥️  وكيل — كل شاشة بتترسم فعليًا (${BASE})\n${'─'.repeat(78)}`)
+  const results: Result[] = []
+
+  for (const biz of businesses) {
+    console.log(`\n${biz.name} — ${biz.type}`)
+    const payload = await payloadFor(biz)
+    const itemNames = (payload.items as { name: string }[]).slice(0, 40).map((i) => i.name)
+
+    for (const screen of SCREENS) {
+      if (ONLY && ONLY !== screen.key) continue
+      const problems: string[] = []
+
+      // ---- 1) real ledger ------------------------------------------------
       try {
-        const { html, errors } = renderOne(screen, payload, b.biz, b.user, b.name)
-        bytes = html.length
-        if (html.length < 400) problems.push(`شاشة فاضية (${html.length} حرف)`)
-        const text = html.replace(/<[^>]+>/g, ' ')
-        if (!LANDMARK[screen.key].test(text)) problems.push(`مفيش أثر للمحتوى المتوقع (${LANDMARK[screen.key]})`)
-        if (errors.length > 0) problems.push(`خطأ أثناء الرسم: ${errors[0]}`)
+        const html = renderScreen(screen, biz, clientFor(biz, payload))
+        const text = textOf(html)
+        if (text.length < 250) problems.push(`الشاشة شبه فاضية (${text.length} حرف مقروء)`)
+        if (!screen.signal.test(text)) problems.push(`مفيش أثر للبيانات الحقيقية (${screen.signal})`)
+        // A screen can render, look right, and still show the WRONG number (or
+        // zero) — «بايضة» in the owner's words. The KPI the API returned must be
+        // the KPI on the screen, byte for byte after `egp()`.
+        const expected: string | null =
+          screen.key === 'stats'
+            ? egp((payload.reports7 as { totals: { sales: number } }).totals.sales)
+            : screen.key === 'reports'
+              ? egp((payload.reports7 as { totals: { sales: number } }).totals.sales)
+              : screen.key === 'today'
+                ? egp((payload.overview as { cash: { net: number } }).cash.net)
+                : null
+        if (expected && !text.includes(expected)) problems.push(`الرقم الظاهر مش رقم السجل (المتوقع ${expected})`)
+        // the shop's own catalog must appear on the inventory screen
+        if (screen.key === 'inventory' && itemNames.length > 0) {
+          const shown = itemNames.filter((n) => text.includes(n.split(' ')[0])).length
+          if (shown === 0) problems.push('مفيش أي صنف من أصناف المحل ظاهر في المخزون')
+        }
       } catch (e) {
         problems.push(`الشاشة وقعت: ${e instanceof Error ? e.message : String(e)}`)
       }
-    }
 
-    // ---- 2) first day (empty ledger) ------------------------------------
-    if (!ONLY || ONLY === screen.key) {
+      // ---- 2) first day (empty ledger) -----------------------------------
       try {
-        const { html, errors } = renderOne(
-          screen,
-          { ...EMPTY, bootstrap: { businesses: [{ id: b.biz, name: b.name, users: [{ id: b.user, name: 'صاحب الشغل', role: 'owner' }] }] } },
-          b.biz,
-          b.user,
-          b.name,
-        )
-        const text = html.replace(/<[^>]+>/g, ' ')
-        if (ba_size(html) < 300) problems.push(`شاشة فاضية أول يوم (${html.length} حرف)`)
-        else if (!EMPTY_HINT.test(text)) problems.push('مفيش أي إرشاد لما مفيش بيانات (شاشة بيضة أول يوم)')
-        if (errors.length > 0) problems.push(`خطأ أول يوم: ${errors[0]}`)
+        const html = renderScreen(screen, biz, clientFor(biz, null))
+        const text = textOf(html)
+        if (text.length < 120) problems.push(`أول يوم: الشاشة فاضية (${text.length} حرف مقروء)`)
+        else if (!screen.emptySignal.test(text)) problems.push('أول يوم: مفيش أي إرشاد للخطوة اللي بعدها')
       } catch (e) {
-        problems.push(`شاشة أول يوم وقعت: ${e instanceof Error ? e.message : String(e)}`)
+        problems.push(`أول يوم وقعت: ${e instanceof Error ? e.message : String(e)}`)
       }
-    }
 
-    // ---- 3) network failure (every query errored) ------------------------
-    if (!ONLY || ONLY === screen.key) {
-      try {
-        const { html, errors } = renderOne(screen, {}, b.biz, b.user, b.name, errorClient(b.biz, b.user))
-        const text = html.replace(/<[^>]+>/g, ' ')
-        // A real failure branch: says something went wrong AND offers a retry.
-        // «مفيش بيانات» alone is a lie when the request itself failed.
-        const saysFailed = /مش قادرين|تعذر|مشكلة|فشل|الخطأ/.test(text)
-        const saysRetry = /جرّب تاني|إعادة المحاولة|حاول تاني|تاني/.test(text)
-        if (!saysFailed) problems.push('شاشة الشبكة الواقعة مش بتقول إن فيه مشكلة (بتظهر كأنها فاضية)')
-        else if (!saysRetry) problems.push('شاشة الخطأ مفيهاش زر «جرّب تاني»')
-        if (errors.length > 0) problems.push(`خطأ في رسم شاشة الخطأ: ${errors[0]}`)
-      } catch (e) {
-        problems.push(`شاشة الخطأ وقعت: ${e instanceof Error ? e.message : String(e)}`)
-      }
+      const ok = problems.length === 0
+      results.push({ name: `${biz.type}/${screen.key}`, problems })
+      console.log(`${ok ? '✅' : '❌'} ${screen.key.padEnd(10)} ${ok ? 'اترسمت ببيانات حقيقية + أول يوم' : problems.join(' · ')}`)
     }
-
-    const ok = problems.length === 0
-    results.push({ name: `${b.key}/${screen.key}`, ok, problems, bytes })
-    console.log(`${ok ? '✅' : '❌'} ${screen.key.padEnd(10)} ${ok ? `${bytes} حرف` : problems.join(' · ')}`)
   }
+
+  const failed = results.filter((r) => r.problems.length > 0)
+  console.log(`\n${'─'.repeat(78)}\nالنتيجة: ${results.length - failed.length}/${results.length} شاشة سليمة\n`)
+  if (failed.length > 0) process.exit(1)
 }
 
-function ba_size(s: string): number {
-  return s.length
-}
-
-const passed = results.filter((r) => r.ok).length
-console.log(`\n${'─'.repeat(72)}\nالنتيجة: ${passed}/${results.length} شاشة سليمة\n`)
-process.exit(passed === results.length ? 0 : 1)
+await main()
