@@ -111,6 +111,33 @@ describe('ledger tools — أرقام من السجل نفسه', () => {
     expect(card.rows.length).toBeLessThanOrEqual(12)
   })
 
+  test('get_reorder_list asks for a real quantity at real cost', async () => {
+    const items = await db.item.findMany({ where: { businessId: business.id } })
+    const low = items.filter((it: { stockQty: number; lowStockThreshold: number }) => it.lowStockThreshold > 0 && it.stockQty <= it.lowStockThreshold)
+    const [card] = (await runReadTool('get_reorder_list', business.id, {})) as Table[]
+    if (low.length === 0) {
+      expect(card.kind).toBe('kv')
+      return
+    }
+    expect(card.kind).toBe('table')
+    expect(card.rows.length).toBeGreaterThan(0)
+    // every row proposes a positive quantity
+    for (const row of card.rows) {
+      const n = Number(String(row.qty).replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d))).replace(/[^\d]/g, ''))
+      expect(n).toBeGreaterThan(0)
+    }
+  })
+
+  test('get_profit_by_item never reports profit above revenue', async () => {
+    const [card] = (await runReadTool('get_profit_by_item', business.id, { days: 30 })) as Table[]
+    if (card.kind !== 'table') return
+    for (const row of card.rows) {
+      const revenue = money(row.revenue)
+      const profit = money(row.profit)
+      expect(profit).toBeLessThanOrEqual(revenue + 1)
+    }
+  })
+
   test('ranking tool only returns rows backed by operations', async () => {
     const [card] = (await runReadTool('get_customer_ranking', business.id, {})) as Table[]
     if (card.kind === 'table') {

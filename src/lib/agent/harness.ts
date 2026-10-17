@@ -466,6 +466,10 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
     return { intent: 'read', tool: 'get_staff_performance', fields: {} }
   if (/(بخساره|بخسارة|سعر التكلفه|سعر التكلفة|راجع الاسعار|راجع الأسعار|اسعار غلط)/.test(s))
     return { intent: 'read', tool: 'get_price_check', fields: {} }
+  if (/(ورقة الطلب|ورقه الطلب|طلبيات)/.test(s) || (/(اشتري|أشتري|اجيب|أجيب|اطلب|أطلب)/.test(s) && /(ايه|إيه|كام|مين)/.test(s)))
+    return { intent: 'read', tool: 'get_reorder_list', fields: {} }
+  if (/(بربح|بكسب|مكسبي|مكسبى).*(من ايه|من إيه|من اكتر|من أكتر|اكتر|أكتر)|(اكتر|أكتر) (حاجه|حاجة) (بتربح|بتكسب)/.test(s))
+    return { intent: 'read', tool: 'get_profit_by_item', fields: {} }
   if (/(أكتر|اكتر|أعلى|اعلى|افضل|أفضل).*(بيتباع|بتتباع|مبيع|مبيعات)|(بيتباع|بتتباع) (أكتر|اكتر)|أعلى الأصناف|الاصناف اللي بتتباع|الأصناف اللي بتتباع/.test(s))
     return { intent: 'read', tool: 'get_top_items', fields: {} }
   // «النواقص» / «نواقص» are the broken plurals an Egyptian owner actually uses —
@@ -3392,6 +3396,8 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       'get_customer_ranking',
       'get_staff_performance',
       'get_price_check',
+      'get_reorder_list',
+      'get_profit_by_item',
     ])
     if (!SAFE.has(r.tool)) return null
     const hasDigits = /[0-9٠-٩۰-۹]/.test(text)

@@ -58,6 +58,8 @@ export const AGENT_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   'get_customer_ranking',
   'get_staff_performance',
   'get_price_check',
+  'get_reorder_list',
+  'get_profit_by_item',
   // R29 (chat→world): the agent can look OUTSIDE the ledger and ADVISE
   'search_web',
   'business_advice',

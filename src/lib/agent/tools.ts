@@ -37,6 +37,8 @@ export type ReadTool =
   | 'get_customer_ranking'
   | 'get_staff_performance'
   | 'get_price_check'
+  | 'get_reorder_list'
+  | 'get_profit_by_item'
   | 'search_web'
   | 'business_advice'
 
@@ -68,6 +70,8 @@ export const READ_TOOLS: ReadonlySet<string> = new Set<string>([
   'get_customer_ranking',
   'get_staff_performance',
   'get_price_check',
+  'get_reorder_list',
+  'get_profit_by_item',
 ])
 
 /**
@@ -614,6 +618,97 @@ export async function runReadTool(
             last: arDate(v.last),
           })),
           footer: [{ label: 'إجمالي العمليات', value: fmtQty(ops.length) }],
+        },
+      ]
+    }
+
+    case 'get_reorder_list': {
+      // «أشتري إيه؟» — the question that turns a stock report into a purchase
+      // order. Quantity targets 2× the alert threshold, priced at cost.
+      const items = await db.item.findMany({ where: { businessId } })
+      const need = items
+        .filter((it) => it.lowStockThreshold > 0 && it.stockQty <= it.lowStockThreshold)
+        .map((it) => {
+          const qty = Math.max(1, it.lowStockThreshold * 2 - it.stockQty)
+          return { it, qty, cost: qty * it.costPrice }
+        })
+        .sort((a, b) => b.cost - a.cost)
+      if (need.length === 0) {
+        return [{ kind: 'kv', title: 'ورقة الطلب', rows: [{ label: 'النتيجة', value: 'مفيش صنف محتاج طلب دلوقتي — كله فوق حد التنبيه' }] }]
+      }
+      const total = need.reduce((s, r) => s + r.cost, 0)
+      return [
+        {
+          kind: 'table',
+          title: 'ورقة الطلب — اشتري إيه',
+          columns: [
+            { key: 'name', label: 'الصنف' },
+            { key: 'stock', label: 'الرصيد' },
+            { key: 'qty', label: 'اطلب' },
+            { key: 'cost', label: 'التكلفة التقديرية' },
+          ],
+          rows: need.slice(0, 12).map(({ it, qty, cost }) => ({
+            name: it.name,
+            stock: fmtQty(it.stockQty, arUnit(it.unit)),
+            qty: fmtQty(qty, arUnit(it.unit)),
+            cost: cost > 0 ? egp(cost) : '—',
+          })),
+          footer: [
+            { label: 'الإجمالي التقديري', value: egp(total) },
+            { label: 'عدد الأصناف', value: fmtQty(need.length) },
+          ],
+        },
+      ]
+    }
+
+    case 'get_profit_by_item': {
+      // Revenue per item is nice; PROFIT per item is the decision.
+      const days = Math.max(1, Math.min(365, Number(args.days ?? 30) || 30))
+      const since = days === 1 ? startOfCairoDay(0) : new Date(Date.now() - days * 86400000)
+      const [ops, items] = await Promise.all([
+        db.operation.findMany({ where: { businessId, status: 'SUCCEEDED', type: 'sale', createdAt: { gte: since } }, select: { payload: true } }),
+        db.item.findMany({ where: { businessId }, select: { name: true, costPrice: true } }),
+      ])
+      const costOf = new Map(items.map((i) => [i.name, i.costPrice]))
+      const book = new Map<string, { qty: number; revenue: number }>()
+      for (const o of ops) {
+        for (const l of linesOf(readPayload(o.payload))) {
+          const cur = book.get(l.name) ?? { qty: 0, revenue: 0 }
+          book.set(l.name, { qty: cur.qty + l.qty, revenue: cur.revenue + l.money })
+        }
+      }
+      const rows = [...book.entries()]
+        .map(([name, v]) => {
+          const cost = (costOf.get(name) ?? 0) * v.qty
+          const profit = v.revenue - cost
+          return { name, qty: v.qty, revenue: v.revenue, cost, profit, pct: v.revenue > 0 ? (profit / v.revenue) * 100 : 0 }
+        })
+        .sort((a, b) => b.profit - a.profit)
+        .slice(0, 10)
+      const period = days === 1 ? 'النهارده' : days === 7 ? 'آخر ٧ أيام' : `آخر ${fmtQty(days)} يوم`
+      if (rows.length === 0) {
+        return [{ kind: 'kv', title: `الربح من كل صنف · ${period}`, rows: [{ label: 'النتيجة', value: 'مفيش مبيعات في الفترة دي' }] }]
+      }
+      const totalProfit = rows.reduce((s, r) => s + r.profit, 0)
+      return [
+        {
+          kind: 'table',
+          title: `الربح من كل صنف · ${period}`,
+          columns: [
+            { key: 'name', label: 'الصنف' },
+            { key: 'qty', label: 'اتباع' },
+            { key: 'revenue', label: 'الإيراد' },
+            { key: 'profit', label: 'الربح' },
+            { key: 'pct', label: 'الهامش' },
+          ],
+          rows: rows.map((r) => ({
+            name: r.name,
+            qty: fmtQty(r.qty),
+            revenue: egp(r.revenue),
+            profit: egp(r.profit),
+            pct: `${fmtQty(Math.round(r.pct))}٪`,
+          })),
+          footer: [{ label: 'إجمالي ربح أعلى ١٠', value: egp(totalProfit) }],
         },
       ]
     }
