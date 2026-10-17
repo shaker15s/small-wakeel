@@ -299,21 +299,51 @@ export async function runReadTool(
 
     case 'get_daily_summary': {
       const today = startOfCairoDay(0)
-      const ops = await db.operation.findMany({
-        where: { businessId, status: 'SUCCEEDED', createdAt: { gte: today } },
-      })
+      const [ops, items] = await Promise.all([
+        db.operation.findMany({ where: { businessId, status: 'SUCCEEDED', createdAt: { gte: today } } }),
+        db.item.findMany({ where: { businessId }, select: { id: true, name: true, costPrice: true } }),
+      ])
       const sum = (type: string) =>
         ops.filter((o) => o.type === type).reduce((s, o) => s + payloadMoney(readPayload(o.payload)), 0)
+      // «كسبت كام النهارده؟» — the summary used to answer with sales only, so
+      // the owner had to do the subtraction in his head. Cost of goods sold is
+      // priced from the catalog (same rule as get_profit_by_item); memberships
+      // and collections carry no COGS.
+      const costById = new Map<string, number>(items.map((i: { id: string; costPrice: number }) => [i.id, i.costPrice] as [string, number]))
+      const costByName = new Map<string, number>(items.map((i: { name: string; costPrice: number }) => [i.name, i.costPrice] as [string, number]))
+      let cogs = 0
+      for (const op of ops) {
+        if (op.type !== 'sale') continue
+        const p = readPayload(op.payload) as {
+          qty?: number
+          itemId?: string
+          itemName?: string
+          lines?: { qty: number; name?: string; itemId?: string }[]
+        }
+        if (Array.isArray(p.lines) && p.lines.length > 0) {
+          for (const l of p.lines) {
+            const unitCost = (l.itemId ? costById.get(l.itemId) : undefined) ?? (l.name ? costByName.get(l.name) : undefined) ?? 0
+            cogs += Math.round(Number(l.qty ?? 0) * unitCost)
+          }
+        } else if (p.qty) {
+          const unitCost = (p.itemId ? costById.get(p.itemId) : undefined) ?? (p.itemName ? costByName.get(p.itemName) : undefined) ?? 0
+          cogs += Math.round(Number(p.qty) * unitCost)
+        }
+      }
+      const sales = sum('sale')
+      const expenses = sum('expense')
       return [
         {
           kind: 'kv',
           title: 'ملخص اليوم',
           rows: [
-            { label: 'مبيعات', value: egp(sum('sale')) },
+            { label: 'مبيعات', value: egp(sales) },
             { label: 'مشتريات', value: egp(sum('purchase')) },
-            { label: 'مصروفات', value: egp(sum('expense')) },
+            { label: 'مصروفات', value: egp(expenses) },
             { label: 'تحصيلات', value: egp(sum('collection')) },
             { label: 'اشتراكات', value: egp(sum('membership')) },
+            { label: 'تكلفة البضاعة المباعة', value: egp(cogs) },
+            { label: 'صافي الربح', value: egp(sales - cogs - expenses) },
             { label: 'عدد العمليات', value: fmtQty(ops.length) },
           ],
         },

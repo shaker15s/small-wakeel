@@ -147,4 +147,50 @@ describe('ledger tools — أرقام من السجل نفسه', () => {
       for (const row of card.rows) expect(haystack).toContain(row.name)
     }
   })
+
+  test('ملخص اليوم بيقول صافي الربح — مش المبيعات بس', async () => {
+    // «كسبت كام النهارده؟» لازم يرد برقم صافي (مبيعات − تكلفة البضاعة المباعة
+    // − مصروفات)، وبنحسبه هنا من نفس السجل عشان الاختبار يتأكد من الحساب
+    // مش من نص ثابت.
+    const { startOfCairoDay } = await import('../../src/app/api/_lib/dates')
+    const today = startOfCairoDay(0)
+    const ops = await db.operation.findMany({
+      where: { businessId: business.id, status: 'SUCCEEDED', createdAt: { gte: today } },
+    })
+    const items = await db.item.findMany({ where: { businessId: business.id }, select: { id: true, name: true, costPrice: true } })
+    const costById = new Map<string, number>(items.map((i: { id: string; costPrice: number }) => [i.id, i.costPrice] as [string, number]))
+    const costByName = new Map<string, number>(items.map((i: { name: string; costPrice: number }) => [i.name, i.costPrice] as [string, number]))
+    let sales = 0
+    let expenses = 0
+    let cogs = 0
+    for (const o of ops) {
+      const p = JSON.parse(o.payload) as Record<string, unknown> & {
+        qty?: number
+        itemId?: string
+        itemName?: string
+        total?: number
+        amount?: number
+        lines?: { qty: number; itemId?: string; name?: string; total?: number; unitPrice?: number }[]
+      }
+      const total = Number(p.total ?? p.amount ?? 0)
+      if (o.type === 'sale') {
+        sales += total
+        if (Array.isArray(p.lines)) {
+          for (const l of p.lines) {
+            const c = (l.itemId ? costById.get(l.itemId) : undefined) ?? (l.name ? costByName.get(l.name) : undefined) ?? 0
+            cogs += Math.round(Number(l.qty ?? 0) * c)
+          }
+        } else if (p.qty) {
+          const c = (p.itemId ? costById.get(p.itemId) : undefined) ?? (p.itemName ? costByName.get(p.itemName) : undefined) ?? 0
+          cogs += Math.round(Number(p.qty) * c)
+        }
+      }
+      if (o.type === 'expense') expenses += total
+    }
+    const [card] = (await runReadTool('get_daily_summary', business.id, {})) as KV[]
+    const profitRow = card.rows.find((r) => r.label === 'صافي الربح')
+    expect(profitRow).toBeDefined()
+    // piastres → EGP, rounded the same way the card renders it
+    expect(money(profitRow!.value)).toBe(Math.round((sales - cogs - expenses) / 100))
+  })
 })
