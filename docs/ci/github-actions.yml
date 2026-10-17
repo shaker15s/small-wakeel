@@ -51,7 +51,11 @@ jobs:
       - name: Production build
         run: bun run build
 
-      - name: Boot the built server and probe /api/health
+      - name: Boot the built server, probe /api/health, audit every screen
+        # The screen audit is the only check that catches «شاشة بايضة» and
+        # «الشبكة وقعت» — it renders each screen with live data, an empty
+        # ledger, and every query failed. It needs the server, so it lives here
+        # where the server is already up for the health probe.
         run: |
           bun .next/standalone/server.js &
           SERVER_PID=$!
@@ -60,5 +64,6 @@ jobs:
             sleep 1
           done
           cat /tmp/health.json
-          kill $SERVER_PID
           grep -q '"status"' /tmp/health.json
+          bun run screens --all-businesses
+          kill $SERVER_PID

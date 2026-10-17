@@ -107,7 +107,10 @@ export interface OverviewDTO {
     expenses: number
     collections: number
     payments: number
+    /** every op touched today (drafts included) */
     opsCount: number
+    /** ops that actually EXECUTED today — 0 means «النهاردة لسه مفيش حركة» */
+    doneCount: number
   }
   pendingOps: OperationDTO[]
   lowStock: ItemDTO[]
@@ -285,6 +288,15 @@ export interface ModelConfigDTO {
   label: string
   tier: 'air' | 'balanced' | 'deep'
   enabled: boolean
+  /** Last live probe of this model — null means «لسه مااتفحصش». */
+  health?: {
+    ok: boolean
+    supportsTools: boolean
+    supportsStreaming: boolean
+    ttftMs: number | null
+    note: string | null
+    checkedAt: string
+  } | null
 }
 
 export interface ScheduledTaskDTO {

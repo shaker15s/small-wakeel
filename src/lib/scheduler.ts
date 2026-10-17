@@ -16,6 +16,7 @@
 //   • Bounded: each sweep takes at most 10 tasks; errors never kill the timer.
 
 import { requeueStuckTasks, runDueTasks } from './tasks/runner'
+import { expireStaleDrafts } from './domain/hygiene'
 
 const DEFAULT_INTERVAL_MS = 60_000
 
@@ -58,6 +59,10 @@ async function sweep(): Promise<void> {
   const s = state()
   try {
     await requeueStuckTasks()
+    // Retire drafts nobody approved (default: older than 72h). Cheap and
+    // idempotent; a human decision already in flight wins the atomic update.
+    const hygiene = await expireStaleDrafts()
+    if (hygiene.expired > 0) console.log(`[scheduler] expired ${hygiene.expired} stale draft(s)`)
     const summary = await runDueTasks(10)
     s.runs += 1
     s.tasksRun += summary.ran

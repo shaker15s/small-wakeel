@@ -17,13 +17,42 @@ interface RemoteModel {
 
 export async function GET() {
   try {
-    const providers = await db.modelProvider.findMany({ include: { models: { orderBy: { label: 'asc' } } }, orderBy: { createdAt: 'asc' } })
+    const providers = await db.modelProvider.findMany({
+      include: {
+        models: {
+          orderBy: { label: 'asc' },
+          // The picker must be able to say «آخر فحص فشل» instead of pretending
+          // every configured model works (the owner's complaint about الموديلات).
+          include: { capabilities: true },
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+    })
     return NextResponse.json({
       providers: providers.map((p) => ({
         id: p.id,
         name: p.name,
         baseUrl: p.baseUrl,
-        models: p.models.map((m) => ({ id: m.id, remoteId: m.remoteId, label: m.label, tier: m.tier, enabled: m.enabled })),
+        models: p.models.map((m) => {
+          const cap = m.capabilities
+          return {
+            id: m.id,
+            remoteId: m.remoteId,
+            label: m.label,
+            tier: m.tier,
+            enabled: m.enabled,
+            health: cap
+              ? {
+                  ok: cap.ok,
+                  supportsTools: cap.supportsTools,
+                  supportsStreaming: cap.supportsStreaming,
+                  ttftMs: cap.ttftMs,
+                  note: cap.note,
+                  checkedAt: cap.probedAt.toISOString(),
+                }
+              : null,
+          }
+        }),
       })),
     })
   } catch (e) {

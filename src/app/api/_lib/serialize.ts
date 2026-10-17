@@ -185,9 +185,37 @@ export function userNameMap(users: { id: string; name: string }[]): Map<string, 
   return new Map(users.map((u) => [u.id, u.name]))
 }
 
-/** Read the integer-piastres `total` out of an Operation payload JSON string. */
+/**
+ * Read the integer-piastres amount out of an Operation payload JSON string.
+ *
+ * Payload shapes are not uniform — and that is fine as long as one helper knows
+ * all of them: chat drafts write `total`, seeded/legacy rows write `amount`
+ * (collection, payment, expense) or `paid`, and a basket may carry only `lines`
+ * with unit prices. Reading just `total` is why the reports screen showed
+ * «التحصيلات ٠» while ١٢٠٠ ج were actually collected (found by the screens audit).
+ */
 export function payloadTotalPiastres(payload: string | null | undefined): number {
   const p = parseJson<Record<string, unknown>>(payload, {})
-  const total = p.total
-  return typeof total === 'number' && Number.isFinite(total) ? Math.round(total) : 0
+  const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : 0)
+  // 1) an explicit money field, in priority order (total = what the deal was worth)
+  for (const key of ['total', 'amount', 'value', 'paid', 'price'] as const) {
+    const n = num(p[key])
+    if (n > 0) return n
+  }
+  // 2) a basket that only has per-line prices
+  const lines = Array.isArray(p.lines) ? p.lines : Array.isArray(p.items) ? p.items : []
+  let sum = 0
+  for (const raw of lines) {
+    if (typeof raw !== 'object' || raw === null) continue
+    const line = raw as Record<string, unknown>
+    const lineTotal = num(line.total)
+    if (lineTotal > 0) {
+      sum += lineTotal
+      continue
+    }
+    const qty = num(line.qty ?? line.quantity) || 1
+    const unit = num(line.unitPrice ?? line.price)
+    if (unit > 0) sum += unit * qty
+  }
+  return sum
 }

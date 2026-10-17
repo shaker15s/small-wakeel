@@ -119,6 +119,10 @@ export async function GET(req: Request) {
       if (bucket) {
         const total = payloadTotalPiastres(op.payload)
         switch (op.type) {
+          // A gym sells MEMBERSHIPS, not «sales». Leaving membership out of the
+          // revenue bucket made the gym's stats screen read «المبيعات ٠» after
+          // four renewals (found by the screens audit).
+          case 'membership':
           case 'sale':
             bucket.sales += total
             break

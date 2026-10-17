@@ -27,6 +27,11 @@ bun run db:generate >/dev/null
 step "Schema drift (db:sync --check)"
 bun run db:sync --check
 
+step "Date storage (db:normalize-dates --check)"
+# Mixed INTEGER/TEXT DateTime storage silently zeroes date filters — the stats
+# screens read all-zero for a month that was fully recorded. Fail loudly here.
+bun run db:normalize-dates -- --check
+
 step "Typecheck"
 bun run typecheck
 
@@ -38,6 +43,20 @@ bun test
 
 step "Golden Arabic evals"
 bun run evals
+
+step "Screens (real · first-day · network-failure)"
+# «شاشة بايضة» and «الشبكة وقعت» are both failure modes an owner sees before
+# any test does. The audit server-renders all 8 screens three ways: live data,
+# empty ledger, and every query in `error` state (must show the retry card).
+# It needs a running server; skip cleanly when there is none, never silently
+# pretend it passed.
+if [ "${WAKIL_SCREENS:-auto}" = "0" ]; then
+  echo "⤼ اتخطّت (WAKIL_SCREENS=0)"
+elif curl -sf -o /dev/null --max-time 3 "${WAKIL_URL:-http://localhost:3000}/api/bootstrap"; then
+  bun run screens --all-businesses
+else
+  echo "⤼ مفيش سيرفر على ${WAKIL_URL:-http://localhost:3000} — شغّل «bun run dev» الأول، أو WAKIL_SCREENS=0 للتخطي"
+fi
 
 if [ "$FAST" -eq 0 ]; then
   step "Production build"

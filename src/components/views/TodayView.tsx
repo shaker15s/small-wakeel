@@ -27,7 +27,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { api } from '@/lib/api'
-import { arDate, egp, qty as fmtQty } from '@/lib/format'
+import { arAgo, arDate, egp, isTodayCairo, qty as fmtQty } from '@/lib/format'
 import { arUnit } from '@/lib/verticals'
 import { QUERY_KEYS } from '@/lib/store'
 import type { ViewKey } from '@/lib/store'
@@ -150,7 +150,14 @@ export default function TodayView({ businessId, userId, onNavigate }: ViewProps)
             tone={data.cash.net >= 0 ? 'teal' : 'red'}
             title={`افتتاحي ${egp(data.cash.opening)} — داخل ${egp(data.cash.in)} — خارج ${egp(data.cash.out)}`}
           />
-          <KpiCard index={1} label="مبيعات اليوم" value={egp(data.today.sales)} icon={ShoppingCart} tone="navy" />
+          <KpiCard
+            index={1}
+            label="مبيعات اليوم"
+            value={egp(data.today.sales)}
+            icon={ShoppingCart}
+            tone="navy"
+            title={data.today.sales === 0 && data.recentOps[0] ? `آخر حركة: ${arAgo(data.recentOps[0].createdAt)}` : undefined}
+          />
           <KpiCard
             index={2}
             label="عمليات اليوم"
@@ -166,6 +173,24 @@ export default function TodayView({ businessId, userId, onNavigate }: ViewProps)
             tone={pendingOps.length > 0 ? 'amber' : 'muted'}
           />
         </div>
+      )}
+
+      {/* «الشاشة باينة فاضية» — the day has not started yet. Say so, and show
+          when the last real movement was, instead of four zeros with no story.
+          R30: the old copy could contradict itself («مفيش حركة — آخر حركة
+          كانت النهاردة ٧:٣٣ ص») because `recentOps` counts cancelled QA drafts
+          too. Now the sentence matches the facts it was built from. */}
+      {data && data.today.doneCount === 0 && (pendingOps.length > 0 || data.recentOps[0]) && (
+        <p className="flex items-center gap-1.5 text-xs text-muted-foreground" role="status">
+          <Clock className="size-3.5 shrink-0 text-wakil-amber" aria-hidden />
+          {pendingOps.length > 0 ? (
+            <>النهاردة لسه مفيش عمليات مكتملة — عندك {arNum(pendingOps.length)} مسودة مستنية قرارك.</>
+          ) : data.recentOps[0] && isTodayCairo(data.recentOps[0].createdAt) ? (
+            <>النهاردة لسه مفيش عمليات مكتملة — آخر محاولة كانت {arAgo(data.recentOps[0].createdAt)}.</>
+          ) : (
+            <>النهاردة لسه مفيش حركة — آخر حركة كانت {arAgo(data.recentOps[0]?.createdAt ?? '')}.</>
+          )}
+        </p>
       )}
 
       {/* رادار الأمانة — صاحب المنشأة بس (سوبر باور) */}

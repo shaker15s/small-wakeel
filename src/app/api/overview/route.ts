@@ -12,7 +12,8 @@ import { payloadTotalPiastres, serializeCustomer, serializeItem, serializeOp, se
 
 export const dynamic = 'force-dynamic'
 
-const MONEY_TYPES = ['sale', 'purchase', 'expense', 'collection', 'payment']
+// membership = a gym's revenue; leaving it out made «مبيعات النهاردة» read ٠
+const MONEY_TYPES = ['sale', 'membership', 'purchase', 'expense', 'collection', 'payment']
 const EXPIRING_WINDOW_DAYS = 30
 
 const arNum = (n: number) => new Intl.NumberFormat('ar-EG').format(n)
@@ -36,6 +37,7 @@ export async function GET(req: Request) {
       cashGrouped,
       todayMoneyOps,
       todayOpsCount,
+      todayDoneCount,
       pendingCount,
       pendingOps,
       items,
@@ -55,6 +57,7 @@ export async function GET(req: Request) {
         select: { type: true, payload: true },
       }),
       db.operation.count({ where: { businessId, createdAt: { gte: startOfToday } } }),
+      db.operation.count({ where: { businessId, createdAt: { gte: startOfToday }, status: 'SUCCEEDED' } }),
       db.operation.count({ where: { businessId, status: 'AWAITING_APPROVAL' } }),
       db.operation.findMany({
         where: { businessId, status: 'AWAITING_APPROVAL' },
@@ -81,10 +84,19 @@ export async function GET(req: Request) {
     }
 
     // — Today's money sums from SUCCEEDED ops (payload.total, piastres)
-    const today = { sales: 0, purchases: 0, expenses: 0, collections: 0, payments: 0, opsCount: todayOpsCount }
+    const today = {
+      sales: 0,
+      purchases: 0,
+      expenses: 0,
+      collections: 0,
+      payments: 0,
+      opsCount: todayOpsCount,
+      doneCount: todayDoneCount,
+    }
     for (const op of todayMoneyOps) {
       const total = payloadTotalPiastres(op.payload)
       switch (op.type) {
+        case 'membership':
         case 'sale':
           today.sales += total
           break

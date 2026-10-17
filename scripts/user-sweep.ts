@@ -97,6 +97,8 @@ interface CardBrief {
   kind: string
   title: string
   ref?: string
+  /** draft operations created by this run — rejected at the end (demo hygiene) */
+  opId?: string
   /** every label/value/row serialized — the grounding judge needs the BODY */
   body: string
 }
@@ -165,7 +167,13 @@ function briefOf(c: Record<string, unknown>, kind: string): CardBrief {
   ]
     .join(' ')
     .slice(0, 1200)
-  return { kind, title: String(c.title ?? ''), ref: typeof c.ref === 'string' ? c.ref : undefined, body }
+  return {
+    kind,
+    title: String(c.title ?? ''),
+    ref: typeof c.ref === 'string' ? c.ref : undefined,
+    opId: typeof c.opId === 'string' ? c.opId : undefined,
+    body,
+  }
 }
 
 async function runTurn(businessId: string, userId: string, s: Scenario, conversationId: string | null): Promise<{ r: TurnResult; conversationId: string | null }> {
@@ -313,6 +321,35 @@ for (const s of DAY) {
   console.log(`   💬 ${r.reply.slice(0, 170) || '—'}`)
   if (!r.ok) for (const p of r.problems) console.log(`   ⛔ ${p}`)
   console.log()
+}
+
+// ---- «سيب الديمو نضيف»: every draft this run created is rejected at the end,
+// otherwise a 41-turn sweep leaves ~35 AWAITING_APPROVAL rows and the owner's
+// «مستنيات اعتماد» card grows for no reason. Approval behaviour itself is
+// covered by `bun run accept`, which approves on purpose.
+const draftOps = results.flatMap((r) => {
+  const b = byType.get(r.scenario.business)
+  const user = b?.users.find((u) => u.role === (r.scenario.as ?? 'owner')) ?? b?.users[0]
+  return r.cards
+    .map((c) => c.opId)
+    .filter((x): x is string => !!x)
+    .map((opId) => ({ opId, userId: user?.id }))
+})
+if (draftOps.length > 0 && process.env.WAKIL_SWEEP_CLEAN !== '0') {
+  let cleaned = 0
+  for (const { opId, userId } of draftOps) {
+    try {
+      const res = await fetch(`${BASE}/api/operations/${opId}/confirm`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'reject', userId, reason: 'مسودة تجربة (sweep)' }),
+      })
+      if (res.ok) cleaned++
+    } catch {
+      /* cleanup is best-effort — never fails the gate */
+    }
+  }
+  console.log(`🧹 اتنضف ${ar(cleaned)}/${ar(draftOps.length)} مسودة تجربة من السجل\n`)
 }
 
 const failed = results.filter((r) => !r.ok)
