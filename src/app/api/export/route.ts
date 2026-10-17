@@ -3,6 +3,7 @@
 import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { badRequest, notFound, searchParams, serverError } from '../_lib/http'
+import { guard } from '../_lib/guard'
 import { parseJson, serializeCustomer, serializeItem, serializeOp, serializeSupplier, userNameMap } from '../_lib/serialize'
 
 export const dynamic = 'force-dynamic'
@@ -12,6 +13,8 @@ export async function GET(req: Request) {
     const sp = searchParams(req)
     const businessId = sp.get('businessId')
     if (!businessId) return badRequest('businessId مطلوب')
+    const gate = await guard(req, { businessId, scope: 'business' })
+    if (!gate.ok) return gate.res
 
     const [business, items, customers, suppliers, operations, cashEntries, auditEvents, users] =
       await Promise.all([

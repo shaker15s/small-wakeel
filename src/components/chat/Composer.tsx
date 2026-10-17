@@ -369,16 +369,32 @@ function ModelPicker({
               <p className="mt-1.5 border-t border-border/60 px-2.5 pb-1 pt-2 text-[11px] font-semibold text-muted-foreground">
                 مزوّدين خارجيين
               </p>
-              {enabledExternal.map((m) => (
-                <ModelRow
-                  key={m.id}
-                  icon={TIER_ICONS[m.tier] ?? Brain}
-                  label={m.label}
-                  sub={`${TIER_AR[m.tier] ?? m.tier} · ${m.providerName}`}
-                  active={modelKey === `ext:${m.id}`}
-                  onSelect={() => select(`ext:${m.id}`, `${m.label} — ${m.providerName}`)}
-                />
-              ))}
+              {enabledExternal.map((m) => {
+                // «الموديلات» honesty: a model that failed its last live probe,
+                // or cannot call tools (the agent needs tool calling for every
+                // write), must SAY so in the picker — not look identical to a
+                // healthy one and then fail on the first message.
+                const h = m.health
+                const warn = !h
+                  ? null
+                  : !h.ok
+                    ? `آخر فحص فشل${h.note ? ` — ${h.note.slice(0, 40)}` : ''}`
+                    : !h.supportsTools
+                      ? 'مش بيدعم الأدوات — مش هيعرف يسجّل عمليات'
+                      : null
+                return (
+                  <ModelRow
+                    key={m.id}
+                    icon={TIER_ICONS[m.tier] ?? Brain}
+                    label={m.label}
+                    sub={`${TIER_AR[m.tier] ?? m.tier} · ${m.providerName}`}
+                    warn={warn}
+                    healthy={h ? h.ok && h.supportsTools : undefined}
+                    active={modelKey === `ext:${m.id}`}
+                    onSelect={() => select(`ext:${m.id}`, `${m.label} — ${m.providerName}`)}
+                  />
+                )
+              })}
             </>
           )}
 
@@ -395,12 +411,18 @@ function ModelRow({
   icon: Icon,
   label,
   sub,
+  warn,
+  healthy,
   active,
   onSelect,
 }: {
   icon: LucideIcon
   label: string
   sub: string
+  /** shown in amber under the sub-line (probe failure / no tool support) */
+  warn?: string | null
+  /** green/red status dot — undefined means «لسه مااتفحصش» */
+  healthy?: boolean
   active: boolean
   onSelect: () => void
 }) {
@@ -419,8 +441,17 @@ function ModelRow({
         <Icon className="size-3.5 text-wakil-amber" aria-hidden="true" />
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-xs font-semibold">{label}</span>
+        <span className="flex items-center gap-1.5">
+          <span className="truncate text-xs font-semibold">{label}</span>
+          {healthy != null && (
+            <span
+              className={cn('size-1.5 shrink-0 rounded-full', healthy ? 'bg-emerald-500' : 'bg-red-500')}
+              aria-label={healthy ? 'الموديل شغّال' : 'الموديل مش شغّال'}
+            />
+          )}
+        </span>
         <span className="block truncate text-[10px] text-muted-foreground">{sub}</span>
+        {warn && <span className="mt-0.5 block truncate text-[10px] font-medium text-wakil-amber">{warn}</span>}
       </span>
       <AnimatePresence>
         {active && (

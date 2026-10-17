@@ -5,6 +5,8 @@
 import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { badRequest, serverError } from '../_lib/http'
+import { guard } from '../_lib/guard'
+import { parseBody, providerCreateSchema } from '@/lib/security/validate'
 
 export const dynamic = 'force-dynamic'
 
@@ -15,13 +17,42 @@ interface RemoteModel {
 
 export async function GET() {
   try {
-    const providers = await db.modelProvider.findMany({ include: { models: { orderBy: { label: 'asc' } } }, orderBy: { createdAt: 'asc' } })
+    const providers = await db.modelProvider.findMany({
+      include: {
+        models: {
+          orderBy: { label: 'asc' },
+          // The picker must be able to say «آخر فحص فشل» instead of pretending
+          // every configured model works (the owner's complaint about الموديلات).
+          include: { capabilities: true },
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+    })
     return NextResponse.json({
       providers: providers.map((p) => ({
         id: p.id,
         name: p.name,
         baseUrl: p.baseUrl,
-        models: p.models.map((m) => ({ id: m.id, remoteId: m.remoteId, label: m.label, tier: m.tier, enabled: m.enabled })),
+        models: p.models.map((m) => {
+          const cap = m.capabilities
+          return {
+            id: m.id,
+            remoteId: m.remoteId,
+            label: m.label,
+            tier: m.tier,
+            enabled: m.enabled,
+            health: cap
+              ? {
+                  ok: cap.ok,
+                  supportsTools: cap.supportsTools,
+                  supportsStreaming: cap.supportsStreaming,
+                  ttftMs: cap.ttftMs,
+                  note: cap.note,
+                  checkedAt: cap.probedAt.toISOString(),
+                }
+              : null,
+          }
+        }),
       })),
     })
   } catch (e) {
@@ -31,7 +62,11 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
-    const body = (await req.json()) as { name?: string; baseUrl?: string; apiKey?: string }
+    const gate = await guard(req, { scope: 'open' })
+    if (!gate.ok) return gate.res
+    const parsed = await parseBody(req, providerCreateSchema)
+    if (!parsed.ok) return badRequest(parsed.message)
+    const body = parsed.data
     if (!body.name?.trim()) return badRequest('اسم المزوّد مطلوب')
     if (!body.baseUrl?.trim()) return badRequest('رابط الـ Base URL مطلوب')
     if (!body.apiKey?.trim()) return badRequest('مفتاح الـ API مطلوب')

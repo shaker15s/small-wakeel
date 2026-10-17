@@ -1,0 +1,8 @@
+# وكيل — Bun configuration.
+#
+# Tests run against a throwaway copy of db/custom.db, wired up before any test
+# module loads (tests/helpers/preload.ts). Without the preload, one module-scope
+# import of the Prisma singleton was enough to bind the whole suite to the REAL
+# database and write test drafts into the demo data.
+[test]
+preload = ["./tests/helpers/preload.ts"]

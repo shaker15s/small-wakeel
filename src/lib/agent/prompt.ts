@@ -67,7 +67,20 @@ function readToolsFor(businessType: string): string[] {
     ...(gym ? ['get_member_status'] : []),
     'get_supplier_balance',
     'get_transaction_status',
-    ...(pharmacy ? ['list_expiring'] : []),
+    // R28 superpowers — the money questions, not the log questions
+    'get_profit_margin',
+    'forecast_stockout',
+    'get_customer_history',
+    'compare_periods',
+    'expense_breakdown',
+    // R29: the world outside the ledger + a real advisor over the ledger
+    'search_web',
+    'business_advice',
+    'run_plan',
+    'deep_dive',
+    // «قرب ينتهي» = a batch at a shop AND a membership at a gym — the tool
+    // itself is vertical-aware now, so both verticals may call it.
+    ...(pharmacy || gym ? ['list_expiring'] : []),
     'list_low_stock',
     'list_payables',
     'list_receivables',
@@ -79,8 +92,8 @@ function readToolsFor(businessType: string): string[] {
 function writeToolsFor(businessType: string): string[] {
   const gym = businessType === 'gym'
   const tools = gym
-    ? ['create_member', 'renew_membership', 'record_attendance', 'record_collection', 'record_expense']
-    : ['adjust_stock', 'draft_purchase', 'draft_sale', 'record_collection', 'record_expense', 'record_payment']
+    ? ['record_attendance', 'record_collection', 'record_expense', 'register_customer', 'register_member']
+    : ['adjust_stock', 'record_collection', 'record_expense', 'record_payment', 'record_purchase', 'record_sale', 'register_customer', 'set_price']
   return tools.sort()
 }
 
@@ -161,7 +174,7 @@ ${isGym ? '' : 'حساسة (R3): adjust_stock · reverse_operation'}${params.use
 {
   "intent": "write" | "read" | "chat",
   "tool": "اسم الأداة لو read أو write (اختياري لو chat)",
-  "opType": "sale|purchase|expense|collection|payment|stock_adjustment|membership|attendance|reversal — للكتابة",
+  "opType": "sale|purchase|expense|collection|payment|stock_adjustment|membership|attendance|price_change|reversal — للكتابة",
   "fields": {
     "itemName": "اسم الصنف زي ما المستخدم قاله (لو فيه)",
     "qty": 10,
@@ -174,6 +187,7 @@ ${isGym ? '' : 'حساسة (R3): adjust_stock · reverse_operation'}${params.use
     "plan": "اسم الخطة (للجيم)",
     "months": 1,
     "reason": "السبب (للتسوية/العكس)",
+    "price": 0,
     "ref": "رقم العملية (للعكس/الاستعلام)"
   },
   "question": "لو ناقص حاجة أساسية: سؤال واحد قصير يطلبها",
@@ -284,14 +298,35 @@ export function buildAgentSystemPrompt(params: {
 - search_catalog({query}) → بحث في الكتالوج (رصيد/سعر/وحدة)
 - get_item_stock({name}) → رصيد وسعر صنف بالاسم
 - list_low_stock() → الأصناف الناقصة
-${isPharmacy ? '- list_expiring() → اللي صلاحيته قربت تخلص (٣٠ يوم)\n' : ''}العملاء والأعضاء:
+- list_expiring({days?}) → اللي قرب ينتهي: صلاحية بضاعة في الصيدلية/السوبرماركت، أو عضويات في الجيم (٣٠ يوم)
+العملاء والأعضاء:
 - get_supplier_balance({name}) → رصيد مورد بالاسم
-${isGym ? '- get_member_status({name}) → حالة عضو (الخطة/الانتهاء/المديونية)\n' : ''}العمليات المالية (بيع/شرا/تحصيل/سداد/مصروف — كل واحدة بتعمل «مسودة» مستنية اعتماد صاحب الشغل، مبتتنفذش لوحدها):
+${isGym ? '- get_member_status({name}) → حالة عضو (الخطة/الانتهاء/المديونية)\n' : ''}## سوبر باورز — أسئلة الفلوس والمستقبل (مش أسئلة السجل)
+- get_profit_margin({days?}) → الصنف كسبان كام فعلًا: الإيراد، الربح، هامش النسبة، وأقل الأصناف ربحية. استخدمها لأي سؤال «بربح كام؟ / إيه اللي مش مربح؟»
+- forecast_stockout({days?}) → معدل البيع اليومي ونفضّل نقول «الصنف ده هيخلص خلال X يوم، اطلب Y» قبل ما تحصل. استخدمها لـ«إيه اللي هينقص؟» أو لما النواقص تكون واضحة
+- get_customer_history({name}) → ملف عميل كامل: المديونية، آخر تحصيل، متوسط التحصيل، «بيسدد كل قد إيه»
+- compare_periods({days?}) → آخر X يوم مقابل الـX اللي قبلهم بحكم صريح (طلعت ولا نزلت)
+- expense_breakdown({days?}) → المصروفات مجمّعة بالبنود ونسبتها
+- get_period_totals({metric, query?, days?}) → «بعت كام لبن الشهر ده؟» و«حصلت كام من أم حسن؟» و«اشتريت كام الشهر ده؟»: الإجمالي والكمية وعدد العمليات في الفترة. metric = sales|collections|purchases|expenses. استخدمها لأي سؤال فيه «كام» + فترة/صنف — الإجابة رقم واحد مش قايمة حركات
+- get_stock_value() → «المخزون ده مكلّفني كام؟»: قيمة المخزون بالتكلفة وبسعر البيع والربح المتوقع وعدد النواقص
+- get_top_items({days?}) → «إيه أكتر حاجة بتتباع؟»: أعلى ١٠ أصناف بالإيراد والكمية خلال الفترة (افتراضي ٣٠ يوم)
+- get_dead_stock({days?}) → «إيه اللي مش بيتحرك عندي؟»: أصناف عندها رصيد وما اتباعتش في الفترة + رأس المال المحبوس
+- get_customer_ranking() → «مين أفضل عميل؟» / «مين بيشتري أكتر؟»: ترتيب العملاء بالشرا والتحصيل والمديونية آخر ٩٠ يوم
+- get_staff_performance() → «مين شغله أحسن؟» / «أداء الفريق»: عمليات ومبيعات كل موظف آخر ٣٠ يوم
+- get_price_check() → «إيه اللي بتبيعه بخسارة؟»: أصناف هامشها أقل من ١٥٪ أو أقل من التكلفة
+- get_reorder_list() → «أشتري إيه؟» / «ورقة الطلب»: الأصناف اللي تحت حد التنبيه مع الكمية المطلوبة والتكلفة التقديرية
+- get_profit_by_item({days?}) → «بربح من إيه؟»: ربح كل صنف (إيراد − تكلفة) خلال الفترة مرتّب بالأعلى
+- run_plan({plan: [{tool, args}, …]}) → خطوة واحدة تنفّذ كل استعلامات القراءة مع بعض (وفر جولات). استخدمها لما الطلب محتاج ٣ قراءات منفصلة أو أكتر
+- search_web({query}) → بحث في الويب (النت/الإنترنت) — استخدمها لما الطلب يكون عن حاجة برّا سجلك: أسعار السوق، أخبار، مواصفات، أي معلومة حديثة. النتايج بترجع بمصادرها، ومتقولش أي حاجة من دماغك من غيرها.
+- business_advice({days?}) → قراءة شغلك بالأرقام وتوصيات مرتّبة بالأولوية (استخدمها لأي «انصحني/حلل شغلي/إزاي أقلل/إزاي أطوّر»)
+- deep_dive({question}) → تحقيق عميق معزول: يجمع من سجلك ويكتب لك خلاصة مركّزة مع الأسباب (للأسئلة اللي محتاجة تفكير وتحليل مش مجرد رقم)\nالعمليات المالية (بيع/شرا/تحصيل/سداد/مصروف — كل واحدة بتعمل «مسودة» مستنية اعتماد صاحب الشغل، مبتتنفذش لوحدها):
 - record_sale({item, qty, unit?, customerName?, paid?, price?}) → بيع صنف. paid = المدفوع كاش دلوقتي بالجنيه (سيب الباقي آجل لو مدفعش كله). price = إجمالي البيع بالجنيه بس لو ${user.name} نفسه قال سعر مختلف عن الكتالوج (زي «بعت بـ٩٠») — ساعتها بس استخدمه. للبيع بأكتر من صنف: نادي الأداة مرة لكل صنف. للبيع بمبلغ مفتوح في العطارة («بـ٢٠ جنيه فلفل») سيب الـ qty فاضية واكتب المبلغ في paid.
 - record_purchase({item, qty, unit?, supplierName?, paid?}) → شرا بضاعة
 - record_collection({customerName, amount}) → تحصيل من عميل (الجنيه)
 - record_payment({supplierName, amount}) → سداد لمورد (الجنيه)
 - record_expense({reason, amount}) → مصروف من الخزنة (الجنيه)
+- register_customer({name, phone?, balance?, since?}) → عميل جديد في السجل (balance = المديونية الافتتاحية بالجنيه لو هو قالها، وسيبها فاضية لو مش عارف · since = تاريخ بداية المديونية لو قال «من أيام/من تاريخ …» بالشكل YYYY-MM-DD). لو الاسم موجود بالفعل هتفشل بأمان ومش هتلمس رصيده.
+- register_supplier({name, phone?, balance?}) → مورد جديد في السجل
 ${isGym ? "- register_member({name, plan?, months?}) → اشتراك/تجديد عضوية (السعر من خطة الجيم المسجلة)\n- record_attendance({name}) → حضور عضو النهاردة\n" : ''}الذاكرة (بتتعلم منها):
 - memory_save({text}) → احفظ حاجة دايمة عن ${user.name} أو قانون للمحل — ومواعيد الوعود برضو: لو عميل قال «هيدفع الباقي يوم الجمعة» سجلها هنا زي ما قالت بالظبط.
 - memory_forget({query}) → امسح حاجة من الذاكرة

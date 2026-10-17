@@ -14,6 +14,8 @@ import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import type { ActionCardDTO, CardOutcomeDTO, ChatActionDTO, MessageDTO } from '@/lib/types'
 import { badRequest, notFound, searchParams, serverError } from '../_lib/http'
+import { parseBody, chatPostSchema } from '@/lib/security/validate'
+import { guard } from '../_lib/guard'
 import { parseJson, serializeMessage } from '../_lib/serialize'
 import { runAgentTurn } from '@/lib/agent/harness'
 import { maybeReflect } from '@/lib/agent/reflection'
@@ -32,18 +34,13 @@ function autoTitle(text: string): string {
 export async function GET(req: Request) {
   try {
     const sp = searchParams(req)
-    const businessId = sp.get('businessId')
-    if (!businessId) return badRequest('businessId مطلوب')
-    const userId = sp.get('userId')
-    if (!userId) return badRequest('userId مطلوب')
+    // guard() loads & validates the tenant pair once — reuse it below instead
+    // of hitting the database again for the same two rows.
+    const gate = await guard(req, { businessId: sp.get('businessId'), userId: sp.get('userId') })
+    if (!gate.ok) return gate.res
+    const businessId = gate.actor.business.id
+    const userId = gate.actor.user.id
     const conversationId = sp.get('conversationId')
-
-    const [business, user] = await Promise.all([
-      db.business.findUnique({ where: { id: businessId }, select: { id: true } }),
-      db.user.findUnique({ where: { id: userId }, select: { id: true } }),
-    ])
-    if (!business) return notFound('النشاط التجاري غير موجود')
-    if (!user) return notFound('المستخدم غير موجود')
 
     let conversation = conversationId
       ? // explicit id MUST belong to the same business AND user — conversations
@@ -117,26 +114,19 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    const body = (await req.json()) as {
-      businessId?: string
-      userId?: string
-      text?: string
-      modelKey?: string | null
-      conversationId?: string | null
-      suggestionId?: string | null
-      /** R15: «بحث عميق» toggle from the composer (Compass) */
-      deepResearch?: boolean
-    }
-    if (!body.businessId) return badRequest('businessId مطلوب')
-    if (!body.userId) return badRequest('userId مطلوب')
-    if (!body.text?.trim()) return badRequest('الرسالة فاضية')
+    const parsed = await parseBody(req, chatPostSchema)
+    if (!parsed.ok) return badRequest(parsed.message)
+    const body = parsed.data
 
-    const [business, user] = await Promise.all([
-      db.business.findUnique({ where: { id: body.businessId } }),
-      db.user.findUnique({ where: { id: body.userId } }),
-    ])
-    if (!business) return notFound('النشاط التجاري غير موجود')
-    if (!user) return notFound('المستخدم غير موجود')
+    // Access token + CSRF + rate limit (class 'chat': agent turns are the
+    // expensive path) + tenant isolation, in ONE call.
+    const gate = await guard(req, {
+      businessId: body.businessId,
+      userId: body.userId,
+      class: 'chat',
+    })
+    if (!gate.ok) return gate.res
+    const { business, user } = gate.actor
 
     // Conversation: explicit, else latest for that user, else new
     // (an explicit id that belongs to another business/user is rejected —
@@ -153,17 +143,46 @@ export async function POST(req: Request) {
       })
     }
 
-    // Persist user message immediately
-    const userMsg = await db.message.create({
-      data: { conversationId: conversation.id, role: 'user', text: body.text.trim() },
-    })
-    // Auto-title on the FIRST user message of an untitled conversation
-    const titleUpdate =
-      conversation.title === 'محادثة جديدة' ? { title: autoTitle(body.text) } : {}
-    await db.conversation.update({
-      where: { id: conversation.id },
-      data: { updatedAt: new Date(), lastMessageAt: new Date(), ...titleUpdate },
-    })
+    // R34 — «جرّب تاني» بعد ما النت يقطع.
+    // The composer sends a stable `turnId`. A retry therefore (a) reuses the
+    // user message instead of writing a second one, and (b) if the first
+    // attempt actually finished server-side (the stream died on the way back),
+    // replays that reply instead of running the turn — and its drafts — twice.
+    const turnId = body.turnId ?? null
+    const priorUser = turnId
+      ? await db.message.findFirst({ where: { conversationId: conversation.id, role: 'user', clientTurnId: turnId } })
+      : null
+    const userMsg =
+      priorUser ??
+      (await db.message.create({
+        data: { conversationId: conversation.id, role: 'user', text: body.text, ...(turnId ? { clientTurnId: turnId } : {}) },
+      }))
+    if (!priorUser) {
+      // Auto-title on the FIRST user message of an untitled conversation
+      const titleUpdate =
+        conversation.title === 'محادثة جديدة' ? { title: autoTitle(body.text) } : {}
+      await db.conversation.update({
+        where: { id: conversation.id },
+        data: { updatedAt: new Date(), lastMessageAt: new Date(), ...titleUpdate },
+      })
+    }
+    // Did this exact turn already finish server-side? The assistant row is the
+    // one created right after this user message (only user rows carry the id,
+    // so the unique key stays one-per-turn).
+    let finishedTurn: Awaited<ReturnType<typeof db.message.findFirst>> = null
+    if (turnId && priorUser) {
+      const candidate = await db.message.findFirst({
+        where: { conversationId: conversation.id, role: 'assistant', createdAt: { gt: priorUser.createdAt } },
+        orderBy: { createdAt: 'asc' },
+      })
+      const nextUser = candidate
+        ? await db.message.findFirst({
+            where: { conversationId: conversation.id, role: 'user', createdAt: { gt: priorUser.createdAt, lt: candidate.createdAt } },
+            select: { id: true },
+          })
+        : null
+      finishedTurn = candidate && !nextUser ? candidate : null
+    }
 
     // A suggestion chip was actually used → track it (feeds ranking freshness)
     if (body.suggestionId) {
@@ -183,7 +202,7 @@ export async function POST(req: Request) {
     // the PREVIOUS assistant reply extracts a lesson into agent memory.
     // Fire-and-forget by contract — it never throws, never blocks the turn.
     const lastAssistant = [...history].reverse().find((m) => m.role === 'assistant')
-    void maybeReflect(business.id, user.id, body.text.trim(), lastAssistant?.text ?? null)
+    void maybeReflect(business.id, user.id, body.text, lastAssistant?.text ?? null)
 
     const encoder = new TextEncoder()
     const stream = new ReadableStream({
@@ -193,21 +212,49 @@ export async function POST(req: Request) {
         }
         try {
           send({ event: 'start', conversationId: conversation!.id, messageId: userMsg.id })
+          if (finishedTurn) {
+            // The work is already done — do not charge the owner a second turn,
+            // do not duplicate the draft. Just deliver the same reply.
+            const json = (v: string | null) => (v ? (JSON.parse(v) as unknown) : undefined)
+            send({ event: 'delta', text: finishedTurn.text })
+            const c0 = json(finishedTurn.card)
+            if (c0) send({ event: 'card', card: c0 })
+            const cs0 = json(finishedTurn.cards)
+            if (cs0) send({ event: 'cards', cards: cs0 })
+            const a0 = json(finishedTurn.actions)
+            if (a0) send({ event: 'actions', actions: a0 })
+            const v0 = json(finishedTurn.verified)
+            const r0 = json(finishedTurn.research)
+            send({
+              event: 'done',
+              messageId: finishedTurn.id,
+              modelLabel: finishedTurn.modelLabel ?? undefined,
+              replayed: true,
+              ...(v0 ? { verified: v0 } : {}),
+              ...(r0 ? { research: r0 } : {}),
+            })
+            return
+          }
           const result = await runAgentTurn(
             {
               business: business!,
               user: user!,
               conversationId: conversation!.id,
-              text: body.text!.trim(),
+              text: body.text,
               modelKey: body.modelKey ?? null,
               history: history.map((m) => ({ role: m.role, text: m.text })),
               deepResearch: body.deepResearch === true,
+              turnId: turnId ?? undefined,
             },
             (ev) => send(ev),
           )
 
-          // Persist assistant message (R15: research + verified ride along)
-          const assistantMsg = await db.message.create({
+          // Persist assistant message (R15: research + verified ride along).
+          // The WORK is already done at this point (draft written, card built):
+          // a storage hiccup must not turn a successful turn into «حصل خطأ».
+          let assistantMsg: { id: string } | null = null
+          try {
+            assistantMsg = await db.message.create({
             data: {
               conversationId: conversation!.id,
               role: 'assistant',
@@ -221,16 +268,22 @@ export async function POST(req: Request) {
               modelLabel: result.modelLabel,
             },
           })
+          } catch (persistErr) {
+            console.error('[api/chat POST] assistant persist failed', persistErr)
+          }
           // one full turn = 2 messages (user + assistant) — cheap increment
-          await db.conversation.update({
-            where: { id: conversation!.id },
-            data: { updatedAt: new Date(), lastMessageAt: new Date(), messageCount: { increment: 2 } },
-          })
+          await db.conversation
+            .update({
+              where: { id: conversation!.id },
+              data: { updatedAt: new Date(), lastMessageAt: new Date(), messageCount: { increment: assistantMsg ? 2 : 1 } },
+            })
+            .catch(() => null)
           // done payload is ADDITIVE: verified/research/notesUpdated appear
           // only when the turn actually produced them (front consumes optionally)
           send({
             event: 'done',
-            messageId: assistantMsg.id,
+            messageId: assistantMsg?.id ?? null,
+            ...(assistantMsg ? {} : { persistFailed: true }),
             modelLabel: result.modelLabel,
             ...(result.verified ? { verified: result.verified } : {}),
             ...(result.research ? { research: result.research } : {}),

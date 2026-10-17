@@ -1,0 +1,69 @@
+# وكيل — GitHub Actions gate.
+#
+# Copy to .github/workflows/ci.yml to enable it (pushing workflow files needs a
+# token with the `workflow` scope). The steps are the same ones scripts/ci.sh
+# runs locally, so CI and a developer machine can never disagree.
+#
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: typecheck · lint · tests · evals
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DATABASE_URL: file:./db/custom.db
+      WAKIL_OFFLINE: '1' # deterministic ladder — no network, no flaky model calls
+      NEXT_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+
+      - name: Install dependencies
+        # NOTE: not --frozen-lockfile on purpose — bun.lock still lists the
+        # dependencies that were pruned from package.json; refreshing it needs a
+        # network-enabled `bun install`. Tighten this back to --frozen-lockfile
+        # once the lockfile has been regenerated.
+        run: bun install
+
+      - name: Full gate (generate · drift · typecheck · lint · tests · evals)
+        run: bash scripts/ci.sh --fast
+
+      - name: Production build
+        run: bun run build
+
+      - name: Boot the built server, probe /api/health, audit every screen
+        # The screen audit is the only check that catches «شاشة بايضة» and
+        # «الشبكة وقعت» — it renders each screen with live data, an empty
+        # ledger, and every query failed. It needs the server, so it lives here
+        # where the server is already up for the health probe.
+        run: |
+          bun .next/standalone/server.js &
+          SERVER_PID=$!
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3000/api/health > /tmp/health.json; then break; fi
+            sleep 1
+          done
+          cat /tmp/health.json
+          grep -q '"status"' /tmp/health.json
+          bun run screens --all-businesses
+          kill $SERVER_PID

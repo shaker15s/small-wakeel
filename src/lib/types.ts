@@ -21,6 +21,11 @@ export type OpType =
   | 'stock_adjustment'
   | 'membership'
   | 'attendance'
+  /** R29: master data the owner can create by talking — «ضيف أحمد وعليه ٥٠٠» */
+  | 'customer_add'
+  | 'supplier_add'
+  /** R39: «غيّر سعر الكيس لـ٤٠» — a catalog price change with approval */
+  | 'price_change'
   | 'reversal'
 
 export interface BusinessLite {
@@ -46,6 +51,7 @@ export interface ItemDTO {
   sellPrice: number
   stockQty: number
   lowStockThreshold: number
+  barcode?: string | null
   batchNo?: string | null
   expiresAt?: string | null
   daysToExpiry?: number | null
@@ -103,7 +109,10 @@ export interface OverviewDTO {
     expenses: number
     collections: number
     payments: number
+    /** every op touched today (drafts included) */
     opsCount: number
+    /** ops that actually EXECUTED today — 0 means «النهاردة لسه مفيش حركة» */
+    doneCount: number
   }
   pendingOps: OperationDTO[]
   lowStock: ItemDTO[]
@@ -120,6 +129,8 @@ export interface MessageDTO {
   text: string
   card?: ActionCardDTO | null
   cards?: ResultCardDTO[] | null
+  /** R28: read-only plan labels the agent announced before running it */
+  plan?: string[] | null
   thinking?: ThinkingStep[] | null
   modelLabel?: string | null
   /** deep-link action buttons rendered under the reply (e.g. «افتح الإحصائيات») */
@@ -161,6 +172,10 @@ export interface ActionCardDTO {
   effects: { label: string; value: string; tone?: 'good' | 'bad' | 'neutral' }[]
   status: OpStatus
   dangerNote?: string
+  /** Self-critique findings shown BEFORE the owner approves. */
+  audit?: AuditFindingDTO[]
+  /** 0..100 — deterministic confidence derived from the audit. */
+  confidence?: number
 }
 
 export type ResultCardDTO =
@@ -175,11 +190,21 @@ export type ResultCardDTO =
   | { kind: 'text'; title: string; body: string }
   | { kind: 'sources'; title: string; sources: SourceDTO[] }
 
+/** «تأمل وكيل» — one deterministic finding about a draft. */
+export interface AuditFindingDTO {
+  code: 'price_anomaly' | 'oversell' | 'duplicate' | 'overpay' | 'expense_spike' | 'unknown_entity'
+  severity: 'info' | 'warn' | 'danger'
+  message: string
+  detail?: string
+}
+
 export interface ThinkingStep {
   label: string // e.g. «بفهم الطلب»
   detail: string
   state: 'done' | 'active' | 'pending'
   icon?: 'understand' | 'search' | 'plan' | 'execute' | 'verify' | 'research' | 'note'
+  /** Measured wall-clock cost of this pass (ms) — the «سرعة» signal. */
+  ms?: number
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +290,15 @@ export interface ModelConfigDTO {
   label: string
   tier: 'air' | 'balanced' | 'deep'
   enabled: boolean
+  /** Last live probe of this model — null means «لسه مااتفحصش». */
+  health?: {
+    ok: boolean
+    supportsTools: boolean
+    supportsStreaming: boolean
+    ttftMs: number | null
+    note: string | null
+    checkedAt: string
+  } | null
 }
 
 export interface ScheduledTaskDTO {
@@ -309,6 +343,19 @@ export interface ConversationSummaryDTO {
 }
 
 /** A dynamic quick-command chip — computed from live data + usage history (بتتغير مع شغلك) */
+/** «ابدأ يومك» — rendered at the top of اليوم; each item is a ready prompt. */
+export interface MorningBriefDTO {
+  headline: string
+  items: {
+    id: string
+    tone: 'money' | 'stock' | 'time' | 'risk'
+    title: string
+    why: string
+    impact: number
+    cta: { label: string; prompt?: string; view?: string }
+  }[]
+}
+
 export interface SuggestionDTO {
   id: string
   label: string
@@ -366,6 +413,8 @@ export type ChatStreamEvent =
   | { event: 'step'; label: string; state: 'active' | 'done' }
   | { event: 'card'; card: ActionCardDTO }
   | { event: 'cards'; cards: ResultCardDTO[] }
+  /** R28: the plan the agent is about to run (multi-step, read-only) */
+  | { event: 'plan'; steps: string[] }
   | { event: 'actions'; actions: ChatActionDTO[] }
   | { event: 'delta'; text: string }
   | { event: 'done'; messageId: string; modelLabel: string }
@@ -377,6 +426,7 @@ export interface ChatTurn {
   text: string
   card?: ActionCardDTO | null
   cards?: ResultCardDTO[] | null
+  plan?: string[] | null
   thinking?: ThinkingStep[] | null
   modelLabel?: string | null
   actions?: ChatActionDTO[] | null

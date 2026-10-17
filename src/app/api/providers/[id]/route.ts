@@ -3,11 +3,14 @@
 import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { badRequest, notFound, serverError } from '../../_lib/http'
+import { guard } from '../../_lib/guard'
 
 export const dynamic = 'force-dynamic'
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
+    const gate = await guard(req, { scope: 'open' })
+    if (!gate.ok) return gate.res
     const { id } = await params
     const body = (await req.json()) as {
       models?: { remoteId?: string; label?: string; tier?: string; enabled?: boolean }[]
@@ -44,8 +47,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   }
 }
 
-export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
+    const gate = await guard(req, { scope: 'open' })
+    if (!gate.ok) return gate.res
     const { id } = await params
     const provider = await db.modelProvider.findUnique({ where: { id } })
     if (!provider) return notFound('المزوّد غير موجود')

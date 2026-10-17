@@ -9,6 +9,7 @@ import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import type { NoteDTO } from '@/lib/types'
 import { badRequest, notFound, searchParams, serverError } from '../_lib/http'
+import { guard } from '../_lib/guard'
 import { serializeNote } from '../_lib/serialize'
 import { ensurePrismaFresh } from '@/lib/agent/scratchpad'
 
@@ -25,6 +26,8 @@ export async function GET(req: Request) {
     const sp = searchParams(req)
     const businessId = sp.get('businessId')
     if (!businessId) return badRequest('businessId مطلوب')
+    const gate = await guard(req, { businessId, scope: 'business' })
+    if (!gate.ok) return gate.res
     const conversationId = sp.get('conversationId')
     if (!conversationId) return badRequest('conversationId مطلوب')
 
@@ -69,14 +72,12 @@ export async function POST(req: Request) {
     if (text.length < TEXT_MIN) return badRequest('نص الملاحظة فاضي')
     if (text.length > TEXT_MAX) return badRequest('نص الملاحظة أطول من ٥٠٠ حرف')
 
-    const [business, user, conversation] = await Promise.all([
-      db.business.findUnique({ where: { id: body.businessId }, select: { id: true } }),
-      db.user.findUnique({ where: { id: body.userId }, select: { id: true, businessId: true } }),
-      db.conversation.findFirst({ where: { id: body.conversationId, businessId: body.businessId }, select: { id: true } }),
-    ])
-    if (!business) return notFound('النشاط التجاري غير موجود')
-    if (!user) return notFound('المستخدم غير موجود')
-    if (user.businessId !== body.businessId) return badRequest('المستخدم مش تابع للنشاط ده')
+    const gate = await guard(req, { businessId: body.businessId, userId: body.userId })
+    if (!gate.ok) return gate.res
+    const conversation = await db.conversation.findFirst({
+      where: { id: body.conversationId, businessId: body.businessId },
+      select: { id: true },
+    })
     if (!conversation) return notFound('المحادثة غير موجودة')
 
     const created = await db.agentNote.create({
@@ -115,6 +116,8 @@ export async function PATCH(req: Request) {
 
     const existing = await db.agentNote.findUnique({ where: { id: body.id } })
     if (!existing) return notFound('الملاحظة مش موجودة')
+    const gate = await guard(req, { businessId: existing.businessId })
+    if (!gate.ok) return gate.res
 
     const updated = await db.agentNote.update({
       where: { id: body.id },
@@ -139,6 +142,8 @@ export async function DELETE(req: Request) {
     if (!id) return badRequest('id مطلوب')
     const existing = await db.agentNote.findUnique({ where: { id } })
     if (!existing) return notFound('الملاحظة مش موجودة')
+    const gate = await guard(req, { businessId: existing.businessId })
+    if (!gate.ok) return gate.res
     await db.agentNote.update({ where: { id }, data: { active: false } })
     return NextResponse.json({ ok: true })
   } catch (e) {

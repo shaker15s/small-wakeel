@@ -8,6 +8,7 @@ import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import type { ConversationSummaryDTO } from '@/lib/types'
 import { badRequest, notFound, searchParams, serverError } from '../_lib/http'
+import { guard } from '../_lib/guard'
 
 export const dynamic = 'force-dynamic'
 
@@ -80,10 +81,12 @@ async function listSummaries(businessId: string, userId: string): Promise<Conver
 export async function GET(req: Request) {
   try {
     const sp = searchParams(req)
-    const businessId = sp.get('businessId')
+        const businessId = sp.get('businessId')
     if (!businessId) return badRequest('businessId مطلوب')
     const userId = sp.get('userId')
     if (!userId) return badRequest('userId مطلوب')
+    const gate = await guard(req, { businessId, userId })
+    if (!gate.ok) return gate.res
 
     const invalid = await validatePair(businessId, userId)
     if (invalid) return invalid
@@ -100,8 +103,8 @@ export async function POST(req: Request) {
     if (!body.businessId) return badRequest('businessId مطلوب')
     if (!body.userId) return badRequest('userId مطلوب')
 
-    const invalid = await validatePair(body.businessId, body.userId)
-    if (invalid) return invalid
+    const gate = await guard(req, { businessId: body.businessId, userId: body.userId })
+    if (!gate.ok) return gate.res
 
     const title = body.title?.trim().slice(0, 80) || DEFAULT_TITLE
     const created = await db.conversation.create({
@@ -130,6 +133,8 @@ export async function PATCH(req: Request) {
       include: { _count: { select: { messages: true } } },
     })
     if (!existing) return notFound('المحادثة مش موجودة')
+    const gate = await guard(req, { businessId: existing.businessId })
+    if (!gate.ok) return gate.res
 
     const data: { title?: string; pinned?: boolean; archived?: boolean } = {}
     if (typeof body.title === 'string') {
@@ -157,8 +162,10 @@ export async function DELETE(req: Request) {
     const id = sp.get('id')
     if (!id) return badRequest('id مطلوب')
 
-    const existing = await db.conversation.findUnique({ where: { id }, select: { id: true } })
+    const existing = await db.conversation.findUnique({ where: { id } })
     if (!existing) return notFound('المحادثة مش موجودة')
+    const gate = await guard(req, { businessId: existing.businessId })
+    if (!gate.ok) return gate.res
 
     // messages cascade via the Prisma relation (onDelete: Cascade)
     await db.conversation.delete({ where: { id } })

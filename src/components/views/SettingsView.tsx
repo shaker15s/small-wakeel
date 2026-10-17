@@ -70,7 +70,7 @@ import {
   TierBadge,
   ViewHeader,
   ViewProps,
-  arNum,
+  arNum, PAGE
 } from './shared'
 
 // ---------------------------------------------------------------------------
@@ -391,7 +391,7 @@ export default function SettingsView({ businessId, userId }: ViewProps) {
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.2, ease: 'easeOut' }}
-      className="mx-auto w-full max-w-5xl space-y-4 px-4 pb-8 pt-2 sm:px-6"
+      className={PAGE}
     >
       <ViewHeader title="الإعدادات" subtitle="الموديلات والمهام والذاكرة — كل حاجة تحت سيطرتك" />
 

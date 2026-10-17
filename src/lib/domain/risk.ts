@@ -13,8 +13,13 @@ const BASE_RISK: Record<OpType, Risk> = {
   collection: 'R2',
   payment: 'R2',
   stock_adjustment: 'R3',
+  price_change: 'R2',
   membership: 'R2',
   attendance: 'R1',
+  // Creating a party with an OPENING BALANCE changes receivables/payables — it
+  // is money-shaped master data, so it needs an approval like the rest.
+  customer_add: 'R2',
+  supplier_add: 'R2',
   reversal: 'R3',
 }
 
@@ -40,15 +45,38 @@ const DRAFT_ALLOWED: Record<string, string[]> = {
   collection: ['owner', 'cashier', 'supervisor', 'reception'],
   payment: ['owner', 'supervisor'],
   stock_adjustment: ['owner', 'supervisor'],
+  price_change: ['owner', 'supervisor'],
   membership: ['owner', 'supervisor', 'reception'],
   attendance: ['owner', 'supervisor', 'reception'],
+  // front-desk roles add members/walk-in customers all day long
+  customer_add: ['owner', 'supervisor', 'cashier', 'reception'],
+  supplier_add: ['owner', 'supervisor'],
   reversal: ['owner', 'supervisor'],
 }
 
-/** Who may APPROVE (decide) a draft. */
+/**
+ * Who may APPROVE (decide) a draft.
+ *
+ * Default policy (an Egyptian small shop has 2–4 people, and the cashier must
+ * be able to complete a sale without waking the owner):
+ *   R1/R2 → owner, supervisor, cashier, reception
+ *   R3    → owner, supervisor only (large/sensitive amounts, reversals)
+ *   R4    → nobody (blocked by design)
+ *
+ * Shops that need a stricter segregation of duties — nobody approves their own
+ * draft, whatever its size — flip `WAKIL_STRICT_APPROVALS=1`, which routes
+ * EVERY write through management. It is opt-in so the default demo flows keep
+ * working, but real deployments with employees should turn it on.
+ */
 export function canApprove(role: string, risk: Risk): boolean {
+  if (risk === 'R4') return false
   if (risk === 'R3') return role === 'owner' || role === 'supervisor'
-  if (risk === 'R2' || risk === 'R1') return role === 'owner' || role === 'supervisor' || role === 'cashier' || role === 'reception'
+  if (risk === 'R2' || risk === 'R1') {
+    if (process.env.WAKIL_STRICT_APPROVALS === '1') {
+      return role === 'owner' || role === 'supervisor'
+    }
+    return role === 'owner' || role === 'supervisor' || role === 'cashier' || role === 'reception'
+  }
   return false
 }
 

@@ -19,11 +19,55 @@
 /** Retryable HTTP-ish statuses. 429 = rate limit, 5xx = provider hiccup. */
 function isTransient(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err ?? '')
+  // NOTE: the providers throw `المزوّد رجع 503` — an Arabic message with a bare
+  // status NUMBER, no «status» word. The old regex only matched the English
+  // form, so a real 503 was treated as deterministic and never retried (found
+  // by tests/unit/resilience.test.ts). Match the number in an error-ish context.
+  const code = msg.match(/\b(429|5\d\d)\b/)
+  const numericTransient = !!code && /provider|status|http|رجع|المزوّد|gateway|upstream|timeout/i.test(msg)
   return (
+    numericTransient ||
     /status 429/i.test(msg) ||
-    /status 5\d\d/i.test(msg) ||
     /timeout|timed out|ECONNRESET|fetch failed|network/i.test(msg)
   )
+}
+
+/**
+ * Connection-level failures: the socket never reached the provider.
+ *
+ * WHY this is separate from «transient»: a refused connection cannot be waited
+ * out. In the live preview a dead provider cost the owner 7 seconds of
+ * «بفهم طلبك» — three retries with 0ms/800ms/2500ms backoff against a port
+ * nobody is listening on — before the fallback ladder was even consulted.
+ * Unreachable hosts now fail FAST (one attempt, no backoff) so the ladder can
+ * move to a healthy model in milliseconds.
+ */
+function unreachableCode(err: unknown): string {
+  const e = err as { code?: string; cause?: { code?: string } } | null
+  return e?.cause?.code ?? e?.code ?? ''
+}
+
+export function isUnreachable(err: unknown): boolean {
+  const code = unreachableCode(err)
+  if (code && ['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH'].includes(code)) return true
+  const msg = err instanceof Error ? `${err.message} ${(err.cause as Error | undefined)?.message ?? ''}` : String(err ?? '')
+  return /ECONNREFUSED|ENOTFOUND|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH/i.test(msg)
+}
+
+/**
+ * Transport-level failure: the request never produced an HTTP response.
+ *
+ * `TypeError: fetch failed` (undici) is how Node reports a refused socket, a
+ * DNS miss or a TLS reset. Historically we retried it like a 5xx — three
+ * attempts, 3.3s of backoff, and only THEN the model ladder. In a live preview
+ * with a dead provider that is the difference between «بفهم طلبك 1ms» and a
+ * 7-second stare. A host that cannot be reached is not going to become
+ * reachable 800ms later, so it fails fast and trips the breaker at once.
+ */
+export function isConnectFailure(err: unknown): boolean {
+  if (isUnreachable(err)) return true
+  if (err instanceof TypeError && /fetch failed/i.test(err.message)) return true
+  return false
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
@@ -62,6 +106,8 @@ export async function withRetry<T>(fn: () => Promise<T>, opts: RetryOpts = {}): 
       return await fn()
     } catch (err) {
       lastErr = err
+      // dead host → straight to the model ladder (no backoff, no second attempt)
+      if (isConnectFailure(err)) break
       if (!isTransient(err)) break // deterministic failure — don't retry
     }
   }
@@ -76,7 +122,7 @@ interface BreakerState {
   openedAt: number
 }
 
-const BREAKER_THRESHOLD = 5 // consecutive failures before opening
+const BREAKER_THRESHOLD = 5 // consecutive failures before opening (transient)
 const BREAKER_COOLDOWN_MS = 60_000 // stay open for 60s
 const BREAKER_HALF_OPEN_MS = 20_000 // allow a probe after 20s (half-open)
 
@@ -93,14 +139,20 @@ export function breakerIsOpen(key: string): boolean {
   return false
 }
 
-/** Record the outcome of a call; a success resets the failure streak. */
-export function breakerRecord(key: string, ok: boolean): void {
+/**
+ * Record the outcome of a call; a success resets the failure streak.
+ *
+ * `fatal` (a connect-level failure) opens the circuit on the FIRST failure.
+ * Waiting for five refusals means four wasted round trips on every turn, and a
+ * dead provider is never the model the owner is waiting for.
+ */
+export function breakerRecord(key: string, ok: boolean, fatal = false): void {
   const st = breakers.get(key) ?? { failures: 0, openedAt: 0 }
   if (ok) {
     breakers.set(key, { failures: 0, openedAt: 0 })
     return
   }
-  st.failures += 1
+  st.failures += fatal ? BREAKER_THRESHOLD : 1
   if (st.failures >= BREAKER_THRESHOLD) st.openedAt = Date.now()
   breakers.set(key, st)
 }
@@ -120,7 +172,7 @@ export async function withBreaker<T>(key: string, fn: () => Promise<T>): Promise
     breakerRecord(key, true)
     return out
   } catch (err) {
-    breakerRecord(key, false)
+    breakerRecord(key, false, isConnectFailure(err))
     throw err
   }
 }

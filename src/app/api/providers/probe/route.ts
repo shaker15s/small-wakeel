@@ -9,6 +9,7 @@ import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import type { ProbeResultDTO } from '@/lib/types'
 import { badRequest, notFound, serverError } from '../../_lib/http'
+import { guard } from '../../_lib/guard'
 
 export const dynamic = 'force-dynamic'
 
@@ -20,6 +21,8 @@ const estTokens = (chars: number) => Math.max(1, Math.ceil(chars / 4))
 
 export async function POST(req: Request) {
   try {
+    const gate = await guard(req, { scope: 'open' })
+    if (!gate.ok) return gate.res
     const body = (await req.json()) as { modelConfigId?: string }
     if (!body.modelConfigId) return badRequest('modelConfigId مطلوب')
 

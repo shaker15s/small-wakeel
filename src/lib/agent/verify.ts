@@ -159,6 +159,13 @@ export function verifyReply(text: string, facts: VerifyFact[]): VerifyResult {
     .filter((e) => e.nums.length > 0)
   const universe = new Map<number, string>()
   for (const e of entries) for (const n of e.nums) if (!universe.has(n)) universe.set(n, e.value)
+  // …and the LABELS are ground truth too. `brainFacts` carries card row labels
+  // («إجمالي الطلبات») and table row names, and the agent's own text quotes card
+  // titles like «قراءة شغلك — آخر 30 يوم»: without this, rule (b) below could
+  // "correct" that 30 into a neighbouring fact's first number (live R29: the
+  // advisor title came out as «آخر 0 يوم»). A number the agent itself rendered
+  // from the DB may never be rewritten.
+  for (const f of facts) for (const n of allNumbers(f.label)) if (!universe.has(n)) universe.set(n, f.label)
 
   // Walk claims RIGHT-TO-LEFT so replacements never invalidate earlier offsets
   // AUDIT FIX (R15-5): money/percent claims that match NO fact must not hide
@@ -169,6 +176,23 @@ export function verifyReply(text: string, facts: VerifyFact[]): VerifyResult {
     // (a) the number exists verbatim somewhere in the ground truth → ok
     if (universe.has(c.value)) {
       checks.unshift({ claim: c.raw, expected: universe.get(c.value) ?? c.raw, actual: c.raw, ok: true })
+      continue
+    }
+    // (a0) the claim is a PERIOD («آخر 30 يوم», «كل ١٠ أيام») — a duration can
+    // never be a money figure, so it is not the verifier's business to rewrite
+    // it. Live R29: the advisor's card title «قراءة شغلك — آخر 30 يوم» came out
+    // of the badge as «آخر 0 يوم» because rule (b) below reached forward and
+    // tied the 30 to «المبيعات = ٠ ج.م».
+    const afterClaim = text.slice(c.at + c.raw.length, c.at + c.raw.length + 10)
+    if (/^\s*(?:يوم|أيام|ايام|شهر|شهور|سنه|سنة|سنين|أسبوع|اسبوع|أسابيع|اسابيع|ساعه|ساعة|دقيقه|دقيقة|ثانيه|ثانية)/.test(afterClaim)) {
+      checks.unshift({ claim: c.raw, expected: c.raw, actual: c.raw, ok: true })
+      continue
+    }
+    // (a1) a claim inside «quotes» is a LABEL the agent itself rendered (a card
+    // title / a policy name) — ground truth, not a number to be corrected.
+    const before40 = text.slice(Math.max(0, c.at - 40), c.at)
+    if (before40.includes('«') && !before40.slice(before40.lastIndexOf('«')).includes('»') && text.slice(c.at + c.raw.length).includes('»')) {
+      checks.unshift({ claim: c.raw, expected: c.raw, actual: c.raw, ok: true })
       continue
     }
     // (b) tie the claim to a fact via shared label/context words

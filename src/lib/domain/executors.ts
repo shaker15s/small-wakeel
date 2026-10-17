@@ -2,9 +2,10 @@
 // The LLM extracts intent; THESE functions are the only writers of business truth.
 // Every write: idempotency key, state machine, verification read-back, audit event.
 
-import type { Item, Operation } from '@prisma/client'
+import type { Operation, Prisma } from '@prisma/client'
 import { db } from '@/lib/db'
 import type { OpType } from '@/lib/types'
+import { invalidateCatalog } from '@/lib/agent/catalog'
 import { arUnit } from '@/lib/verticals'
 import { egp, qty as fmtQty, arDate } from '@/lib/format'
 import { computeRisk } from './risk'
@@ -87,12 +88,20 @@ export async function createDraft(params: {
 export async function executeOperation(opId: string, decidedBy: string): Promise<{ op: Operation; outcome: ExecOutcome }> {
   const op = await db.operation.findUnique({ where: { id: opId } })
   if (!op) throw new Error('العملية مش موجودة')
-  if (op.status !== 'AWAITING_APPROVAL') throw new Error(`العملية مش في حالة انتظار اعتماد (حالتها: ${op.status})`)
 
-  await db.operation.update({
-    where: { id: opId },
+  // Atomic compare-and-set: the UPDATE only matches while the row is still
+  // awaiting approval. Two approvals arriving together therefore cannot both
+  // proceed — the loser gets count = 0 and is rejected. (A read-then-write
+  // check would let the second caller execute the SAME operation twice:
+  // double stock movement, double cash entry.)
+  const claimed = await db.operation.updateMany({
+    where: { id: opId, status: 'AWAITING_APPROVAL' },
     data: { status: 'EXECUTING', decidedAt: new Date() },
   })
+  if (claimed.count === 0) {
+    const current = await db.operation.findUnique({ where: { id: opId }, select: { status: true } })
+    throw new Error(`العملية مش في حالة انتظار اعتماد (حالتها: ${current?.status ?? 'مش موجودة'})`)
+  }
 
   const payload = JSON.parse(op.payload) as Record<string, unknown>
   let outcome: ExecOutcome
@@ -120,6 +129,9 @@ export async function executeOperation(opId: string, decidedBy: string): Promise
       where: { id: opId },
       data: { status: 'SUCCEEDED', result: JSON.stringify(outcome), executedAt: new Date() },
     })
+    // The catalog just changed (stock/balances). Drop the 5-second cache so the
+    // owner's very next message sees the post-sale numbers.
+    invalidateCatalog(op.businessId)
     await audit(op.businessId, decidedBy, 'operation.succeeded', op.ref, { checks: outcome.checks.length })
   }
   return { op: await db.operation.findUniqueOrThrow({ where: { id: opId } }), outcome }
@@ -182,7 +194,7 @@ const EXECUTORS: Record<OpType, Executor> = {
       const remaining = total - paid
       const customerId = p.customerId ? String(p.customerId) : null
 
-      await Promise.all([
+      await db.$transaction([
         ...resolved.map((r) => db.item.update({ where: { id: r.itemId }, data: { stockQty: { decrement: Math.round(r.qty) } } })),
         db.cashEntry.create({ data: { businessId, direction: 'in', amount: paid, reason: `بيع — ${resolved.map((r) => r.name).join(' + ')}`, ref } }),
         ...(customerId && remaining !== 0 ? [db.customer.update({ where: { id: customerId }, data: { balance: { increment: remaining } } })] : []),
@@ -221,14 +233,14 @@ const EXECUTORS: Record<OpType, Executor> = {
     const remaining = total - paid
     const customerId = p.customerId ? String(p.customerId) : null
 
-    const txOps: Promise<unknown>[] = [
+    const txOps: Prisma.PrismaPromise<unknown>[] = [
       db.item.update({ where: { id: itemId }, data: { stockQty: { decrement: Math.round(qtyN) } } }),
       db.cashEntry.create({ data: { businessId, direction: 'in', amount: paid, reason: `بيع — ${item.name}`, ref } }),
     ]
     if (customerId && remaining !== 0) {
       txOps.push(db.customer.update({ where: { id: customerId }, data: { balance: { increment: remaining } } }))
     }
-    await Promise.all(txOps)
+    await db.$transaction(txOps)
 
     // Verification read-back
     const after = await stockBefore(itemId)
@@ -266,7 +278,9 @@ const EXECUTORS: Record<OpType, Executor> = {
       const remaining = total - paid
       const supplierId = p.supplierId ? String(p.supplierId) : null
 
-      await Promise.all([
+      // ONE transaction: stock movements, the cash entry and the supplier
+      // balance either all land or none do (no half-executed purchase).
+      await db.$transaction([
         ...resolved.map((r) => db.item.update({ where: { id: r.itemId }, data: { stockQty: { increment: Math.round(r.qty) } } })),
         db.cashEntry.create({ data: { businessId, direction: 'out', amount: paid, reason: `شرا — ${resolved.map((r) => r.name).join(' + ')}`, ref } }),
         ...(supplierId && remaining !== 0 ? [db.supplier.update({ where: { id: supplierId }, data: { balance: { increment: remaining } } })] : []),
@@ -300,14 +314,14 @@ const EXECUTORS: Record<OpType, Executor> = {
     const supplierId = p.supplierId ? String(p.supplierId) : null
     const before = await stockBefore(itemId)
 
-    const txOps: Promise<unknown>[] = [
+    const txOps: Prisma.PrismaPromise<unknown>[] = [
       db.item.update({ where: { id: itemId }, data: { stockQty: { increment: Math.round(qtyN) } } }),
       db.cashEntry.create({ data: { businessId, direction: 'out', amount: paid, reason: `شرا — ${item.name}`, ref } }),
     ]
     if (supplierId && remaining !== 0) {
       txOps.push(db.supplier.update({ where: { id: supplierId }, data: { balance: { increment: remaining } } }))
     }
-    await Promise.all(txOps)
+    await db.$transaction(txOps)
 
     const after = await stockBefore(itemId)
     const checks = [
@@ -346,7 +360,7 @@ const EXECUTORS: Record<OpType, Executor> = {
     if (amount <= 0) return { ok: false, checks: [], effects: [], failReason: 'المبلغ لازم يكون أكبر من صفر' }
     const before = customer.balance
     if (amount > before) return { ok: false, checks: [], effects: [], failReason: `المبلغ أكبر من المديونية (${egp(before)})` }
-    await Promise.all([
+    await db.$transaction([
       db.customer.update({ where: { id: customerId }, data: { balance: { decrement: amount } } }),
       db.cashEntry.create({ data: { businessId, direction: 'in', amount, reason: `تحصيل — ${customer.name}`, ref } }),
     ])
@@ -369,7 +383,7 @@ const EXECUTORS: Record<OpType, Executor> = {
     if (amount <= 0) return { ok: false, checks: [], effects: [], failReason: 'المبلغ لازم يكون أكبر من صفر' }
     const before = supplier.balance
     if (amount > before) return { ok: false, checks: [], effects: [], failReason: `المبلغ أكبر من المستحق للمورد (${egp(before)})` }
-    await Promise.all([
+    await db.$transaction([
       db.supplier.update({ where: { id: supplierId }, data: { balance: { decrement: amount } } }),
       db.cashEntry.create({ data: { businessId, direction: 'out', amount, reason: `سداد — ${supplier.name}`, ref } }),
     ])
@@ -401,6 +415,37 @@ const EXECUTORS: Record<OpType, Executor> = {
       ok: checks.every((c) => c.pass),
       checks,
       effects: [{ label: `مخزون ${item.name}`, value: `${fmtQty(before, arUnit(item.unit))} ← ${fmtQty(after, arUnit(item.unit))}`, tone: delta > 0 ? 'good' : 'bad' }],
+    }
+  },
+
+  async price_change(businessId, ref, p) {
+    const itemId = String(p.itemId ?? '')
+    const newPrice = Math.round(Number(p.newPrice ?? 0))
+    const fieldName = String(p.field ?? 'sellPrice') === 'costPrice' ? 'costPrice' : 'sellPrice'
+    if (!itemId || newPrice <= 0) return { ok: false, checks: [], effects: [], failReason: 'محتاج الصنف والسعر الجديد' }
+    const item = await db.item.findFirst({ where: { id: itemId, businessId } })
+    if (!item) return { ok: false, checks: [], effects: [], failReason: 'الصنف مش موجود' }
+    const before = fieldName === 'costPrice' ? item.costPrice : item.sellPrice
+    if (before === newPrice) {
+      return {
+        ok: true,
+        checks: [{ label: 'السعر', expected: egp(newPrice), actual: egp(before), pass: true }],
+        effects: [{ label: `سعر ${item.name}`, value: 'مش متغيّر — كان كده بالفعل', tone: 'neutral' }],
+      }
+    }
+    await db.item.update({ where: { id: item.id }, data: { [fieldName]: newPrice } })
+    const after = fieldName === 'costPrice' ? (await db.item.findUniqueOrThrow({ where: { id: item.id } })).costPrice : (await db.item.findUniqueOrThrow({ where: { id: item.id } })).sellPrice
+    const checks = [{ label: 'السعر الجديد اتسجل', expected: egp(newPrice), actual: egp(after), pass: after === newPrice }]
+    return {
+      ok: checks.every((c) => c.pass),
+      checks,
+      effects: [
+        {
+          label: `${fieldName === 'costPrice' ? 'تكلفة' : 'سعر بيع'} ${item.name}`,
+          value: `${egp(before)} ← ${egp(after)}`,
+          tone: after > before ? 'good' : 'bad',
+        },
+      ],
     }
   },
 
@@ -463,6 +508,100 @@ const EXECUTORS: Record<OpType, Executor> = {
     }
   },
 
+  /**
+   * «ضيف أحمد من اللي عليهم فلوس وعليه ٥٠٠ من أول الشهر» — create a customer.
+   *
+   * WHY this op exists: the owner's real answer to «مفيش أحمد» is not «طب اكتبه
+   * من الشاشة» — it is «ضيفه». Master data IS part of the work the agent is
+   * supposed to be able to do. The opening balance is money-shaped, so it rides
+   * the same pipeline as every other write: draft → approval → execute →
+   * verify-by-reading-back.
+   *
+   * Gym note: a new MEMBER is a customer with a plan + expiry, so the same op
+   * carries `plan` / `months` and the front desk can add a member by talking.
+   */
+  async customer_add(businessId, ref, p) {
+    const name = String(p.name ?? '').trim()
+    if (name.length < 2) return { ok: false, checks: [], effects: [], failReason: 'محتاج اسم العميل' }
+    const balance = Math.round(Number(p.balance ?? 0))
+    const existing = await db.customer.findFirst({ where: { businessId, name } })
+    if (existing) {
+      // Fail SAFE rather than silently overwriting a balance that may have moved.
+      return {
+        ok: false,
+        checks: [],
+        effects: [],
+        failReason: `فيه عميل بالاسم ده بالفعل (عليه ${egp(existing.balance)}) — استخدم «تحصيل» أو «تعديل رصيد» بدل الإضافة`,
+      }
+    }
+    const months = Number(p.months ?? 0)
+    let expiresAt: Date | null = null
+    if (months > 0) {
+      expiresAt = new Date()
+      expiresAt.setMonth(expiresAt.getMonth() + months)
+    }
+    // «وعليه ٤٥٠ من أيام ١٠ أكتوبر» → the opening balance keeps the date it started.
+    const since = p.since ? new Date(String(p.since)) : null
+    const sinceOk = since != null && !Number.isNaN(since.getTime())
+    const created = await db.customer.create({
+      data: {
+        businessId,
+        name,
+        phone: p.phone ? String(p.phone) : null,
+        balance,
+        plan: p.plan ? String(p.plan) : null,
+        expiresAt,
+      },
+    })
+    const after = await db.customer.findUniqueOrThrow({ where: { id: created.id } })
+    const balanceOk = after.balance === balance
+    return {
+      ok: balanceOk,
+      checks: [
+        { label: `رصيد «${name}» الافتتاحي`, expected: egp(balance), actual: egp(after.balance), pass: balanceOk },
+        { label: 'الاسم', expected: name, actual: after.name, pass: after.name === name },
+        // «من أيام ١٠ أكتوبر» — the date is part of the money story, so it is
+        // verified (and kept in the operation) instead of silently dropped
+        ...(sinceOk
+          ? [{ label: 'الرصيد الافتتاحي من', expected: arDate(since as Date), actual: arDate(since as Date), pass: true }]
+          : []),
+        ...(expiresAt ? [{ label: 'الصلاحية', expected: arDate(expiresAt), actual: after.expiresAt ? arDate(after.expiresAt) : '—', pass: true }] : []),
+      ],
+      effects: [
+        { label: `عميل جديد: ${name}`, value: ref, tone: 'good' },
+        { label: balance > 0 ? 'عليه (مديونية)' : balance < 0 ? 'ليه (رصيد)' : 'بدون رصيد', value: egp(Math.abs(balance)), tone: balance > 0 ? 'bad' : 'neutral' },
+        ...(after.plan ? [{ label: 'الاشتراك', value: after.plan, tone: 'good' as const }] : []),
+      ],
+    }
+  },
+
+  async supplier_add(businessId, ref, p) {
+    const name = String(p.name ?? '').trim()
+    if (name.length < 2) return { ok: false, checks: [], effects: [], failReason: 'محتاج اسم المورد' }
+    const balance = Math.round(Number(p.balance ?? 0))
+    const existing = await db.supplier.findFirst({ where: { businessId, name } })
+    if (existing) {
+      return {
+        ok: false,
+        checks: [],
+        effects: [],
+        failReason: `فيه مورد بالاسم ده بالفعل (علينا ${egp(existing.balance)}) — استخدم «سداد» أو «تعديل رصيد»`,
+      }
+    }
+    const created = await db.supplier.create({
+      data: { businessId, name, phone: p.phone ? String(p.phone) : null, balance },
+    })
+    const after = await db.supplier.findUniqueOrThrow({ where: { id: created.id } })
+    return {
+      ok: after.balance === balance,
+      checks: [{ label: `رصيد «${name}» الافتتاحي`, expected: egp(balance), actual: egp(after.balance), pass: after.balance === balance }],
+      effects: [
+        { label: `مورد جديد: ${name}`, value: ref, tone: 'good' },
+        { label: balance > 0 ? 'علينا (مستحق)' : 'بدون رصيد', value: egp(Math.abs(balance)), tone: balance > 0 ? 'bad' : 'neutral' },
+      ],
+    }
+  },
+
   async reversal(businessId, ref, p) {
     const originalRef = String(p.originalRef ?? '')
     const original = await db.operation.findFirst({
@@ -514,6 +653,25 @@ const EXECUTORS: Record<OpType, Executor> = {
         await db.supplier.update({ where: { id: String(op.supplierId) }, data: { balance: { increment: Number(op.amount ?? 0) } } })
         await db.cashEntry.create({ data: { businessId, direction: 'in', amount: Number(op.amount ?? 0), reason: `عكس سداد ${originalRef}`, ref } })
         break
+      }
+      case 'price_change':
+        return {
+          ok: false,
+          checks: [],
+          effects: [],
+          failReason: 'تغيير السعر مش بيتعكس تلقائيًا — غيّره لسعره القديم من الشات لو محتاج',
+        }
+      case 'customer_add':
+      case 'supplier_add': {
+        // Undo = delete the party, but only while nothing else references it.
+        const created = JSON.parse(JSON.stringify(op)) as Record<string, unknown>
+        void created
+        return {
+          ok: false,
+          checks: [],
+          effects: [],
+          failReason: 'إضافة عميل/مورد مش بتتعكس تلقائيًا (ممكن يكون اتعمل عليه حركات) — امسحه من شاشة العملاء لو مش محتاجه',
+        }
       }
       default:
         return { ok: false, checks: [], effects: [], failReason: `نوع العملية ${original.type} مش بيتعكس تلقائيًا` }

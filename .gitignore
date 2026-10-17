@@ -29,13 +29,20 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+*.log
 
-# env files (can opt-in for committing if needed)
+# env files — .env.example is the tracked template; put real secrets in .env
 .env*
+!.env.example
+
+# local sqlite side files (the seeded db/custom.db IS tracked on purpose)
+*.db-journal
+*.db-wal
+*.db-shm
+db/*.backup.db
 
 # vercel
 .vercel
-
 
 # typescript
 *.tsbuildinfo
@@ -43,12 +50,9 @@ next-env.d.ts
 local-*
 .claude
 .z-ai-config
-*.log
-dev.log
-dev.out.log
-test
-prompt
 
-server.log
-# Skills directory
-/skills/
+# QA / agent scratch space (kept out of the product tree)
+.qa-r14/
+tool-results/
+agent-ctx/
+skills/

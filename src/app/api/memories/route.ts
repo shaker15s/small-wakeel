@@ -7,36 +7,30 @@ import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import type { MemoryDTO } from '@/lib/types'
 import { badRequest, notFound, searchParams, serverError } from '../_lib/http'
+import { guard } from '../_lib/guard'
 import { serializeMemory } from '../_lib/serialize'
+import { memoryPostSchema, parseBody } from '@/lib/security/validate'
 
 export const dynamic = 'force-dynamic'
 
 export async function POST(req: Request) {
   try {
-    const body = (await req.json()) as {
-      businessId?: string
-      userId?: string
-      text?: string
-      kind?: string
-      category?: string
-    }
-    if (!body.businessId) return badRequest('businessId مطلوب')
-    if (!body.userId) return badRequest('userId مطلوب')
-    if (!body.text?.trim()) return badRequest('نص الذاكرة مطلوب')
+    const parsed = await parseBody(req, memoryPostSchema)
+    if (!parsed.ok) return badRequest(parsed.message)
+    const body = parsed.data
 
-    const kind = ['fact', 'preference', 'rule', 'lexicon', 'insight'].includes(String(body.kind))
-      ? (String(body.kind) as MemoryDTO['kind'])
-      : body.kind === 'preference'
-        ? 'preference'
-        : 'fact'
+    const gate = await guard(req, { businessId: body.businessId, userId: body.userId })
+    if (!gate.ok) return gate.res
 
     const memory = await db.agentMemory.create({
       data: {
         businessId: body.businessId,
         userId: body.userId,
-        kind,
-        ...(body.category ? { category: body.category.slice(0, 40) } : {}),
-        text: body.text.trim().slice(0, 500),
+        kind: body.kind,
+        category: body.category,
+        ...(body.entityRef ? { entityRef: body.entityRef } : {}),
+        ...(typeof body.confidence === 'number' ? { confidence: body.confidence } : {}),
+        text: body.text,
       },
     })
     return NextResponse.json(serializeMemory(memory), { status: 201 })
@@ -50,6 +44,8 @@ export async function GET(req: Request) {
     const sp = searchParams(req)
     const businessId = sp.get('businessId')
     if (!businessId) return badRequest('businessId مطلوب')
+    const gate = await guard(req, { businessId, scope: 'business' })
+    if (!gate.ok) return gate.res
     const activeOnly = sp.get('active')
 
     const memories = await db.agentMemory.findMany({
@@ -77,6 +73,10 @@ export async function PATCH(req: Request) {
     const existing = await db.agentMemory.findUnique({ where: { id: body.id } })
     if (!existing) return notFound('الذاكرة دي مش موجودة')
 
+    // Ownership: the caller must belong to the business that owns this memory.
+    const gate = await guard(req, { businessId: existing.businessId })
+    if (!gate.ok) return gate.res
+
     const data: { text?: string; active?: boolean; category?: string; updatedAt: Date } = { updatedAt: new Date() }
     if (typeof body.text === 'string') {
       if (!body.text.trim()) return badRequest('نص الذاكرة فاضي')
@@ -100,6 +100,9 @@ export async function DELETE(req: Request) {
 
     const existing = await db.agentMemory.findUnique({ where: { id } })
     if (!existing) return notFound('الذاكرة دي مش موجودة')
+
+    const gate = await guard(req, { businessId: existing.businessId })
+    if (!gate.ok) return gate.res
 
     await db.agentMemory.delete({ where: { id } })
     return NextResponse.json({ ok: true })

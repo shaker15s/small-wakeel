@@ -11,10 +11,12 @@ import {
   AlertTriangle,
   Ban,
   CheckCircle2,
+  Eye,
   Inbox,
   Info,
   Loader2,
   ShieldCheck,
+  Sparkles,
   XCircle,
 } from 'lucide-react'
 
@@ -39,6 +41,8 @@ const TYPE_AR: Record<string, string> = {
   stock_adjustment: 'تسوية مخزون',
   membership: 'اشتراك',
   attendance: 'حضور',
+  customer_add: 'عميل جديد',
+  supplier_add: 'مورد جديد',
   reversal: 'عكس عملية',
 }
 
@@ -122,6 +126,8 @@ export function ActionCard({
   const showActions = !outcome && card.status === 'AWAITING_APPROVAL' && !!onApprove
 
   const look = card.status !== 'AWAITING_APPROVAL' ? STATUS_LOOK[card.status] : undefined
+  // «تأمل وكيل» flagged something dangerous → the card itself signals it.
+  const hasDanger = (card.audit ?? []).some((f) => f.severity === 'danger')
   const StatusIcon = look?.icon
 
   return (
@@ -131,7 +137,14 @@ export function ActionCard({
       transition={{ duration: 0.18, ease: 'easeOut' }}
       className="w-full"
     >
-      <Card className="w-full gap-3 py-4">
+      {/* A draft whose audit found something dangerous breathes for attention:
+          the owner should not approve a flagged draft by muscle memory. */}
+      <Card
+        className={cn(
+          'w-full gap-3 py-4',
+          hasDanger && 'attention border-destructive/40',
+        )}
+      >
         {StatusIcon && (
           <div
             role="status"
@@ -221,6 +234,70 @@ export function ActionCard({
             </div>
           )}
 
+          {/* «تأمل وكيل» — the deterministic self-critique, shown BEFORE approval.
+              The owner should see the doubt at the moment he decides, not after
+              the money moved. */}
+          {card.audit && card.audit.length > 0 && (
+            <section
+              className="enter-rise rounded-lg border border-border/70 bg-muted/40 p-2.5"
+              aria-label="تأمل وكيل على المسودة"
+            >
+              <p className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-muted-foreground">
+                <Sparkles className="size-3.5 text-wakil-amber" aria-hidden="true" />
+                تأمل وكيل · <span className="num">{card.audit.length}</span> ملاحظة قبل الاعتماد
+              </p>
+              <ul className="flex flex-col gap-1.5">
+                {card.audit.map((f, i) => (
+                  <li
+                    key={`${f.code}-${i}`}
+                    className="finding-enter flex items-start gap-2 text-xs leading-5"
+                    style={{ animationDelay: `${i * 45}ms` }}
+                  >
+                    <span
+                      className={cn(
+                        'mt-1 size-1.5 shrink-0 rounded-full',
+                        f.severity === 'danger'
+                          ? 'bg-destructive'
+                          : f.severity === 'warn'
+                            ? 'bg-[var(--wakil-amber)]'
+                            : 'bg-muted-foreground/60',
+                      )}
+                      aria-hidden="true"
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className={cn(f.severity === 'danger' && 'font-medium text-destructive')}>
+                        {f.message}
+                      </span>
+                      {f.detail ? (
+                        <span className="num block text-[11px] text-muted-foreground">{f.detail}</span>
+                      ) : null}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              {typeof card.confidence === 'number' && (
+                <div className="mt-2 flex items-center gap-2" aria-label={`ثقة وكيل ${card.confidence} بالمئة`}>
+                  <Eye className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+                  <span className="text-[11px] text-muted-foreground">ثقة وكيل</span>
+                  <span className="confidence-track h-1.5 flex-1" aria-hidden="true">
+                    <span
+                      className={cn(
+                        'confidence-fill',
+                        card.confidence >= 85
+                          ? 'bg-emerald-500'
+                          : card.confidence >= 60
+                            ? 'bg-[var(--wakil-amber)]'
+                            : 'bg-destructive',
+                      )}
+                      style={{ ['--confidence' as string]: `${card.confidence}%` }}
+                    />
+                  </span>
+                  <span className="num text-[11px] font-semibold">{card.confidence}%</span>
+                </div>
+              )}
+            </section>
+          )}
+
           {/* approval footer */}
           {showActions && (
             <div className="flex flex-col gap-2.5">
@@ -237,7 +314,7 @@ export function ActionCard({
               <div className="flex flex-wrap items-center gap-2">
                 <Button
                   type="button"
-                  className="press h-11 flex-1 rounded-lg sm:flex-none sm:min-w-44"
+                  className="magnetic ae-sweep press h-11 flex-1 rounded-lg sm:flex-none sm:min-w-44"
                   disabled={busy || !reasonOk}
                   onClick={() => onApprove?.(reason.trim() || undefined)}
                 >

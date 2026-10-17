@@ -2,7 +2,9 @@
 // Money is ALWAYS integer piastres (1 EGP = 100 piastres). Never floats.
 
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  engineType      = "client"
+  previewFeatures = ["driverAdapters"]
 }
 
 datasource db {
@@ -60,9 +62,15 @@ model Item {
   sellPrice         Int       @default(0) // piastres per unit
   stockQty          Int       @default(0) // in base unit (gram for attar, etc.)
   lowStockThreshold Int       @default(0)
+  barcode           String? // scanned at the counter (EAN-13 / code-128 / QR)
   batchNo           String? // pharmacy
   expiresAt         DateTime? // pharmacy
   createdAt         DateTime  @default(now())
+
+  @@index([businessId, name])
+  @@index([businessId, barcode])
+  @@index([businessId, stockQty])
+  @@index([expiresAt])
 }
 
 model Customer {
@@ -75,6 +83,9 @@ model Customer {
   plan       String? // gym plan name
   expiresAt  DateTime? // gym membership expiry
   createdAt  DateTime  @default(now())
+
+  @@index([businessId, name])
+  @@index([expiresAt])
 }
 
 model Supplier {
@@ -85,6 +96,8 @@ model Supplier {
   phone      String?
   balance    Int      @default(0) // + we owe them
   createdAt  DateTime @default(now())
+
+  @@index([businessId, name])
 }
 
 model Operation {
@@ -109,6 +122,11 @@ model Operation {
   createdAt      DateTime  @default(now())
   executedAt     DateTime?
   decidedAt      DateTime?
+
+  @@index([businessId, createdAt])
+  @@index([businessId, status])
+  @@index([conversationId])
+  @@index([userId, createdAt])
 }
 
 model CashEntry {
@@ -120,6 +138,9 @@ model CashEntry {
   reason     String
   ref        String? // operation ref
   createdAt  DateTime @default(now())
+
+  @@index([businessId, createdAt])
+  @@index([ref])
 }
 
 model AuditEvent {
@@ -131,6 +152,9 @@ model AuditEvent {
   ref        String?
   detail     String // JSON
   createdAt  DateTime @default(now())
+
+  @@index([businessId, createdAt])
+  @@index([ref])
 }
 
 model Conversation {
@@ -147,6 +171,9 @@ model Conversation {
   updatedAt     DateTime  @updatedAt
   messages      Message[]
   notes         AgentNote[]
+
+  @@index([businessId, userId, updatedAt])
+  @@index([businessId, lastMessageAt])
 }
 
 model Message {
@@ -159,10 +186,17 @@ model Message {
   cards          String? // JSON — result cards (tables)
   thinking       String? // agent visible thinking steps
   actions        String? // JSON — deep-link action buttons (ChatActionDTO[])
-  modelLabel     String?
+    modelLabel     String?
   research       String? // JSON — ResearchDTO (deep-research plan + sources)
   verified       String? // JSON — VerifyDTO (self-verification result)
+  /* The client's per-send id. A dropped SSE stream used to cost the owner a
+     second identical message AND a second draft on «جرّب تاني»; with this id
+     the retry reuses the turn (or replays the finished reply) instead. */
+  clientTurnId   String?
   createdAt      DateTime     @default(now())
+
+  @@unique([conversationId, clientTurnId])
+  @@index([conversationId, createdAt])
 }
 
 // «ورقة وقلم وكيل» — the agent's private scratchpad per conversation.
@@ -182,6 +216,9 @@ model AgentNote {
   active         Boolean      @default(true)
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @default(now()) @updatedAt
+
+  @@index([conversationId, active])
+  @@index([businessId, userId, active])
 }
 
 model ScheduledTask {
@@ -196,11 +233,16 @@ model ScheduledTask {
   whenLabel      String
   scheduledFor   DateTime
   recurrence     String? // daily | weekly | monthly
-  status         String    @default("pending") // pending | done | failed | cancelled
+  status         String    @default("pending") // pending | running | done | failed | cancelled
   result         String?
   failReason     String?
   createdAt      DateTime  @default(now())
   executedAt     DateTime?
+  /** set when a runner atomically claims the task (stuck-run recovery uses it) */
+  claimedAt      DateTime?
+
+  @@index([status, scheduledFor])
+  @@index([businessId, userId, status])
 }
 
 model AgentMemory {
@@ -217,6 +259,9 @@ model AgentMemory {
   active     Boolean  @default(true)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @default(now()) @updatedAt
+
+  @@index([businessId, userId, active])
+  @@index([businessId, kind])
 }
 
 model UsageEvent {
@@ -231,6 +276,9 @@ model UsageEvent {
   tokens     Int? // approximate tokens in the reply
   fallback   Boolean  @default(false) // true when a retry/backoff fallback fired
   createdAt  DateTime @default(now())
+
+  @@index([businessId, createdAt])
+  @@index([businessId, kind, createdAt])
 }
 
 model QuickCommand {
@@ -244,6 +292,8 @@ model QuickCommand {
   sortOrder  Int      @default(0)
   usageCount Int      @default(0)
   createdAt  DateTime @default(now())
+
+  @@index([businessId, userId, sortOrder])
 }
 
 model ProviderCapability {
@@ -286,6 +336,8 @@ model ModelConfig {
   tier         String // air | balanced | deep
   enabled      Boolean            @default(true)
   capabilities ProviderCapability?
+
+  @@index([providerId, enabled])
 }
 
 // «أدوات بتاعتك» (R16) — user-extensible tools the AGENT actually uses:
@@ -306,4 +358,6 @@ model CustomTool {
   updatedAt  DateTime  @updatedAt
   business   Business  @relation("BusinessTools", fields: [businessId], references: [id], onDelete: Cascade)
   user       User      @relation("UserTools", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, userId, active])
 }

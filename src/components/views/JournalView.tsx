@@ -30,7 +30,7 @@ import {
   TypeBadge,
   ViewHeader,
   ViewProps,
-  arNum,
+  arNum, PAGE, PAGE_PLAIN
 } from './shared'
 
 const STATUS_FILTERS: { value: string; label: string }[] = [
@@ -126,7 +126,7 @@ export default function JournalView({ businessId }: ViewProps) {
 
   if (isError) {
     return (
-      <div className="mx-auto w-full max-w-5xl px-4 pb-8 pt-2 sm:px-6">
+      <div className={PAGE_PLAIN}>
         <ViewHeader title="السجل" />
         <div className="mt-4">
           <ErrorState message={error.message} onRetry={() => refetch()} />
@@ -142,7 +142,7 @@ export default function JournalView({ businessId }: ViewProps) {
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.2, ease: 'easeOut' }}
-      className="mx-auto w-full max-w-5xl space-y-4 px-4 pb-8 pt-2 sm:px-6"
+      className={PAGE}
     >
       <ViewHeader
         title="السجل"

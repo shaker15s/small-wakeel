@@ -61,7 +61,8 @@ import { arDate } from '@/lib/format'
 import { QUERY_KEYS } from '@/lib/store'
 import type { CustomToolDTO, MemoryDTO } from '@/lib/types'
 import { cn } from '@/lib/utils'
-import { arNum, EmptyState, ErrorState, SectionCard, ViewProps } from './shared'
+import { arNum, EmptyState, ErrorState, SectionCard, ViewProps, PAGE
+} from './shared'
 
 // ---------------------------------------------------------------------------
 // Kind registry — labels / icons / descriptions (Egyptian Arabic)
@@ -330,7 +331,7 @@ export default function MemoryView({ businessId, userId, onNavigate }: ViewProps
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.2, ease: 'easeOut' }}
-      className="mx-auto w-full max-w-5xl space-y-4 px-4 pb-8 pt-2 sm:space-y-5 sm:px-6"
+      className={PAGE}
     >
       {/* hero — the mascot + stats */}
       <header className="rise-in flex items-start gap-3 sm:gap-4">

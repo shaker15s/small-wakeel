@@ -1,0 +1,39 @@
+# وكيل — app + the bundled OpenAI-compatible mock model provider.
+#
+#   docker compose up --build
+#   open http://localhost:3000
+#
+# The app is reachable on localhost:3000; the model provider only on the
+# internal network (and on 3031 if you uncomment the port).
+services:
+  wakil:
+    build: .
+    ports:
+      - '3000:3000'
+    environment:
+      DATABASE_URL: file:./db/custom.db
+      # ⚠️ Set a real token before exposing this beyond your machine:
+      # WAKIL_ACCESS_TOKEN: change-me
+      WAKIL_ALLOWED_ORIGINS: http://localhost:3000
+      # The demo provider lives on the compose network, so local webhooks are OK here:
+      WAKIL_LOCAL_WEBHOOKS: '1'
+    volumes:
+      - wakil-db:/app/db
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:3000/api/health']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  mock-provider:
+    image: oven/bun:1.4.3-alpine
+    working_dir: /app
+    command: sh -c "bun install --frozen-lockfile && bun index.ts"
+    volumes:
+      - ./mini-services/mock-provider:/app
+    # ports: ['3031:3031']
+    restart: unless-stopped
+
+volumes:
+  wakil-db:

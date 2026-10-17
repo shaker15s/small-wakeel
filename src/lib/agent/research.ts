@@ -10,7 +10,6 @@
 // Every LLM step has a deterministic fallback — 429s happen.
 
 import type { Business, User } from '@prisma/client'
-import ZAI from 'z-ai-web-dev-sdk'
 import { db } from '@/lib/db'
 import type { ResearchDTO, ResultCardDTO, SourceDTO, ThinkingStep, VerifyDTO } from '@/lib/types'
 import { completeChat, type LLMMessage, type ModelInfo } from './llm'
@@ -23,8 +22,29 @@ import { normalizeAr } from './arabic'
 import type { TurnEmit } from './harness'
 
 /** Auto-detect trigger (explicit deepResearch flag OR these words). */
+/**
+ * Auto-research triggers — EGYPTIAN dialect aware, and deliberately
+ * WORD-BOUNDED.
+ *
+ * Why the boundaries matter: «ليه» (why) is a substring of «عليه» / «إليه» /
+ * «اللي عليه», which appear in the most ordinary shop sentences — «حسن دفع
+ * ٥٠ من اللي عليه» used to be hijacked into a full deep-research report
+ * (2.6 s, web queries, a sources card) instead of booking a collection.
+ * Same for «سوق» inside «بيسوق» and «بحث» inside «مباحث». Only a standalone
+ * word may trigger the expensive pipeline.
+ */
 export const RESEARCH_TRIGGER_RE =
-  /ابحث|بحث|حلّل|حلل|قارن|مقارنة|دراسة|ادرس|ليه|استراتيجية|إزاي أحسن|بكام في السوق|سوق|أسعار المنافسين/i
+  /(?:^| )(?:ابحث|بحث|حلّل|حلل|قارن|مقارنة|دراسة|ادرس|ليه|استراتيجية|إزاي أحسن|سوق|الأسواق)(?: |$|؟|\?)|بكام في السوق|أسعار المنافسين/i
+
+/**
+ * True when the message is a concrete business COMMAND (a write, or a read of
+ * a named tool). Such messages must never be auto-hijacked by the research
+ * pipeline: «بعت ٢ علبة لبن» is an instruction, not a research question.
+ * Explicit toggles and genuine analysis questions still research.
+ */
+export function isActionableIntent(intent: { intent: string; tool?: string }): boolean {
+  return intent.intent === 'write' || (intent.intent === 'read' && Boolean(intent.tool))
+}
 
 const AR_ORDINALS = ['١', '٢', '٣', '٤', '٥', '٦']
 
@@ -112,7 +132,11 @@ function craftWebQueries(text: string, mentionedItem: MentionedItem | null, vert
 }
 
 // ---------------------------------------------------------------------------
-// Web search — z-ai-web-dev-sdk (SERVER ONLY), max 5 results per query
+// Web search — PLUGGABLE (see ./websearch). «ابحث في الويب» used to work only
+// on a machine with `.z-ai-config`; on every other install the research report
+// silently leaned on the ledger alone while the owner was asking for market
+// prices. The backends now are: z-ai gateway → WAKIL_SEARCH_URL → the local dev
+// fixture, and a total failure is REPORTED instead of faked.
 // ---------------------------------------------------------------------------
 
 interface WebHit {
@@ -123,20 +147,17 @@ interface WebHit {
 }
 
 async function webSearch(query: string, num: number): Promise<WebHit[]> {
-  const zai = await ZAI.create()
-  const results = await zai.functions.invoke('web_search', { query, num })
-  if (!Array.isArray(results)) return []
-  const hits: WebHit[] = []
-  for (const r of results) {
-    if (!r || typeof r.url !== 'string' || !/^https?:\/\//.test(r.url)) continue
-    hits.push({
-      url: r.url,
-      name: String(r.name ?? r.url).trim() || r.url,
-      snippet: String(r.snippet ?? '').trim(),
-      host: String(r.host_name ?? '').trim(),
-    })
+  const { searchWeb: run } = await import('./websearch')
+  const outcome = await run(query, num)
+  if (outcome.results.length === 0 && outcome.error) {
+    console.warn(`[research] بحث الويب فشل (${outcome.backend}): ${outcome.error}`)
   }
-  return hits
+  return outcome.results.map((r) => ({
+    url: r.url,
+    name: r.title || r.url,
+    snippet: r.snippet,
+    host: r.host,
+  }))
 }
 
 // ---------------------------------------------------------------------------

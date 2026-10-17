@@ -45,6 +45,45 @@ export function arDate(iso: string | Date): string {
   return new Intl.DateTimeFormat('ar-EG', { day: 'numeric', month: 'long', year: 'numeric' }).format(d)
 }
 
+/** «النهاردة» / «امبارح» / «من ٣ أيام» — how fresh is this, in the owner's words. */
+export function arAgo(iso: string | Date): string {
+  const d = typeof iso === 'string' ? new Date(iso) : iso
+  if (Number.isNaN(d.getTime())) return ''
+  const a = startOfCairoDay(d).getTime()
+  const b = startOfCairoDay(new Date()).getTime()
+  const days = Math.round((b - a) / 86400000)
+  if (days <= 0) return `النهاردة ${arTime(d)}`
+  if (days === 1) return `امبارح ${arTime(d)}`
+  if (days === 2) return 'أول امبارح'
+  if (days < 11) return `من ${arNumPlain(days)} أيام`
+  return arDate(d)
+}
+
+/** Is this timestamp inside the Cairo day that contains `now`? */
+export function isTodayCairo(iso: string | Date, now: Date = new Date()): boolean {
+  const d = typeof iso === 'string' ? new Date(iso) : iso
+  if (Number.isNaN(d.getTime())) return false
+  return startOfCairoDay(d).getTime() === startOfCairoDay(now).getTime()
+}
+
+/** 3 → «٣» without the EGP suffix (days, counts). */
+export function arNumPlain(n: number): string {
+  return new Intl.NumberFormat('ar-EG', { maximumFractionDigits: 0 }).format(n)
+}
+
+/** Cairo-local start of day (the app's whole «today» is Africa/Cairo). */
+export function startOfCairoDay(d: Date): Date {
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Cairo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  })
+  const [y, m, day] = fmt.format(d).split('-').map(Number)
+  // noon Cairo is 10:00Z (winter) / 09:00Z (summer); we only need the calendar day
+  return new Date(Date.UTC(y, m - 1, day, 12))
+}
+
 export function arWeekday(iso: string | Date): string {
   const d = typeof iso === 'string' ? new Date(iso) : iso
   return new Intl.DateTimeFormat('ar-EG', { weekday: 'long' }).format(d)

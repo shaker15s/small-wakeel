@@ -5,22 +5,27 @@ import { db } from '@/lib/db'
 import { executeOperation, rejectOperation } from '@/lib/domain/executors'
 import { canApprove } from '@/lib/domain/risk'
 import { badRequest, notFound, serverError } from '../../../_lib/http'
+import { guard } from '../../../_lib/guard'
 import { parseJson, serializeOp } from '../../../_lib/serialize'
+import { confirmOpSchema, parseBody } from '@/lib/security/validate'
 
 export const dynamic = 'force-dynamic'
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params
-    const body = (await req.json()) as { action?: string; reason?: string; userId?: string }
-    if (!body.userId) return badRequest('userId مطلوب')
+    const parsed = await parseBody(req, confirmOpSchema)
+    if (!parsed.ok) return badRequest(parsed.message)
+    const body = parsed.data
 
     const op = await db.operation.findUnique({ where: { id } })
     if (!op) return notFound('العملية غير موجودة')
 
-    const user = await db.user.findUnique({ where: { id: body.userId } })
-    if (!user) return notFound('المستخدم غير موجود')
-    if (user.businessId !== op.businessId) return badRequest('العملية مش في نفس المنشأة')
+    // Tenant isolation: the approver must belong to the business that owns the
+    // operation (checked here and again by the canApprove role rule below).
+    const gate = await guard(req, { businessId: op.businessId, userId: body.userId })
+    if (!gate.ok) return gate.res
+    const user = gate.actor.user
 
     if (body.action === 'approve') {
       if (!canApprove(user.role, op.risk as never)) {
@@ -35,16 +40,35 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       if (op.risk === 'R3' && body.reason?.trim()) {
         await db.operation.update({ where: { id }, data: { reason: body.reason.trim() } })
       }
-      const { op: updated, outcome } = await executeOperation(id, user.id)
-      return NextResponse.json({
-        operation: serializeOp(updated, user.name),
-        outcome,
-      })
+      try {
+        const { op: updated, outcome } = await executeOperation(id, user.id)
+        return NextResponse.json({
+          operation: serializeOp(updated, user.name),
+          outcome,
+        })
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'مش قادر أنفّذ العملية'
+        // State-machine conflicts (already approved/cancelled elsewhere — e.g.
+        // two taps on the approve button) are CLIENT errors: answer 409 with the
+        // real reason instead of a generic 500.
+        if (/انتظار اعتماد|مش موجودة/.test(message)) {
+          return NextResponse.json({ error: message }, { status: 409 })
+        }
+        throw err
+      }
     }
 
     if (body.action === 'reject' || body.action === 'cancel') {
-      const updated = await rejectOperation(id, user.id, body.reason)
-      return NextResponse.json({ operation: serializeOp(updated, user.name) })
+      try {
+        const updated = await rejectOperation(id, user.id, body.reason)
+        return NextResponse.json({ operation: serializeOp(updated, user.name) })
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'مش قادر ألغي العملية'
+        if (/انتظار اعتماد|مش موجودة/.test(message)) {
+          return NextResponse.json({ error: message }, { status: 409 })
+        }
+        throw err
+      }
     }
 
     return badRequest('action لازم يكون approve أو reject')

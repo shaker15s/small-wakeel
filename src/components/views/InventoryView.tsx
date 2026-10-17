@@ -25,7 +25,9 @@ import { QUERY_KEYS } from '@/lib/store'
 import { useQuery } from '@tanstack/react-query'
 import { cn } from '@/lib/utils'
 import type { ItemDTO } from '@/lib/types'
-import { EmptyState, ErrorState, Money, ViewHeader, ViewProps, arNum } from './shared'
+import { EmptyState, ErrorState, Money, ViewHeader, ViewProps, arNum, PAGE, PAGE_PLAIN
+} from './shared'
+import { ImportItemsDialog } from './ImportItemsDialog'
 
 function itemValue(it: ItemDTO): number {
   return it.valueAtCost ?? it.costPrice * it.stockQty
@@ -59,7 +61,7 @@ function ItemBadges({ it }: { it: ItemDTO }) {
   )
 }
 
-export default function InventoryView({ businessId }: ViewProps) {
+export default function InventoryView({ businessId, userId }: ViewProps) {
   const [query, setQuery] = useState('')
   const [category, setCategory] = useState('__all')
 
@@ -96,7 +98,7 @@ export default function InventoryView({ businessId }: ViewProps) {
 
   if (isError) {
     return (
-      <div className="mx-auto w-full max-w-5xl px-4 pb-8 pt-2 sm:px-6">
+      <div className={PAGE_PLAIN}>
         <ViewHeader title="المخزون" />
         <div className="mt-4">
           <ErrorState message={error.message} onRetry={() => refetch()} />
@@ -110,7 +112,7 @@ export default function InventoryView({ businessId }: ViewProps) {
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.2, ease: 'easeOut' }}
-      className="mx-auto w-full max-w-5xl space-y-4 px-4 pb-8 pt-2 sm:px-6"
+      className={PAGE}
     >
       <ViewHeader
         title="المخزون"
@@ -119,6 +121,7 @@ export default function InventoryView({ businessId }: ViewProps) {
             ? 'بنجهّز الكتالوج...'
             : `${arNum(items.length)} صنف${lowCount > 0 ? ` — ${arNum(lowCount)} ناقص` : ''} · القيمة: ${egp(allValue)}`
         }
+        action={<ImportItemsDialog businessId={businessId} userId={userId} />}
       />
 
       {/* بحث + تصنيفات */}

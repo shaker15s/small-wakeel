@@ -49,6 +49,9 @@ export const TYPE_AR: Record<OpType, string> = {
   stock_adjustment: 'تسوية مخزون',
   membership: 'اشتراك',
   attendance: 'حضور',
+  customer_add: 'عميل جديد',
+  supplier_add: 'مورد جديد',
+  price_change: 'تغيير سعر',
   reversal: 'عكس عملية',
 }
 
@@ -192,6 +195,14 @@ const KPI_ICON_BG: Record<KpiTone, string> = {
   muted: 'bg-muted',
 }
 
+const KPI_HAIRLINE: Record<KpiTone, string> = {
+  teal: 'via-wakil-teal/50',
+  amber: 'via-wakil-amber/60',
+  navy: 'via-wakil-navy/40',
+  red: 'via-destructive/50',
+  muted: 'via-border',
+}
+
 const KPI_TONE_TEXT: Record<KpiTone, string> = {
   teal: 'text-wakil-teal',
   amber: 'text-wakil-amber',
@@ -219,14 +230,18 @@ export function KpiCard({
   return (
     <div
       className={cn(
-        'chip-lift group flex h-24 flex-col justify-between rounded-xl border bg-card p-4 shadow-sm',
+        'chip-lift group relative flex h-24 flex-col justify-between overflow-hidden rounded-xl border bg-gradient-to-b from-card to-card/60 p-4 shadow-sm sm:h-28 sm:p-5',
         index != null ? 'list-enter' : 'card-enter',
       )}
       style={index != null ? { animationDelay: `${index * 40}ms` } : undefined}
       title={title}
     >
+      <span
+        aria-hidden
+        className={cn('pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-l from-transparent to-transparent', KPI_HAIRLINE[tone])}
+      />
       <div className="flex items-center justify-between gap-2">
-        <span className="text-xs font-medium text-muted-foreground">{label}</span>
+        <span className="text-xs font-medium text-muted-foreground sm:text-[13px]">{label}</span>
         <span
           className={cn(
             'icon-wiggle flex size-7 shrink-0 items-center justify-center rounded-lg transition-transform duration-200 group-hover:scale-110',
@@ -238,7 +253,7 @@ export function KpiCard({
       </div>
       <div
         className={cn(
-          'num truncate text-xl font-bold leading-none tabular-nums',
+          'num truncate text-xl font-bold leading-none tabular-nums sm:text-[1.7rem]',
           KPI_TONE_TEXT[tone],
         )}
       >
@@ -252,7 +267,7 @@ export function LoadingKpis({ count = 4 }: { count?: number }) {
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4" aria-busy="true" aria-label="بيتحمّل">
       {Array.from({ length: count }).map((_, i) => (
-        <div key={i} className="skel h-24 rounded-xl" />
+        <div key={i} className="skel h-24 rounded-xl sm:h-28" />
       ))}
     </div>
   )
@@ -412,6 +427,18 @@ export function SectionCard({
   )
 }
 
+/**
+ * The one page container.
+ *
+ * The app shell is full-bleed (`h-dvh`, no max-width), but every screen used to
+ * cap itself at `max-w-5xl` — so on a laptop the owner got a phone-sized column
+ * with two dead gutters. One shared container means the content uses the whole
+ * screen on a 27" monitor and still breathes on a phone, and no screen can drift
+ * out of alignment with the others.
+ */
+export const PAGE = 'mx-auto w-full max-w-[1800px] space-y-4 px-3 pb-10 pt-2 sm:space-y-5 sm:px-6 xl:space-y-6 xl:px-10'
+export const PAGE_PLAIN = 'mx-auto w-full max-w-[1800px] px-3 pb-10 pt-2 sm:px-6 xl:px-10'
+
 export function ViewHeader({
   title,
   subtitle,
@@ -422,9 +449,9 @@ export function ViewHeader({
   action?: React.ReactNode
 }) {
   return (
-    <header className="flex flex-wrap items-end justify-between gap-3">
+    <header className="flex flex-wrap items-end justify-between gap-3 pb-1">
       <div className="min-w-0">
-        <h1 className="text-xl font-bold sm:text-2xl">{title}</h1>
+        <h1 className="text-2xl font-bold tracking-tight sm:text-[1.7rem]">{title}</h1>
         {subtitle && <p className="mt-1 text-sm text-muted-foreground">{subtitle}</p>}
       </div>
       {action}

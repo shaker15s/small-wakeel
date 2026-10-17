@@ -5,6 +5,7 @@ import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import type { ReportsDTO } from '@/lib/types'
 import { badRequest, searchParams, serverError } from '../_lib/http'
+import { guard } from '../_lib/guard'
 import { cairoDayIndex, cairoIsoDay, cairoIsoDayOffset, startOfCairoDay } from '../_lib/dates'
 import { parseJson, payloadTotalPiastres } from '../_lib/serialize'
 
@@ -70,6 +71,8 @@ export async function GET(req: Request) {
     const sp = searchParams(req)
     const businessId = sp.get('businessId')
     if (!businessId) return badRequest('businessId مطلوب')
+    const gate = await guard(req, { businessId, scope: 'business' })
+    if (!gate.ok) return gate.res
 
     const range = sp.get('range') === '30d' ? '30d' : '7d'
     const days = range === '30d' ? 30 : 7
@@ -116,6 +119,10 @@ export async function GET(req: Request) {
       if (bucket) {
         const total = payloadTotalPiastres(op.payload)
         switch (op.type) {
+          // A gym sells MEMBERSHIPS, not «sales». Leaving membership out of the
+          // revenue bucket made the gym's stats screen read «المبيعات ٠» after
+          // four renewals (found by the screens audit).
+          case 'membership':
           case 'sale':
             bucket.sales += total
             break

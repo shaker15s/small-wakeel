@@ -2,7 +2,6 @@
 // unit conversion, and fuzzy entity matching. The LLM only identifies WHAT the
 // user wants; this module makes the server actually UNDERSTAND it deterministically.
 
-import { AR_UNITS } from '../verticals'
 
 /** Normalize Arabic text for matching: strip tashkeel/diacritics, unify alef/yaa/taa, collapse spaces. */
 export function normalizeAr(input: string): string {
@@ -27,7 +26,14 @@ export function toWesternDigits(s: string): string {
   for (const ch of s) {
     const ai = AR_DIGITS.indexOf(ch)
     const fi = FA_DIGITS.indexOf(ch)
-    out += ai >= 0 ? String(ai) : fi >= 0 ? String(fi) : ch
+    if (ai >= 0) out += String(ai)
+    else if (fi >= 0) out += String(fi)
+    // ARABIC DECIMAL SEPARATOR (U+066B) and THOUSANDS SEPARATOR (U+066C).
+    // Without this, «١٢٫٥٠ جنيه» parsed as 12 — a real money bug: every price
+    // typed with an Arabic decimal separator lost its piastres silently.
+    else if (ch === '\u066B') out += '.'
+    else if (ch === '\u066C') out += ''
+    else out += ch
   }
   return out
 }
@@ -52,6 +58,7 @@ const AR_NUMBER_WORDS: Record<string, number> = {
 export function parseArabicNumber(raw: string): number | null {
   const hasDigits = /[0-9٠-٩]/.test(raw)
   if (hasDigits) {
+    // «،» and «,» are used as decimal separators by Egyptian speakers too.
     const s = toWesternDigits(raw).replace(/[,،]/g, '.')
     const m = s.match(/-?\d+(\.\d+)?/)
     if (m) return parseFloat(m[0])
@@ -156,26 +163,70 @@ export function convertToBaseUnit(qty: number, fromUnit: string, baseUnit: strin
   return Math.round(qty * factor * 1000) / 1000
 }
 
+/* ------------------------------------------------------- name matching (R29) */
+const BOUND = '[\\s،,.:؛!؟()«»\\-]'
+const escapeRe = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/**
+ * Is `needle` present in `hay` as a WHOLE WORD (not glued inside another word)?
+ * R29 bug class this fixes: «شوكولاتة» literally CONTAINS the letters «كولا», so
+ * a plain `includes()` matched the chocolate sentence to «كوكاكولا 1 لتر» and the
+ * draft billed a cola (score 0.7 — above the accept threshold).
+ */
+function wordBounded(hay: string, needle: string): boolean {
+  if (needle.length < 3) return false
+  return new RegExp(`(^|${BOUND})${escapeRe(needle)}($|${BOUND})`).test(hay)
+}
+
+/**
+ * Index of `needle` inside `hay` when it sits on WORD boundaries, else -1.
+ * Exported because every money path must use it: the per-item scan used a plain
+ * `indexOf`, and «شوكولاتة» contains the letters of the alias «كولا», so a
+ * chocolate sentence scanned as a Coca-Cola sale (live R29).
+ */
+export function wordBoundedAt(hay: string, needle: string): number {
+  if (needle.length < 3) return -1
+  const re = new RegExp(`(^|${BOUND})${escapeRe(needle)}(?=$|${BOUND})`, 'g')
+  const m = re.exec(hay)
+  if (!m) return -1
+  // the match starts after the boundary char (when there is one)
+  return m.index + m[1].length
+}
+
+/** Definite-article-insensitive token set («الجبنة» → «جبنه»). */
+const wordSet = (x: string): Set<string> =>
+  new Set(
+    x
+      .split(/[\s،,.:؛!؟()«»]+/)
+      .map((t) => t.replace(/^ال/, ''))
+      .filter((t) => t.length > 1),
+  )
+
 /** Fuzzy-match a user-typed name against candidates (name + aliases). Returns best match or null. */
 export function matchEntity<T extends { name: string; aliases?: string | null }>(
   query: string,
   candidates: T[],
 ): { entity: T; score: number } | null {
-  const q = normalizeAr(query).replace(/^(ال)/, '')
+  const q = normalizeAr(query).replace(/^(ال)/, '').trim()
   if (!q) return null
   let best: { entity: T; score: number } | null = null
   for (const c of candidates) {
     const names = [c.name, ...(c.aliases ? c.aliases.split(',').map((a) => a.trim()) : [])]
     for (const n of names) {
-      const nn = normalizeAr(n).replace(/^(ال)/, '')
+      const nn = normalizeAr(n).replace(/^(ال)/, '').trim()
       if (!nn) continue
       let score = 0
       if (nn === q) score = 1
-      else if (nn.includes(q) || q.includes(nn)) {
+      else if (wordBounded(nn, q)) {
+        // «شيبسي عائلي» ⊂ «شيبسي عائلي 150 جم» — real containment, whole words
         score = 0.85 - (Math.abs(nn.length - q.length) / Math.max(nn.length, q.length, 8)) * 0.2
+      } else if (wordBounded(q, nn)) {
+        // the typed sentence contains the catalog name («بعت ٢ كيلو رز مصري»)
+        score = 0.8 - (Math.abs(nn.length - q.length) / Math.max(nn.length, q.length, 8)) * 0.2
       } else {
-        const qt = new Set(q.split(' ').filter((t) => t.length > 1))
-        const nt = new Set(nn.split(' ').filter((t) => t.length > 1))
+        // word overlap only — a shared 3-letter fragment is never a match
+        const qt = wordSet(q)
+        const nt = wordSet(nn)
         let hits = 0
         for (const t of qt) if (nt.has(t)) hits++
         if (qt.size > 0 && hits > 0) score = 0.6 + 0.2 * (hits / qt.size)

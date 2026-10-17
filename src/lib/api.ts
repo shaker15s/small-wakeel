@@ -1,5 +1,6 @@
 // وكيل — typed client API + SSE chat streaming reader (frontend)
 
+import { useWakil } from './store'
 import type {
   BootstrapDTO,
   OverviewDTO,
@@ -22,10 +23,53 @@ import type {
   ResearchDTO,
   VerifyDTO,
   CustomToolDTO,
+  MorningBriefDTO,
 } from './types'
 
+/**
+ * Access token handling (see docs/SECURITY.md).
+ *
+ * Deployment can require a token (`WAKIL_ACCESS_TOKEN`). The client picks it up
+ * from the URL once (`?token=…`), remembers it, and replays it on every call —
+ * so a protected instance is usable by simply opening the shared link.
+ */
+const TOKEN_LS_KEY = 'wakil.token'
+
+function accessToken(): string | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const fromUrl = new URLSearchParams(window.location.search).get('token')
+    if (fromUrl) {
+      window.localStorage.setItem(TOKEN_LS_KEY, fromUrl)
+      // keep the token out of the address bar / history / referrer
+      const clean = window.location.pathname + window.location.hash
+      window.history.replaceState({}, '', clean)
+      return fromUrl
+    }
+    return window.localStorage.getItem(TOKEN_LS_KEY)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Every request carries the *actor context* the server needs to enforce tenant
+ * isolation: which business and which user the browser is currently acting as,
+ * plus the access token when one is configured. This is what lets
+ * PATCH/DELETE-by-id routes prove ownership without every call site passing ids.
+ */
+function apiHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { ...(extra ?? {}) }
+  const state = useWakil.getState()
+  if (state.businessId) headers['x-wakil-business'] = state.businessId
+  if (state.userId) headers['x-wakil-user'] = state.userId
+  const token = accessToken()
+  if (token) headers['x-wakil-token'] = token
+  return headers
+}
+
 async function get<T>(url: string): Promise<T> {
-  const res = await fetch(url, { cache: 'no-store' })
+  const res = await fetch(url, { cache: 'no-store', headers: apiHeaders() })
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string }
     throw new Error(body.error ?? `فشل الطلب (${res.status})`)
@@ -36,7 +80,7 @@ async function get<T>(url: string): Promise<T> {
 async function post<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: apiHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify(body),
   })
   if (!res.ok) {
@@ -49,7 +93,7 @@ async function post<T>(url: string, body: unknown): Promise<T> {
 async function patch<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(url, {
     method: 'PATCH',
-    headers: { 'content-type': 'application/json' },
+    headers: apiHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify(body),
   })
   if (!res.ok) {
@@ -60,11 +104,39 @@ async function patch<T>(url: string, body: unknown): Promise<T> {
 }
 
 async function del(url: string): Promise<void> {
-  const res = await fetch(url, { method: 'DELETE' })
+  const res = await fetch(url, { method: 'DELETE', headers: apiHeaders() })
   if (!res.ok) {
     const data = (await res.json().catch(() => ({}))) as { error?: string }
     throw new Error(data.error ?? `فشل الطلب (${res.status})`)
   }
+}
+
+export interface ItemImportResult {
+  total: number
+  created: number
+  updated: number
+  skipped: number
+  unknownHeaders: string[]
+  errors: { row: number; message: string }[]
+  dryRun?: boolean
+  preview?: { name: string; sellPrice: number; stockQty: number }[]
+}
+
+export interface SearchHitDTO {
+  kind: 'item' | 'customer' | 'supplier' | 'operation' | 'note'
+  id: string
+  title: string
+  subtitle: string
+  ref?: string
+  tone?: 'good' | 'warn' | 'bad'
+  score: number
+}
+
+export interface SearchResultDTO {
+  query: string
+  total: number
+  groups: Record<string, number>
+  results: SearchHitDTO[]
 }
 
 export const api = {
@@ -72,6 +144,15 @@ export const api = {
   overview: (businessId: string, userId: string) =>
     get<OverviewDTO>(`/api/overview?businessId=${businessId}&userId=${userId}`),
   items: (businessId: string) => get<ItemDTO[]>(`/api/items?businessId=${businessId}`),
+  importItems: (body: {
+    businessId: string
+    userId: string
+    csv: string
+    updateExisting?: boolean
+    dryRun?: boolean
+  }) => post<ItemImportResult>('/api/items/import', body),
+  search: (businessId: string, q: string, limit = 12) =>
+    get<SearchResultDTO>(`/api/search?businessId=${businessId}&q=${encodeURIComponent(q)}&limit=${limit}`),
   operations: (businessId: string, status?: string) =>
     get<OperationDTO[]>(`/api/operations?businessId=${businessId}${status ? `&status=${status}` : ''}`),
   chat: (
@@ -96,7 +177,7 @@ export const api = {
     post<{ provider: import('./types').ProviderDTO }>('/api/providers', p),
   saveProviderModels: (id: string, models: { remoteId: string; label: string; tier: string; enabled: boolean }[]) =>
     post<{ provider: import('./types').ProviderDTO }>(`/api/providers/${id}`, { models }),
-  deleteProvider: (id: string) => fetch(`/api/providers/${id}`, { method: 'DELETE' }),
+  deleteProvider: (id: string) => fetch(`/api/providers/${id}`, { method: 'DELETE', headers: apiHeaders() }),
   createTask: (t: { businessId: string; userId: string; title: string; tool: string; fields?: Record<string, unknown>; whenLabel?: string; recurrence?: string }) =>
     post<{ task: ScheduledTaskDTO }>('/api/tasks', t),
   tickTasks: () => post<{ ran: number; due: number }>('/api/tasks/tick', {}),
@@ -118,6 +199,9 @@ export const api = {
   // — الاقتراحات الديناميكية (بتتغير مع شغلك)
   suggestions: (businessId: string, userId: string) =>
     get<SuggestionDTO[]>(`/api/suggestions?businessId=${businessId}&userId=${userId}`),
+  // — «ابدأ يومك»: تلات توصيات محسوبة من السجل نفسه (بدون موديل)
+  morningBrief: (businessId: string, userId: string) =>
+    get<MorningBriefDTO>(`/api/morning-brief?businessId=${businessId}&userId=${userId}`),
   // — أدواتك السريعة (user-extensible tools)
   quickCommands: (businessId: string) => get<QuickCommandDTO[]>(`/api/quick-commands?businessId=${businessId}`),
   createQuickCommand: (c: { businessId: string; userId: string; label: string; prompt: string; icon: string }) =>
@@ -153,6 +237,8 @@ export interface StreamHandlers {
   onStep?: (label: string, state: 'active' | 'done') => void
   onCard?: (card: ActionCardDTO) => void
   onCards?: (cards: ResultCardDTO[]) => void
+  /** R28: the read-only plan the agent is about to run (label per step) */
+  onPlan?: (steps: string[]) => void
   onActions?: (actions: ChatActionDTO[]) => void
   onDelta?: (text: string) => void
   /** carried on the done event — R15 self-verification + deep-research metadata */
@@ -175,18 +261,29 @@ export async function streamChat(
     suggestionId?: string | null
     /** R15 — «بحث عميق» composer toggle: force the plan-and-execute research pipeline */
     deepResearch?: boolean
+    /** R34 — stable per-send id so «جرّب تاني» is idempotent on the server */
+    turnId?: string
   },
   handlers: StreamHandlers,
   signal?: AbortSignal,
 ): Promise<void> {
   const res = await fetch('/api/chat', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: apiHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify(body),
     signal,
   })
   if (!res.ok || !res.body) {
-    handlers.onError?.('مش قادر أوصل للسيرفر — جرّب تاني')
+    // «الرد الصح للخطأ الصح»: 429 is the one status the owner can fix himself
+    // (he typed too fast), and the server already says how long to wait — a
+    // generic «مش قادر أوصل» made a working server look broken (live R29).
+    if (res.status === 429) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string; retryAfter?: number }
+      const secs = Number(body.retryAfter ?? 0) || 0
+      handlers.onError?.(body.error ?? `طلبات كتير في وقت قصير — استنى ${secs || 5} ثانية وجرّب تاني`)
+      return
+    }
+    handlers.onError?.(res.status === 401 ? 'الجلسة انتهت — حدّث الصفحة' : 'مش قادر أوصل للسيرفر — جرّب تاني')
     return
   }
   const reader = res.body.getReader()
@@ -207,6 +304,7 @@ export async function streamChat(
           | { event: 'thinking'; steps: ThinkingStep[] }
           | { event: 'step'; label: string; state: 'active' | 'done' }
           | { event: 'card'; card: ActionCardDTO }
+          | { event: 'plan'; steps: string[] }
           | { event: 'cards'; cards: ResultCardDTO[] }
           | { event: 'actions'; actions: ChatActionDTO[] }
           | { event: 'delta'; text: string }
@@ -217,6 +315,7 @@ export async function streamChat(
           case 'thinking': handlers.onThinking?.(ev.steps); break
           case 'step': handlers.onStep?.(ev.label, ev.state); break
           case 'card': handlers.onCard?.(ev.card); break
+          case 'plan': handlers.onPlan?.(ev.steps); break
           case 'cards': handlers.onCards?.(ev.cards); break
           case 'actions': handlers.onActions?.(ev.actions); break
           case 'delta': handlers.onDelta?.(ev.text); break

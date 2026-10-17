@@ -38,6 +38,9 @@ const STEP_ICONS: Record<NonNullable<ThinkingStep['icon']>, LucideIcon> = {
 
 export function ThinkingBlock({ steps }: { steps: ThinkingStep[] }) {
   const [open, setOpen] = useState(false)
+  // Total measured time of the traced passes — the honest «سرعة» number the
+  // owner can compare between two questions (ms, not vibes).
+  const totalMs = steps.reduce((sum, s) => sum + (s.ms ?? 0), 0)
 
   return (
     <motion.div
@@ -51,6 +54,12 @@ export function ThinkingBlock({ steps }: { steps: ThinkingStep[] }) {
           <Brain className="size-4 shrink-0 text-wakil-amber" aria-hidden="true" />
           <span className="text-sm font-medium text-muted-foreground">
             تفكير وكيل · <span className="num">{steps.length}</span> خطوات
+            {totalMs > 0 ? (
+              <>
+                {' · '}
+                <span className="num">{formatMs(totalMs)}</span>
+              </>
+            ) : null}
           </span>
           <ChevronDown
             className="ms-auto size-4 shrink-0 text-muted-foreground transition-transform duration-200 group-data-[state=open]:rotate-180"
@@ -68,6 +77,13 @@ export function ThinkingBlock({ steps }: { steps: ThinkingStep[] }) {
       </Collapsible>
     </motion.div>
   )
+}
+
+/** «٤٢٠ مللي» / «١٫٦ث» — Arabic-friendly duration. */
+export function formatMs(ms: number): string {
+  const ar = (n: string) => n.replace(/[0-9]/g, (d) => '٠١٢٣٤٥٦٧٨٩'[Number(d)])
+  if (ms < 1000) return `${ar(String(Math.round(ms)))} مللي`
+  return `${ar((ms / 1000).toFixed(ms < 10_000 ? 1 : 0))}ث`
 }
 
 function ThinkingRow({ step }: { step: ThinkingStep }) {
@@ -102,6 +118,11 @@ function ThinkingRow({ step }: { step: ThinkingStep }) {
           )}
           {step.state === 'done' && (
             <Check className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+          )}
+          {typeof step.ms === 'number' && step.ms > 0 && (
+            <span className="num ms-chip shrink-0 rounded px-1 py-0.5 text-[10px] tabular-nums text-muted-foreground/80">
+              {formatMs(step.ms)}
+            </span>
           )}
         </div>
         {step.detail ? (
