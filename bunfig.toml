@@ -5,4 +5,5 @@
 # import of the Prisma singleton was enough to bind the whole suite to the REAL
 # database and write test drafts into the demo data.
 [test]
+root = "./tests"
 preload = ["./tests/helpers/preload.ts"]

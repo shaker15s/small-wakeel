@@ -9,6 +9,7 @@ import type { MemoryDTO } from '@/lib/types'
 import { isRuleText, preferenceCategory, ruleCategory } from '@/lib/agent/memory'
 import { decisionEngine } from '@/lib/agent/decision-middleware'
 import { badRequest, notFound, searchParams, serverError } from '../_lib/http'
+import { guard } from '../_lib/guard'
 import { serializeMemory } from '../_lib/serialize'
 
 export const dynamic = 'force-dynamic'
@@ -24,6 +25,8 @@ export async function POST(req: Request) {
     }
     if (!body.businessId) return badRequest('businessId مطلوب')
     if (!body.userId) return badRequest('userId مطلوب')
+    const gate = await guard(req, { businessId: body.businessId, userId: body.userId })
+    if (!gate.ok) return gate.res
     const trimmed = body.text?.trim()
     if (!trimmed) return badRequest('نص الذاكرة مطلوب')
 
@@ -73,6 +76,8 @@ export async function GET(req: Request) {
     const sp = searchParams(req)
     const businessId = sp.get('businessId')
     if (!businessId) return badRequest('businessId مطلوب')
+    const gate = await guard(req, { businessId, scope: 'business' })
+    if (!gate.ok) return gate.res
     const activeOnly = sp.get('active')
 
     const memories = await db.agentMemory.findMany({
@@ -89,6 +94,9 @@ export async function GET(req: Request) {
 
 export async function PATCH(req: Request) {
   try {
+    const gate = await guard(req, { scope: 'business' })
+    if (!gate.ok) return gate.res
+
     const body = (await req.json()) as {
       id?: string
       text?: string
@@ -128,6 +136,9 @@ export async function PATCH(req: Request) {
 
 export async function DELETE(req: Request) {
   try {
+    const gate = await guard(req, { scope: 'business' })
+    if (!gate.ok) return gate.res
+
     const sp = searchParams(req)
     const id = sp.get('id')
     if (!id) return badRequest('id مطلوب')
@@ -141,3 +152,4 @@ export async function DELETE(req: Request) {
     return serverError('memories-delete', e)
   }
 }
+

@@ -65,10 +65,10 @@ export function ProactivePulseBar({
 
   const pendingCount = overview?.pendingOps.length ?? 0
   const lowStockCount = overview?.lowStock.length ?? 0
-  const activePluginsCount = (pluginsData?.plugins ?? []).filter((p) => p.active).length
+  const activePluginsCount = (Array.isArray(pluginsData) ? pluginsData : []).filter((p) => p.active).length
   const proactiveAlerts = bgData?.proactiveAlerts ?? []
-  const criticalRisks = proactiveAlerts.filter((a) => a.kind === 'risk' && (a.severity === 'critical' || a.severity === 'warning'))
-  const opportunities = proactiveAlerts.filter((a) => a.kind === 'opportunity')
+  const criticalRisks = proactiveAlerts.filter((a) => a.category === 'risk' && (a.level === 'danger' || a.level === 'warning'))
+  const opportunities = proactiveAlerts.filter((a) => a.category === 'opportunity')
 
   const handleDispatchConcurrentJobs = async () => {
     if (runningBatch || disabled) return
@@ -90,8 +90,8 @@ export function ProactivePulseBar({
       void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.overview(business.id, userId) })
       void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.chatConversation(business.id, userId, null) })
       toast({
-        title: `راجعت الشغل بالكامل في ${res.batch.totalDurationMs}ms ✅`,
-        description: `فحصت الحسابات + حللت التقرير المالي + رصدت ${res.batch.proactiveAlerts.length} تنبيه مخاطر وفرص`,
+        title: `راجعت الشغل بالكامل في ${res.totalDurationMs}ms ✅`,
+        description: `فحصت الحسابات + حللت التقرير المالي + رصدت ${res.proactiveAlerts.length} تنبيه مخاطر وفرص`,
       })
     } catch (e) {
       toast({

@@ -24,6 +24,7 @@ import type {
   VerifyDTO,
   CustomToolDTO,
   MorningBriefDTO,
+  SubtaskDTO,
 } from './types'
 
 /**
@@ -276,13 +277,16 @@ export interface StreamHandlers {
   onCards?: (cards: ResultCardDTO[]) => void
   /** R28: the read-only plan the agent is about to run (label per step) */
   onPlan?: (steps: string[]) => void
+  /** Autonomous sub-agent coordinator decomposition tasks */
+  onTasks?: (tasks: SubtaskDTO[]) => void
+  onTaskUpdate?: (task: SubtaskDTO) => void
   onActions?: (actions: ChatActionDTO[]) => void
   onDelta?: (text: string) => void
   /** carried on the done event — R15 self-verification + deep-research metadata */
   onDone?: (
     messageId: string,
     modelLabel: string,
-    meta?: { verified?: VerifyDTO; research?: ResearchDTO },
+    meta?: { verified?: VerifyDTO; research?: ResearchDTO; tasks?: SubtaskDTO[] },
   ) => void
   onError?: (message: string) => void
 }
@@ -342,10 +346,12 @@ export async function streamChat(
           | { event: 'step'; label: string; state: 'active' | 'done' }
           | { event: 'card'; card: ActionCardDTO }
           | { event: 'plan'; steps: string[] }
+          | { event: 'tasks'; tasks: SubtaskDTO[] }
+          | { event: 'task_update'; task: SubtaskDTO }
           | { event: 'cards'; cards: ResultCardDTO[] }
           | { event: 'actions'; actions: ChatActionDTO[] }
           | { event: 'delta'; text: string }
-          | { event: 'done'; messageId: string; modelLabel: string; verified?: VerifyDTO; research?: ResearchDTO }
+          | { event: 'done'; messageId: string; modelLabel: string; verified?: VerifyDTO; research?: ResearchDTO; tasks?: SubtaskDTO[] }
           | { event: 'error'; message: string }
         switch (ev.event) {
           case 'start': handlers.onStart?.(ev.conversationId, ev.messageId); break
@@ -353,11 +359,13 @@ export async function streamChat(
           case 'step': handlers.onStep?.(ev.label, ev.state); break
           case 'card': handlers.onCard?.(ev.card); break
           case 'plan': handlers.onPlan?.(ev.steps); break
+          case 'tasks': handlers.onTasks?.(ev.tasks); break
+          case 'task_update': handlers.onTaskUpdate?.(ev.task); break
           case 'cards': handlers.onCards?.(ev.cards); break
           case 'actions': handlers.onActions?.(ev.actions); break
           case 'delta': handlers.onDelta?.(ev.text); break
           case 'done':
-            handlers.onDone?.(ev.messageId, ev.modelLabel, { verified: ev.verified, research: ev.research })
+            handlers.onDone?.(ev.messageId, ev.modelLabel, { verified: ev.verified, research: ev.research, tasks: ev.tasks })
             break
           case 'error': handlers.onError?.(ev.message); break
         }
@@ -383,6 +391,7 @@ export function messageToTurn(m: MessageDTO): ChatTurnWithMeta {
     text: m.text,
     card: m.card ?? null,
     cards: m.cards ?? null,
+    tasks: m.tasks ?? null,
     thinking: m.thinking ?? null,
     modelLabel: m.modelLabel ?? null,
     actions: m.actions ?? null,

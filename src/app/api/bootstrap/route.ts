@@ -5,14 +5,17 @@ import { db } from '@/lib/db'
 import type { BootstrapDTO, Role, Vertical } from '@/lib/types'
 import { createNewBusinessWithDefaults } from '@/lib/domain/business-builder'
 import { badRequest, serverError } from '../_lib/http'
+import { guard } from '../_lib/guard'
 
 export const dynamic = 'force-dynamic'
 
 // Meaningful role order for user pickers: owner first, then supervisor, staff.
 const ROLE_ORDER: Record<string, number> = { owner: 0, supervisor: 1, cashier: 2, reception: 3 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
+    const gate = await guard(req, { scope: 'open' })
+    if (!gate.ok) return gate.res
     const [businesses, providers] = await Promise.all([
       db.business.findMany({
         orderBy: { createdAt: 'asc' },
@@ -65,6 +68,8 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   try {
+    const gate = await guard(req, { scope: 'open' })
+    if (!gate.ok) return gate.res
     const body = (await req.json().catch(() => ({}))) as {
       name?: string
       type?: string

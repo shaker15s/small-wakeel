@@ -49,6 +49,7 @@ export const QUERY_KEYS = {
   tools: (businessId: string, userId?: string) => ['tools', businessId, userId ?? 'all'] as const,
   plugins: (businessId: string) => ['plugins', businessId] as const,
   backgroundTasks: (businessId: string) => ['backgroundTasks', businessId] as const,
+  morningBrief: (businessId: string, userId: string) => ['morning-brief', businessId, userId] as const,
 }
 
 const STORAGE_KEY = 'wakil.session.v2'
@@ -87,6 +88,8 @@ interface WakilState {
   setBusinessBuilderOpen: (open: boolean) => void
   setPluginStudioOpen: (open: boolean, tab?: PluginStudioTab) => void
   askAgent: (text: string, opts?: { deepResearch?: boolean }) => void
+  queuePrompt: (text: string) => void
+  clearPrompt: () => void
   consumePendingPrompt: () => { text: string; deepResearch?: boolean } | null
 }
 
@@ -197,6 +200,12 @@ export const useWakil = create<WakilState>((set, get) => ({
       view: 'chat',
       pendingPrompt: { text, deepResearch: opts?.deepResearch },
     }),
+  queuePrompt: (text) =>
+    set({
+      view: 'chat',
+      pendingPrompt: { text },
+    }),
+  clearPrompt: () => set({ pendingPrompt: null }),
   consumePendingPrompt: () => {
     const p = get().pendingPrompt
     if (p) set({ pendingPrompt: null })

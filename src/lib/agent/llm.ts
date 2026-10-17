@@ -61,7 +61,34 @@ export function modelLabelFor(model: ModelInfo): string {
   return `${model.label} · ${model.remoteModel} · مزوّد خارجي`
 }
 
+let zaiProbe: { at: number; ok: boolean } | null = null
+export function zaiAvailable(): boolean {
+  if (zaiProbe && Date.now() - zaiProbe.at < 60_000) return zaiProbe.ok
+  const candidates = [
+    `${process.cwd()}/.z-ai-config`,
+    `${process.env.HOME ?? ''}/.z-ai-config`,
+    `${process.env.USERPROFILE ?? ''}/.z-ai-config`,
+    '/etc/.z-ai-config',
+  ]
+  let ok = false
+  for (const path of candidates) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const fs = require('node:fs') as typeof import('node:fs')
+      if (path && fs.existsSync(path)) {
+        ok = true
+        break
+      }
+    } catch {
+      /* keep probing */
+    }
+  }
+  zaiProbe = { at: Date.now(), ok }
+  return ok
+}
+
 export function getGeminiClient(): GoogleGenAI | null {
+  if (process.env.WAKIL_OFFLINE === '1') return null
   const apiKey = process.env.GEMINI_API_KEY
   if (!apiKey || !apiKey.trim()) return null
   return new GoogleGenAI({
@@ -100,12 +127,8 @@ function splitSystemAndContents(messages: LLMMessage[]): {
   }
 }
 
-/** Resolve a modelKey ('auto' | 'gemini-flash' | 'gemini-pro' | 'builtin-deep' | 'builtin-air' | 'ext:<modelConfigId>') into full model info. */
 export async function resolveModel(modelKey: string | null | undefined): Promise<ModelInfo> {
-  if (!modelKey || !modelKey.startsWith('ext:')) {
-    return BUILTIN_MODELS.find((m) => m.key === (modelKey ?? 'auto')) ?? BUILTIN_MODELS[0]
-  }
-  if (modelKey.startsWith('ext:')) {
+  if (modelKey && modelKey.startsWith('ext:')) {
     const configId = modelKey.slice(4)
     const config = await db.modelConfig.findUnique({ where: { id: configId }, include: { provider: true } })
     if (config) {
@@ -119,27 +142,81 @@ export async function resolveModel(modelKey: string | null | undefined): Promise
       }
     }
   }
-  return BUILTIN_MODELS[0]
+
+  // If built-in requested or default (auto), but GEMINI_API_KEY is not set in environment:
+  // Dynamically bridge to the active remote external provider (like kiosapi) so the agent NEVER starves!
+  if (!process.env.GEMINI_API_KEY) {
+    const targetTier = modelKey === 'builtin-deep' || modelKey === 'gemini-pro' ? 'deep' : 'air'
+    const activeExternal =
+      (await db.modelConfig.findFirst({
+        where: { enabled: true, tier: targetTier, provider: { baseUrl: { not: { contains: 'localhost' } } } },
+        include: { provider: true },
+        orderBy: { id: 'desc' },
+      })) ??
+      (await db.modelConfig.findFirst({
+        where: { enabled: true, provider: { baseUrl: { not: { contains: 'localhost' } } } },
+        include: { provider: true },
+        orderBy: { id: 'desc' },
+      }))
+    if (activeExternal) {
+      return {
+        key: `ext:${activeExternal.id}`,
+        label: `${activeExternal.label} (تلقائي)`,
+        tier: activeExternal.tier as 'air' | 'balanced' | 'deep',
+        source: 'external',
+        remoteModel: activeExternal.remoteId,
+        baseUrl: activeExternal.provider.baseUrl,
+      }
+    }
+  }
+
+  return BUILTIN_MODELS.find((m) => m.key === (modelKey ?? 'auto')) ?? BUILTIN_MODELS[0]
 }
 
 async function* streamBuiltin(messages: LLMMessage[], modelKey?: string): AsyncGenerator<StreamChunk> {
+  if (process.env.WAKIL_OFFLINE === '1') {
+    throw new Error('offline mode (WAKIL_OFFLINE=1) — using deterministic fallback')
+  }
   const ai = getGeminiClient()
   if (ai) {
     const { systemInstruction, contents } = splitSystemAndContents(messages)
     const candidates = geminiModelCandidates(modelKey)
     for (const candidate of candidates) {
       try {
-        const responseStream = await ai.models.generateContentStream({
-          model: candidate,
-          contents,
-          config: systemInstruction ? { systemInstruction } : undefined,
-        })
+        let responseStream
+        try {
+          responseStream = await ai.models.generateContentStream({
+            model: candidate,
+            contents,
+            config: {
+              systemInstruction: systemInstruction ? systemInstruction : undefined,
+              thinkingConfig: { includeThoughts: true },
+            },
+          })
+        } catch {
+          // If thinkingConfig is not supported for this candidate, stream without it
+          responseStream = await ai.models.generateContentStream({
+            model: candidate,
+            contents,
+            config: systemInstruction ? { systemInstruction } : undefined,
+          })
+        }
         let yieldedAny = false
         for await (const chunk of responseStream) {
-          const text = chunk.text
-          if (text) {
+          const parts = chunk.candidates?.[0]?.content?.parts
+          if (parts && parts.length > 0) {
+            for (const part of parts) {
+              if (part.thought && part.text) {
+                yieldedAny = true
+                yield { type: 'reasoning', text: part.text }
+              } else if (part.text) {
+                yieldedAny = true
+                yield { type: 'content', text: part.text }
+              }
+            }
+          } else if (chunk.text) {
             yieldedAny = true
-            yield { type: 'content', text }
+            yield { type: 'content', text: chunk.text }
           }
         }
         if (yieldedAny) return
@@ -149,7 +226,25 @@ async function* streamBuiltin(messages: LLMMessage[], modelKey?: string): AsyncG
     }
   }
 
-  // Fallback to ZAI SDK if GEMINI_API_KEY is not present or all Gemini candidates failed
+  // Fallback to active external provider if GEMINI_API_KEY is not present or all Gemini candidates failed
+  const activeExternal = await db.modelConfig.findFirst({
+    where: { enabled: true, provider: { baseUrl: { not: { contains: 'localhost' } } } },
+    include: { provider: true },
+    orderBy: { id: 'desc' },
+  })
+  if (activeExternal) {
+    yield* streamExternal({
+      key: `ext:${activeExternal.id}`,
+      label: activeExternal.label,
+      tier: activeExternal.tier as 'air' | 'balanced' | 'deep',
+      source: 'external',
+      remoteModel: activeExternal.remoteId,
+      baseUrl: activeExternal.provider.baseUrl,
+    }, messages)
+    return
+  }
+
+  // Fallback to ZAI SDK if present
   const zai = await ZAI.create()
   const sdkMessages = messages.map((m) => ({
     role: m.role === 'system' ? 'assistant' : m.role,
@@ -167,7 +262,8 @@ async function* streamBuiltin(messages: LLMMessage[], modelKey?: string): AsyncG
     } else if (typeof raw === 'string') {
       buffer += raw
     } else if (typeof raw === 'object' && 'choices' in (raw as Record<string, unknown>)) {
-      const delta = (raw as { choices?: { delta?: { content?: string } }[] }).choices?.[0]?.delta
+      const delta = (raw as { choices?: { delta?: { content?: string; reasoning_content?: string } }[] }).choices?.[0]?.delta
+      if (delta?.reasoning_content) yield { type: 'reasoning', text: delta.reasoning_content }
       if (delta?.content) yield { type: 'content', text: delta.content }
       continue
     } else {
@@ -181,9 +277,10 @@ async function* streamBuiltin(messages: LLMMessage[], modelKey?: string): AsyncG
       const data = line.slice(5).trim()
       if (data === '[DONE]') return
       try {
-        const json = JSON.parse(data) as { choices?: { delta?: { content?: string } }[] }
-        const text = json.choices?.[0]?.delta?.content
-        if (text) yield { type: 'content', text }
+        const json = JSON.parse(data) as { choices?: { delta?: { content?: string; reasoning_content?: string } }[] }
+        const delta = json.choices?.[0]?.delta
+        if (delta?.reasoning_content) yield { type: 'reasoning', text: delta.reasoning_content }
+        if (delta?.content) yield { type: 'content', text: delta.content }
       } catch {
         // ignore malformed keepalive lines
       }
@@ -191,17 +288,21 @@ async function* streamBuiltin(messages: LLMMessage[], modelKey?: string): AsyncG
   }
 }
 
-/** Hard timeout for external intent extraction (non-streaming) — 20s. */
-export const INTENT_TIMEOUT_MS = 20_000
-/** Hard timeout for external reply streaming — 60s. */
-export const REPLY_STREAM_TIMEOUT_MS = 60_000
+/** Hard timeout for external intent extraction (non-streaming) — 120s for deep models. */
+export const INTENT_TIMEOUT_MS = 120_000
+/** Hard timeout for external reply streaming — 180s. */
+export const REPLY_STREAM_TIMEOUT_MS = 180_000
 
 // ---------------------------------------------------------------------------
 // R15 resilience wiring + per-turn health telemetry
 // ---------------------------------------------------------------------------
 
 /** Set by retry/fallback hooks; the harness resets + reads it per turn. */
-export const llmHealth = { retried: false, fellBack: false }
+export const llmHealth: { retried: boolean; fellBack: boolean; servedBy?: string | null } = {
+  retried: false,
+  fellBack: false,
+  servedBy: null,
+}
 
 function breakerKeyFor(model: ModelInfo): string {
   return `${model.source === 'external' ? 'external' : 'builtin'}:${model.key}`
@@ -342,6 +443,9 @@ export async function completeChat(model: ModelInfo, messages: LLMMessage[]): Pr
 }
 
 async function completeChatOnce(model: ModelInfo, messages: LLMMessage[]): Promise<string> {
+  if (process.env.WAKIL_OFFLINE === '1') {
+    throw new Error('offline mode (WAKIL_OFFLINE=1) — using deterministic fallback')
+  }
   if (model.source === 'builtin') {
     const ai = getGeminiClient()
     if (ai) {
@@ -350,11 +454,23 @@ async function completeChatOnce(model: ModelInfo, messages: LLMMessage[]): Promi
       let lastGeminiErr: unknown = null
       for (const candidate of candidates) {
         try {
-          const response = await ai.models.generateContent({
-            model: candidate,
-            contents,
-            config: systemInstruction ? { systemInstruction } : undefined,
-          })
+          let response
+          try {
+            response = await ai.models.generateContent({
+              model: candidate,
+              contents,
+              config: {
+                systemInstruction: systemInstruction ? systemInstruction : undefined,
+                thinkingConfig: { includeThoughts: true },
+              },
+            })
+          } catch {
+            response = await ai.models.generateContent({
+              model: candidate,
+              contents,
+              config: systemInstruction ? { systemInstruction } : undefined,
+            })
+          }
           const text = response.text ?? ''
           if (text.trim()) return text
         } catch (err) {
@@ -380,6 +496,25 @@ async function completeChatOnce(model: ModelInfo, messages: LLMMessage[]): Promi
       }
       if (lastGeminiErr) throw lastGeminiErr
       return ''
+    }
+
+    const activeExternal = await db.modelConfig.findFirst({
+      where: { enabled: true, provider: { baseUrl: { not: { contains: 'localhost' } } } },
+      include: { provider: true },
+      orderBy: { id: 'desc' },
+    })
+    if (activeExternal) {
+      return completeChatOnce(
+        {
+          key: `ext:${activeExternal.id}`,
+          label: activeExternal.label,
+          tier: activeExternal.tier as 'air' | 'balanced' | 'deep',
+          source: 'external',
+          remoteModel: activeExternal.remoteId,
+          baseUrl: activeExternal.provider.baseUrl,
+        },
+        messages,
+      )
     }
 
     const zai = await ZAI.create()

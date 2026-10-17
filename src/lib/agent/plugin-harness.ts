@@ -1424,6 +1424,24 @@ async function runPluginStep(
 
     case 'custom_query':
     default: {
+      if (plugin.slug.startsWith('app_cli_')) {
+        try {
+          const { executeBridgedTool } = await import('./cli-anything/bridge')
+          const appName = plugin.name.replace(/^تحكم\s+/, '').replace(/\s+\(CLI-Anything\)$/, '').trim()
+          const bridgedRes = await executeBridgedTool({
+            businessId,
+            appName,
+            command: step.params?.targetEntity === 'operations' ? 'sync_invoices' : 'export_inventory',
+            args: step.params,
+          })
+          if (bridgedRes.cards && bridgedRes.cards.length > 0) {
+            cards.push(...bridgedRes.cards)
+            break
+          }
+        } catch (err) {
+          console.warn('[plugin-harness] executeBridgedTool failed, using fallback:', err)
+        }
+      }
       const items = await db.item.findMany({ where: { businessId }, take: 10 })
       cards.push({
         kind: 'table',

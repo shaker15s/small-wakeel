@@ -18,6 +18,7 @@ import { ActionCard } from './ActionCard'
 import { AgentAvatar, type AgentState } from './AgentAvatar'
 import { ChatActions } from './ChatActions'
 import { ResultCards, SourcesCard } from './ResultCards'
+import { SubagentsCoordinatorCard } from './SubagentsCoordinatorCard'
 import { ThinkingBlock } from './ThinkingBlock'
 import { ThinkingIndicator } from './ThinkingIndicator'
 import { Button } from '@/components/ui/button'
@@ -232,18 +233,18 @@ export function MessageBubble({
           ) : null}
         </div>
 
-        {/* pre-text phase: the varied thinking animation (avatar already in the row) */}
-        {streaming && !hasText ? (
-          <ThinkingIndicator steps={thinking} waiting={(thinking?.length ?? 0) === 0} showAvatar={false} />
+        {/* pre-text phase: the varied thinking animation when waiting for first steps */}
+        {streaming && !hasText && (!thinking || thinking.length === 0) ? (
+          <ThinkingIndicator steps={thinking} waiting={true} showAvatar={false} />
         ) : null}
 
-        {/* historical thinking trace — collapsed by default (finalized turns) */}
-        {!streaming && thinking && thinking.length > 0 ? (
-          <ThinkingBlock steps={thinking} />
+        {/* Live Apple-style Thinking & Reasoning pill while streaming or finalized trace */}
+        {thinking && thinking.length > 0 ? (
+          <ThinkingBlock steps={thinking} streaming={streaming} />
         ) : null}
 
-        {/* compact current-step line while the text streams */}
-        {streaming && hasText ? (
+        {/* compact current-step line while text streams if no thinking steps block */}
+        {streaming && hasText && (!thinking || thinking.length === 0) ? (
           <div
             className={cn(
               'flex items-center gap-1.5 text-[11px] text-muted-foreground',
@@ -353,6 +354,12 @@ export function MessageBubble({
               }
               onReject={onReject ? () => onReject(card) : undefined}
             />
+          </motion.div>
+        ) : null}
+
+        {turn.tasks && turn.tasks.length > 0 ? (
+          <motion.div {...revealProps(cardDelay)} className="w-full">
+            <SubagentsCoordinatorCard tasks={turn.tasks} streaming={streaming} />
           </motion.div>
         ) : null}
 

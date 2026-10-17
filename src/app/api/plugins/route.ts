@@ -15,6 +15,7 @@ import {
   togglePluginActive,
 } from '@/lib/agent/plugin-harness'
 import { badRequest, notFound, serverError } from '../_lib/http'
+import { guard } from '../_lib/guard'
 
 export const dynamic = 'force-dynamic'
 
@@ -22,6 +23,9 @@ export async function GET(req: NextRequest) {
   try {
     const businessId = req.nextUrl.searchParams.get('businessId')
     if (!businessId) return badRequest('businessId مطلوب')
+    const gate = await guard(req, { businessId, scope: 'business' })
+    if (!gate.ok) return gate.res
+
     const plugins = await getBusinessPlugins(businessId)
     return NextResponse.json({ plugins })
   } catch (e) {
@@ -44,6 +48,9 @@ export async function POST(req: NextRequest) {
 
     // Action: run an existing or starter plugin
     if (body.action === 'run' && body.slug) {
+      const gate = await guard(req, { businessId: body.businessId, scope: 'business' })
+      if (!gate.ok) return gate.res
+
       const result = await executePlugin({
         businessId: body.businessId,
         pluginOrSlug: body.slug,
@@ -52,6 +59,9 @@ export async function POST(req: NextRequest) {
     }
 
     if (!body.userId) return badRequest('userId مطلوب')
+
+    const gate = await guard(req, { businessId: body.businessId, userId: body.userId })
+    if (!gate.ok) return gate.res
 
     let plugin
     if (body.slug) {
@@ -94,6 +104,9 @@ export async function POST(req: NextRequest) {
 
 export async function PATCH(req: NextRequest) {
   try {
+    const gate = await guard(req, { scope: 'business' })
+    if (!gate.ok) return gate.res
+
     const body = (await req.json().catch(() => ({}))) as {
       id?: string
       active?: boolean
@@ -111,6 +124,9 @@ export async function PATCH(req: NextRequest) {
 
 export async function DELETE(req: NextRequest) {
   try {
+    const gate = await guard(req, { scope: 'business' })
+    if (!gate.ok) return gate.res
+
     const id = req.nextUrl.searchParams.get('id')
     if (!id) return badRequest('id مطلوب')
     const ok = await deletePlugin(id)
@@ -120,3 +136,4 @@ export async function DELETE(req: NextRequest) {
     return serverError('plugins-delete', e)
   }
 }
+

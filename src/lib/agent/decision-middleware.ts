@@ -19,7 +19,7 @@
 import type { AgentMemory, Business, Customer, Item, Supplier } from '@prisma/client'
 import { db } from '@/lib/db'
 import { egp, qty as fmtQty } from '@/lib/format'
-import { arUnit, getVertical } from '@/lib/verticals'
+import { arUnit } from '@/lib/verticals'
 import type { AgentPluginDTO, ProactiveAlertDTO, ResultCardDTO } from '@/lib/types'
 import { normalizeAr, toWesternDigits } from './arabic'
 import {
@@ -490,10 +490,7 @@ export class DecisionEngine {
     autoInstalled: boolean
   }> {
     if (params.route.action === 'run_existing' && params.route.slug) {
-      const res = await executePlugin({
-        businessId: params.businessId,
-        pluginOrSlug: params.route.slug,
-      })
+      const res = await pluginRegistry.execute(params.businessId, params.route.slug)
       return { ...res, autoInstalled: false }
     }
 
@@ -559,18 +556,20 @@ export class DecisionEngine {
         }
       | undefined
 
-    // If the user's natural speech implicitly demands a starter capability that isn't installed yet,
-    // auto-activate and run it immediately so the user never has to know what a "plugin" is!
-    if (analysis.implicitPlugin && analysis.implicitPlugin.action === 'auto_activate_starter') {
-      try {
-        autoExecutedPlugin = await this.executePluginTransparently({
-          businessId: params.business.id,
-          userId: params.userId,
-          route: analysis.implicitPlugin,
-          rawText: params.text,
-        })
-      } catch (err) {
-        console.error('[DecisionEngine] auto_activate_starter failed:', err)
+    // If the user's natural speech matches an existing active plugin or a starter capability,
+    // execute it directly from the Plugin Registry so the user gets real-time execution with zero friction!
+    if (analysis.implicitPlugin) {
+      if (analysis.implicitPlugin.action === 'run_existing' || analysis.implicitPlugin.action === 'auto_activate_starter') {
+        try {
+          autoExecutedPlugin = await this.executePluginTransparently({
+            businessId: params.business.id,
+            userId: params.userId,
+            route: analysis.implicitPlugin,
+            rawText: params.text,
+          })
+        } catch (err) {
+          console.error('[DecisionEngine] direct plugin execution failed:', err)
+        }
       }
     }
 
@@ -612,7 +611,7 @@ export class DecisionEngine {
   async syncSystemOnMutation(params: {
     businessId: string
     userId: string
-    mutationKind?: 'plugin_added' | 'rule_changed' | 'lexicon_learned' | 'business_configured' | 'playbook_saved'
+    mutationKind?: 'plugin_added' | 'rule_changed' | 'lexicon_learned' | 'business_configured' | 'playbook_saved' | 'system_updated'
     mutationType?: string
     summaryAr?: string
     title?: string
@@ -629,7 +628,7 @@ export class DecisionEngine {
       .create({
         data: {
           businessId: params.businessId,
-          actor: params.userId,
+          actor: params.userId ?? 'system',
           action: `system.${kind}`,
           detail: JSON.stringify({
             summary,
@@ -642,7 +641,11 @@ export class DecisionEngine {
     // Reload fresh memories and plugins so the running turn and UI have zero staleness
     const [refreshedMemories, refreshedPlugins] = await Promise.all([
       db.agentMemory.findMany({
-        where: { businessId: params.businessId, userId: params.userId, active: true },
+        where: {
+          businessId: params.businessId,
+          ...(params.userId ? { userId: params.userId } : {}),
+          active: true,
+        },
         orderBy: { updatedAt: 'desc' },
         take: 36,
       }),

@@ -86,7 +86,7 @@ export function NotificationBell({
             type="button"
             onClick={() => {
               setOpen(false)
-              setPluginStudioOpen(true, 'radar')
+              setPluginStudioOpen(true, 'alerts')
             }}
             className="rounded-lg bg-primary/10 hover:bg-primary/15 border border-primary/25 px-2.5 py-1 text-[11px] font-semibold text-primary transition-colors"
           >

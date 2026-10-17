@@ -22,6 +22,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AnimatePresence, motion, MotionConfig } from 'framer-motion'
 import {
+  Brain,
   Camera,
   ChevronDown,
   History,
@@ -49,6 +50,7 @@ import type {
   QuickCommandDTO,
   ResultCardDTO,
   SuggestionDTO,
+  SubtaskDTO,
 } from '@/lib/types'
 import { AgentAvatar, type AgentState } from './AgentAvatar'
 import { MessageBubble } from './MessageBubble'
@@ -72,6 +74,14 @@ interface ChatViewProps {
 }
 
 const arNum = (n: number): string => new Intl.NumberFormat('ar-EG').format(n)
+
+const LIVE_THOUGHT_STAGES = [
+  'بيفكر في العملية...',
+  'بيتحقق من المخزن...',
+  'بيحسب الأرقام...',
+  'عقلي بيقري طلبك وبيقرر الأدوات...',
+  'بتحقق من السجل الحقيقي...',
+] as const
 
 export function ChatView({ business, businesses, userId, onNavigate }: ChatViewProps) {
   const vertical = getVertical(business.type)
@@ -226,6 +236,7 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
       setFailedId(null)
       setRevealId(null)
       retryRef.current = trimmed
+      sfx.playThinkingPulse()
       // the conversation the scratchpad invalidation targets at done time
       let convId = activeConversationId ?? loadedConvId
 
@@ -247,11 +258,12 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
       nearBottomRef.current = true
       setNearBottom(true)
 
-      // BUFFERS: card/cards/actions stay out of render until the stream ends
+      // BUFFERS: card/cards/actions/tasks stay out of render until the stream ends
       const buf = {
         card: null as ActionCardDTO | null,
         cards: null as ResultCardDTO[] | null,
         actions: null as ChatActionDTO[] | null,
+        tasks: null as SubtaskDTO[] | null,
       }
       let errored = false
       let doneId: string | null = null
@@ -284,9 +296,13 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
               // swap optimistic user id → the real persisted id so any later
               // refetch reconciles by key (no remount → no flicker)
               setTurns((prev) => prev.map((t) => (t.id === userLocalId ? { ...t, id: userMessageId } : t)))
+              sfx.playThinkingPulse()
             },
             onThinking: (steps) => patchTurn({ thinking: steps }),
             onStep: (label, state) => {
+              if (state === 'active') {
+                sfx.playPop(520, 0.02)
+              }
               const id = doneId ?? liveId
               setTurns((prev) =>
                 prev.map((t) =>
@@ -296,11 +312,23 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
                 ),
               )
             },
+            onTasks: (tasks) => {
+              buf.tasks = tasks
+              patchTurn({ tasks })
+              sfx.playPop(480, 0.03)
+            },
+            onTaskUpdate: (task) => {
+              buf.tasks = (buf.tasks ?? []).map((t) => (t.id === task.id ? task : t))
+              patchTurn({ tasks: buf.tasks })
+              if (task.status === 'completed') sfx.playPop(620, 0.02)
+            },
             onCard: (card) => {
               buf.card = card
+              sfx.playCardReveal(0)
             },
             onCards: (cards) => {
               buf.cards = cards
+              sfx.playCardReveal(0)
             },
             onActions: (actions) => {
               buf.actions = actions
@@ -311,6 +339,7 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
             },
             onDone: (messageId, modelLabel, meta) => {
               doneId = messageId
+              sfx.playSuccessChord()
               // finalize IN PLACE (same DOM node) + reveal the buffers below text
               // (R15: done carries the verification ledger + research metadata)
               setTurns((prev) =>
@@ -323,6 +352,7 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
                         modelLabel,
                         card: buf.card,
                         cards: buf.cards,
+                        tasks: buf.tasks ?? meta?.tasks ?? t.tasks ?? null,
                         actions: buf.actions,
                         verified: meta?.verified ?? null,
                         research: meta?.research ?? null,
@@ -527,11 +557,32 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
     }
     return 'idle'
   })()
+
+  // Rotating thought stages when model is reasoning
+  const [liveStageIdx, setLiveStageIdx] = useState(0)
+  useEffect(() => {
+    if (!sending) return
+    const timer = setInterval(() => {
+      setLiveStageIdx((prev) => (prev + 1) % LIVE_THOUGHT_STAGES.length)
+    }, 2200)
+    return () => clearInterval(timer)
+  }, [sending])
+
+  const liveThoughtStageText = useMemo(() => {
+    if (!sending) return ''
+    const steps = lastTurn?.thinking ?? []
+    const activeStep = [...steps].reverse().find((s) => s.state === 'active') ?? steps[steps.length - 1]
+    if (activeStep?.label) {
+      return activeStep.label
+    }
+    return LIVE_THOUGHT_STAGES[liveStageIdx]
+  }, [sending, lastTurn?.thinking, liveStageIdx])
+
   const showWelcome = !isLoading && turns.length === 0
   const showJump = !nearBottom && !isLoading
-  // the composer auto-hides while reading history — but a live draft/focus
-  // pins it open («مربع الكتابة يختفي لما أعمل سكرول لفوق» — إلا لو بيكتب)
-  const composerVisible = nearBottom || drafting
+  // the composer auto-hides while reading history — but a live draft/focus/sending
+  // pins it open («مربع الكتابة يختفي لما أعمل سكرول لفوق» — إلا لو بيكتب أو بينفذ)
+  const composerVisible = nearBottom || drafting || sending
 
   // hero chips: dynamic when the endpoint answers, else 2 vertical fallbacks
   const heroSuggestions = !suggestionsQ.isPending && (suggestionsQ.data?.length ?? 0) > 0 ? suggestionsQ.data : null
@@ -658,6 +709,73 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
           aria-hidden={!composerVisible}
         >
           <div className="pointer-events-auto mx-auto w-full max-w-4xl px-4 pb-3 sm:px-6">
+            {/* Sleek Apple-style "Thinking / Reasoning" pulse indicator when model is processing */}
+            <AnimatePresence>
+              {sending && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10, scale: 0.96 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 6, scale: 0.96 }}
+                  transition={{ type: 'spring', stiffness: 440, damping: 28 }}
+                  className="mb-2.5 flex justify-center"
+                >
+                  <button
+                    type="button"
+                    onClick={() => scrollToBottom(true)}
+                    className="glass-strong press-apple group relative flex items-center gap-2.5 rounded-full border border-amber-500/35 px-4 py-2 text-start shadow-lg shadow-amber-500/10 backdrop-blur-xl transition-all hover:border-amber-500/50"
+                    aria-label={`وكيل يفكر: ${liveThoughtStageText}`}
+                  >
+                    {/* Pulsating warm amber aura */}
+                    <span
+                      className="pointer-events-none absolute -inset-0.5 animate-pulse rounded-full bg-gradient-to-r from-amber-500/20 via-amber-400/15 to-orange-500/20 blur-sm"
+                      aria-hidden="true"
+                    />
+
+                    <div className="relative flex size-5 shrink-0 items-center justify-center">
+                      <motion.span
+                        animate={{ scale: [1, 1.4, 1], opacity: [0.35, 0.85, 0.35] }}
+                        transition={{ duration: 1.8, repeat: Infinity, ease: 'easeInOut' }}
+                        className="absolute inset-0 rounded-full bg-wakil-amber/35 blur-xs"
+                      />
+                      <Brain className="relative size-3.5 text-wakil-amber" aria-hidden="true" />
+                    </div>
+
+                    <div className="relative flex items-center gap-2">
+                      <AnimatePresence mode="wait">
+                        <motion.span
+                          key={liveThoughtStageText}
+                          initial={{ opacity: 0, y: 2 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, y: -2 }}
+                          transition={{ duration: 0.2 }}
+                          className="truncate text-xs font-semibold text-foreground/90 sm:text-sm"
+                        >
+                          {liveThoughtStageText}
+                        </motion.span>
+                      </AnimatePresence>
+
+                      {/* Staggered Apple amber equalizer wave bars */}
+                      <span className="flex items-center gap-[2px] px-0.5" aria-hidden="true">
+                        {[0, 1, 2].map((i) => (
+                          <motion.span
+                            key={i}
+                            className="h-3 w-[2px] rounded-full bg-wakil-amber"
+                            animate={{ scaleY: [0.3, 1, 0.3], opacity: [0.6, 1, 0.6] }}
+                            transition={{
+                              duration: 0.85,
+                              repeat: Infinity,
+                              delay: i * 0.15,
+                              ease: 'easeInOut',
+                            }}
+                          />
+                        ))}
+                      </span>
+                    </div>
+                  </button>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
             <Composer
               commands={commandsQ.data ?? []}
               suggestions={suggestionsQ.data ?? []}

@@ -21,7 +21,6 @@ import {
   Globe,
   Loader2,
   Mic,
-  MicOff,
   Orbit,
   Scale,
   Sparkles,
@@ -206,6 +205,7 @@ export function Composer({
       setValue('')
       setDeepResearch(false)
       textareaRef.current?.focus()
+      sfx.playThinkingPulse()
 
       setTimeout(() => {
         setBowPhase('idle')
@@ -291,7 +291,7 @@ export function Composer({
     BUILTIN_MODELS.find((m) => m.key === (modelKey ?? 'auto')) ?? BUILTIN_MODELS[0]
 
   const auroraPrimary = listening
-    ? 'rgba(13, 148, 136, 0.55)'
+    ? 'rgba(245, 158, 11, 0.65)'
     : deepResearch
       ? 'rgba(16, 185, 129, 0.55)'
       : canSend
@@ -303,7 +303,7 @@ export function Composer({
             : 'rgba(217, 119, 6, 0.18)'
 
   const auroraSecondary = listening
-    ? 'rgba(217, 119, 6, 0.4)'
+    ? 'rgba(217, 119, 6, 0.45)'
     : deepResearch
       ? 'rgba(13, 148, 136, 0.4)'
       : 'rgba(19, 35, 58, 0.35)'
@@ -471,9 +471,9 @@ export function Composer({
                 type="button"
                 variant="ghost"
                 className={cn(
-                  'press-apple icon-seat relative size-9 transition-colors',
+                  'press-apple icon-seat relative size-9 transition-all',
                   listening
-                    ? 'bg-teal-500/15 text-teal-600 dark:text-teal-400 ring-2 ring-teal-500/30'
+                    ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400 ring-2 ring-amber-500/40 shadow-[0_0_14px_rgba(245,158,11,0.35)]'
                     : 'text-muted-foreground hover:text-foreground',
                 )}
                 aria-label={listening ? 'إيقاف التسجيل الصوتي' : 'تحدث بالصوت مع وكيل'}
@@ -481,13 +481,33 @@ export function Composer({
                 onClick={toggleVoiceDictation}
               >
                 {listening ? (
-                  <motion.span
-                    animate={{ scale: [1, 1.2, 1] }}
-                    transition={{ duration: 0.8, repeat: Infinity }}
-                    className="flex"
-                  >
-                    <MicOff className="size-4.5" aria-hidden="true" />
-                  </motion.span>
+                  <div className="relative flex items-center justify-center">
+                    {/* Glowing amber halo aura */}
+                    <span
+                      className="pointer-events-none absolute -inset-2 animate-pulse rounded-full bg-amber-500/20 blur-xs"
+                      aria-hidden="true"
+                    />
+                    {/* Energetic subtle audio waveform indicator */}
+                    <div className="relative flex h-4 items-center gap-[2.5px] px-0.5" aria-hidden="true">
+                      {[0.35, 0.9, 0.55, 1, 0.45].map((heightRatio, i) => (
+                        <motion.span
+                          key={i}
+                          className="w-[2px] rounded-full bg-gradient-to-t from-amber-600 to-amber-400 shadow-[0_0_4px_rgba(245,158,11,0.5)]"
+                          animate={{
+                            scaleY: [heightRatio, 1.4, 0.25, heightRatio],
+                            opacity: [0.75, 1, 0.65, 0.75],
+                          }}
+                          transition={{
+                            duration: 0.65 + i * 0.08,
+                            repeat: Infinity,
+                            ease: 'easeInOut',
+                            delay: i * 0.07,
+                          }}
+                          style={{ height: '100%', transformOrigin: 'center' }}
+                        />
+                      ))}
+                    </div>
+                  </div>
                 ) : (
                   <Mic className="size-4.5" aria-hidden="true" />
                 )}

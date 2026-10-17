@@ -22,6 +22,7 @@ import { mapCsv, parseFlexibleDate, parseFlexibleNumber } from '@/lib/csv'
 import { guard } from '../../_lib/guard'
 import { badRequest, notFound, serverError } from '../../_lib/http'
 import { itemImportSchema, parseBody } from '@/lib/security/validate'
+import * as XLSX from 'xlsx'
 
 export const dynamic = 'force-dynamic'
 
@@ -70,7 +71,22 @@ export async function POST(req: Request) {
     const business = await db.business.findUnique({ where: { id: businessId } })
     if (!business) return notFound('النشاط التجاري غير موجود')
 
-    const table = mapCsv(csv, SYNONYMS, normalizeAr)
+    let csvContent = csv
+    if (csvContent.startsWith('data:') || csvContent.startsWith('UEsDB') || csvContent.startsWith('PK')) {
+      try {
+        const base64Data = csvContent.includes('base64,') ? csvContent.split('base64,')[1] : csvContent
+        const buf = Buffer.from(base64Data, 'base64')
+        const wb = XLSX.read(buf, { type: 'buffer' })
+        const sheetName = wb.SheetNames[0]
+        if (sheetName && wb.Sheets[sheetName]) {
+          csvContent = XLSX.utils.sheet_to_csv(wb.Sheets[sheetName])
+        }
+      } catch {
+        // fallback to standard csv parsing
+      }
+    }
+
+    const table = mapCsv(csvContent, SYNONYMS, normalizeAr)
     if (table.rows.length === 0) return badRequest('الملف مفيش فيه صفوف بعد العنوان')
     if (table.rows.length > MAX_ROWS) {
       return badRequest(`الملف فيه ${table.rows.length} صف — الحد الأقصى ${MAX_ROWS} صف في المرة`)

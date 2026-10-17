@@ -10,6 +10,7 @@ import {
 } from '@/lib/agent/task-engine'
 import type { BackgroundJobKind } from '@/lib/types'
 import { badRequest, serverError } from '../_lib/http'
+import { guard } from '../_lib/guard'
 
 export const dynamic = 'force-dynamic'
 
@@ -17,6 +18,8 @@ export async function GET(req: NextRequest) {
   try {
     const businessId = req.nextUrl.searchParams.get('businessId')
     if (!businessId) return badRequest('businessId مطلوب')
+    const gate = await guard(req, { businessId, scope: 'business' })
+    if (!gate.ok) return gate.res
 
     const [jobs, scan] = await Promise.all([
       getRecentBackgroundJobs(businessId),
@@ -44,6 +47,9 @@ export async function POST(req: NextRequest) {
     }
     if (!body.businessId) return badRequest('businessId مطلوب')
     if (!body.userId) return badRequest('userId مطلوب')
+
+    const gate = await guard(req, { businessId: body.businessId, userId: body.userId })
+    if (!gate.ok) return gate.res
 
     const result = await dispatchConcurrentBackgroundJobs({
       businessId: body.businessId,

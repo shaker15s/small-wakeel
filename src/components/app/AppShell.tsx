@@ -11,7 +11,7 @@
 
 'use client'
 
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useRef, useSyncExternalStore } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import {
@@ -31,7 +31,6 @@ import { useTheme } from 'next-themes'
 import { api } from '@/lib/api'
 import { QUERY_KEYS, useWakil, VIEW_LABELS, type ViewKey } from '@/lib/store'
 import { getVertical } from '@/lib/verticals'
-import type { BusinessLite } from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import { useToast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
@@ -186,7 +185,7 @@ export function AppShell() {
       <div className="flex h-dvh flex-col overflow-hidden bg-background">
         <CommandPalette business={activeBusiness} businesses={bootstrap.businesses} userId={activeUser.id} />
         <BusinessBuilderModal />
-        <PluginAndTaskStudioModal business={activeBusiness} userId={activeUser.id} />
+        <PluginAndTaskStudioModal />
         <main className="min-h-0 w-full flex-1 overflow-hidden">
           <ChatView
             business={activeBusiness}
@@ -228,7 +227,7 @@ export function AppShell() {
     <div className="flex h-dvh flex-col overflow-hidden bg-background">
       <CommandPalette business={activeBusiness} businesses={bootstrap.businesses} userId={activeUser.id} />
       <BusinessBuilderModal />
-      <PluginAndTaskStudioModal business={activeBusiness} userId={activeUser.id} />
+      <PluginAndTaskStudioModal />
       {/* ===== header ===== */}
       <header className="relative z-40 shrink-0 border-b border-border/70 bg-card/80 backdrop-blur-md">
         <div className="mx-auto flex h-14 w-full max-w-none items-center gap-2 px-3 sm:px-4">

@@ -131,7 +131,7 @@ export function CommandPalette({
       void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.overview(business.id, userId) })
       void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.chatConversation(business.id, userId, null) })
       toast({
-        title: `تم تنفيذ ${res.batch.completedCount} مهام خلفية متوازية (${res.batch.totalDurationMs}ms)`,
+        title: `تم تنفيذ ${res.jobs.length} مهام خلفية متوازية (${res.totalDurationMs}ms)`,
         description: 'تم تحديث السجلات وتحليل التقرير المالي وفحص رادار المخاطر والفرص في المحادثة',
       })
       setView('chat')
@@ -168,7 +168,7 @@ export function CommandPalette({
         subtitle: 'ينفذ عدة عمليات خلفية في نفس اللحظة ويربطها بنظام التنبيهات الاستباقي',
         badge: 'متوازي لحظي',
         icon: <Play className="w-4 h-4 text-emerald-600" />,
-        onSelect: () => closeAndRun(() => setPluginStudioOpen(true, 'tasks')),
+        onSelect: () => closeAndRun(() => setPluginStudioOpen(true, 'background')),
       },
       {
         id: 'sp-proactive-radar-modal',
@@ -177,7 +177,7 @@ export function CommandPalette({
         subtitle: 'يراقب مخاطر السيولة والنواقص وتآكل الهوامش وفرص الربح لحظيًا',
         badge: 'رادار استباقي',
         icon: <Radar className="w-4 h-4 text-amber-600" />,
-        onSelect: () => closeAndRun(() => setPluginStudioOpen(true, 'radar')),
+        onSelect: () => closeAndRun(() => setPluginStudioOpen(true, 'alerts')),
       },
       {
         id: 'sp-profit',

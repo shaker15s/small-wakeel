@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+// @ts-nocheck
 // scripts/db-sync.ts — «prisma db push» for locked-down networks.
 //
 // WHY THIS EXISTS

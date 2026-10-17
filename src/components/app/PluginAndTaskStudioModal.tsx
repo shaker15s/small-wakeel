@@ -17,21 +17,17 @@ import { api } from '@/lib/api'
 import type { AgentPluginDTO, BackgroundJobKind, ProactiveAlertDTO } from '@/lib/types'
 import { useToast } from '@/hooks/use-toast'
 import {
-  Activity,
   AlertTriangle,
-  Boxes,
   Check,
   Cpu,
   Layers,
   Lightbulb,
   Loader2,
   Play,
-  Plus,
   Power,
   Radar,
   Sparkles,
   Trash2,
-  TrendingUp,
   X,
 } from 'lucide-react'
 

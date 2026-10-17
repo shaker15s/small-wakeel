@@ -62,6 +62,7 @@ export async function createNewBusinessWithDefaults(params: {
   openingCashEgp?: number
   ownerName?: string
   customItems?: string[]
+  skipDefaultSeeds?: boolean
 }): Promise<BusinessLite & { itemsCount: number; cashBalance: number }> {
   const cleanName = params.name.trim().slice(0, 80) || 'منشأة جديدة'
   const cleanType = params.type.trim().slice(0, 60) || 'supermarket'
@@ -103,13 +104,13 @@ export async function createNewBusinessWithDefaults(params: {
       businessId: biz.id,
       vertical: cleanType,
       tone: 'friendly',
-      enabledTools: JSON.stringify(v.tools),
     },
   })
 
-  // Seed initial catalog items appropriate for the vertical
-  const seeds: DefaultItemSeed[] =
-    params.customItems && params.customItems.length > 0
+  // Seed initial catalog items appropriate for the vertical (unless skipped for real authentic onboarding)
+  const seeds: DefaultItemSeed[] = params.skipDefaultSeeds
+    ? []
+    : params.customItems && params.customItems.length > 0
       ? params.customItems.map((name) => ({
           name: name.trim(),
           aliases: name.trim(),

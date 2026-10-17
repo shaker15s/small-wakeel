@@ -26,6 +26,10 @@ import type { TurnEmit } from './harness'
 export const RESEARCH_TRIGGER_RE =
   /ابحث|بحث|حلّل|حلل|قارن|مقارنة|دراسة|ادرس|ليه|استراتيجية|إزاي أحسن|بكام في السوق|سوق|أسعار المنافسين/i
 
+export function isActionableIntent(intent: { intent: string; tool?: string }): boolean {
+  return intent.intent === 'write' || (intent.intent === 'read' && Boolean(intent.tool))
+}
+
 const AR_ORDINALS = ['١', '٢', '٣', '٤', '٥', '٦']
 
 function toArabicNum(n: number): string {

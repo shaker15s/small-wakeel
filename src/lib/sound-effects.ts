@@ -47,6 +47,14 @@ class SoundEffectsEngine {
     return this.enabled
   }
 
+  public setMuted(muted: boolean): void {
+    this.setEnabled(!muted)
+  }
+
+  public isMuted(): boolean {
+    return !this.enabled
+  }
+
   private getContext(): AudioContext | null {
     if (!this.enabled || typeof window === 'undefined') return null
     try {

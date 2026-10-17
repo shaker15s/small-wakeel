@@ -65,6 +65,13 @@ export function isUnreachable(err: unknown): boolean {
  * reachable 800ms later, so it fails fast and trips the breaker at once.
  */
 export function isConnectFailure(err: unknown): boolean {
+  if (err instanceof Error) {
+    if (err.name === 'AbortError' || err.name === 'TimeoutError') return false
+    const cause = (err as { cause?: Error }).cause
+    if (cause && (cause.name === 'AbortError' || cause.name === 'TimeoutError' || /timeout|timed out|abort/i.test(cause.message))) {
+      return false
+    }
+  }
   if (isUnreachable(err)) return true
   if (err instanceof TypeError && /fetch failed/i.test(err.message)) return true
   return false
@@ -123,20 +130,24 @@ interface BreakerState {
 }
 
 const BREAKER_THRESHOLD = 5 // consecutive failures before opening (transient)
-const BREAKER_COOLDOWN_MS = 60_000 // stay open for 60s
-const BREAKER_HALF_OPEN_MS = 20_000 // allow a probe after 20s (half-open)
+const BREAKER_COOLDOWN_MS = 15_000 // stay open for 15s max (was 60s)
+const BREAKER_HALF_OPEN_MS = 5_000 // allow a probe after 5s (half-open)
 
 const breakers = new Map<string, BreakerState>()
 
 export function breakerIsOpen(key: string): boolean {
   const st = breakers.get(key)
-  if (!st) return false
+  if (!st || st.failures < BREAKER_THRESHOLD) return false
   const age = Date.now() - st.openedAt
-  if (st.failures >= BREAKER_THRESHOLD) {
-    // full-open for the cooldown, then half-open: let ONE probe through
-    return age < BREAKER_HALF_OPEN_MS || age < BREAKER_COOLDOWN_MS
+  if (age >= BREAKER_COOLDOWN_MS) {
+    breakers.delete(key)
+    return false
   }
-  return false
+  if (age >= BREAKER_HALF_OPEN_MS) {
+    // half-open: allow a probe through to test if provider recovered
+    return false
+  }
+  return true
 }
 
 /**

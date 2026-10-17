@@ -247,9 +247,12 @@
 /* streaming caret — the حرف بحرف cursor */
 .stream-caret::after {
   content: "▌";
+  display: inline-block;
+  vertical-align: -1px;
+  line-height: 1;
   color: var(--wakil-amber);
   animation: thinking-pulse 0.8s ease-in-out infinite;
-  margin-inline-start: 1px;
+  margin-inline-start: 2px;
 }
 
 /* ============================================================

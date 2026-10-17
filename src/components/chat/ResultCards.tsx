@@ -170,20 +170,30 @@ function TableCard({ card }: { card: TableCardDTO }) {
 type KvCardDTO = Extract<ResultCardDTO, { kind: 'kv' }>
 
 function KvCard({ card }: { card: KvCardDTO }) {
+  const rawRows = card.rows ?? (card as unknown as { items?: { label: string; value: string; tone?: 'good' | 'bad' | 'neutral' }[] }).items ?? []
   return (
     <Card className="w-full gap-2 py-3">
       <CardTitleRow icon={Info} title={card.title} />
       <CardContent className="flex flex-col gap-1.5 px-4">
-        {card.rows.length === 0 ? (
+        {rawRows.length === 0 ? (
           <p className="py-3 text-center text-sm text-muted-foreground">مفيش نتايج</p>
         ) : (
-          card.rows.map((row, i) => (
+          rawRows.map((row, i) => (
             <div
               key={`${row.label}-${i}`}
               className="flex items-baseline justify-between gap-4 text-sm"
             >
               <span className="text-muted-foreground">{row.label}</span>
-              <span className="text-end font-semibold">{withNums(row.value)}</span>
+              <span
+                className={cn(
+                  'text-end font-semibold',
+                  row.tone === 'good' && 'text-emerald-600 dark:text-emerald-400',
+                  row.tone === 'bad' && 'text-rose-600 dark:text-rose-400',
+                  row.tone === 'neutral' && 'text-foreground'
+                )}
+              >
+                {withNums(row.value)}
+              </span>
             </div>
           ))
         )}

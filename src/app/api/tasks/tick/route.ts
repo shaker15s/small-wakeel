@@ -4,11 +4,14 @@ import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { runReadTool, type ReadTool } from '@/lib/agent/tools'
 import { serverError } from '../../_lib/http'
+import { guard } from '../../_lib/guard'
 
 export const dynamic = 'force-dynamic'
 
 export async function POST(req: NextRequest) {
   try {
+    const gate = await guard(req, { scope: 'open' })
+    if (!gate.ok) return gate.res
     const body = (await req.json().catch(() => ({}))) as {
       businessId?: string
       forceAll?: boolean

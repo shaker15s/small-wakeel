@@ -7,6 +7,7 @@ import { synthesizePluginWithAI } from '@/lib/agent/plugin-harness'
 import { upsertBusinessRule } from '@/lib/agent/memory'
 import { localVectorDB } from '@/lib/agent/vector-memory'
 import { normalizeAr, toWesternDigits } from '@/lib/agent/arabic'
+import { guard } from '../../_lib/guard'
 
 export interface ExtractedItemSpec {
   name: string
@@ -31,6 +32,9 @@ export interface SuggestedPluginSpec {
 
 export async function POST(req: NextRequest) {
   try {
+    const gate = await guard(req, { scope: 'open' })
+    if (!gate.ok) return gate.res
+
     const body = (await req.json()) as {
       mode?: 'analyze' | 'provision'
       ownerName?: string
@@ -63,10 +67,11 @@ export async function POST(req: NextRequest) {
         type: businessType,
         ownerName,
         openingCashEgp,
+        skipDefaultSeeds: true,
       })
 
-      const businessId = created.business.id
-      const userId = created.owner.id
+      const businessId = created.id
+      const userId = created.users[0]?.id ?? ''
 
       // 1) Upsert all extracted catalog items from camera/notebook/chat
       const itemsToInsert = Array.isArray(body.items) ? body.items : []
@@ -154,20 +159,8 @@ export async function POST(req: NextRequest) {
 
       return NextResponse.json({
         ok: true,
-        business: {
-          id: created.business.id,
-          name: created.business.name,
-          type: created.business.type,
-          users: [
-            {
-              id: created.owner.id,
-              name: created.owner.name,
-              role: created.owner.role,
-              title: created.owner.title,
-            },
-          ],
-        },
-        userId: created.owner.id,
+        business: created,
+        userId,
       })
     }
 

@@ -134,12 +134,43 @@ export interface OverviewDTO {
   alerts: AlertDTO[]
 }
 
+export type SubagentRole =
+  | 'inventory_sentinel'
+  | 'cash_collector'
+  | 'market_researcher'
+  | 'desktop_specialist'
+  | 'growth_advisor'
+  | 'general_worker'
+
+export type SubtaskStatus =
+  | 'in_progress'
+  | 'pending_approval'
+  | 'paused'
+  | 'completed'
+  | 'failed'
+
+export interface SubtaskDTO {
+  id: string
+  title: string
+  agentRole: SubagentRole
+  agentLabel: string
+  status: SubtaskStatus
+  progress: number // 0..100
+  summary?: string
+  isLongRunning?: boolean
+  approvalDraftId?: string
+  resultSummary?: string
+  cards?: ResultCardDTO[]
+}
+
 export interface MessageDTO {
   id: string
   role: 'user' | 'assistant'
   text: string
   card?: ActionCardDTO | null
   cards?: ResultCardDTO[] | null
+  /** Tasks decomposed and handled by autonomous sub-agents */
+  tasks?: SubtaskDTO[] | null
   /** R28: read-only plan labels the agent announced before running it */
   plan?: string[] | null
   thinking?: ThinkingStep[] | null
@@ -521,6 +552,9 @@ export type ChatStreamEvent =
   | { event: 'step'; label: string; state: 'active' | 'done' }
   | { event: 'card'; card: ActionCardDTO }
   | { event: 'cards'; cards: ResultCardDTO[] }
+  /** Autonomous subagent decomposition tasks */
+  | { event: 'tasks'; tasks: SubtaskDTO[] }
+  | { event: 'task_update'; task: SubtaskDTO }
   /** R28: the plan the agent is about to run (multi-step, read-only) */
   | { event: 'plan'; steps: string[] }
   | { event: 'actions'; actions: ChatActionDTO[] }
@@ -534,6 +568,7 @@ export interface ChatTurn {
   text: string
   card?: ActionCardDTO | null
   cards?: ResultCardDTO[] | null
+  tasks?: SubtaskDTO[] | null
   plan?: string[] | null
   thinking?: ThinkingStep[] | null
   modelLabel?: string | null

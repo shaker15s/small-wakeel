@@ -1,10 +1,10 @@
 'use client'
 
-// وكيل — ThinkingIndicator: the live «pre-reply» moment (ChatGPT/Claude style).
+// وكيل — ThinkingIndicator: the live «pre-reply» moment (Apple / Claude style).
 // THREE animation modes that rotate every ~2.8s (bounce → fade → wave) so the
 // wait never feels static, plus a rotating Egyptian status line every ~2.2s and
 // the latest live thinking step with its spinner→check lifecycle.
-// Pure framer-motion (no globals.css dependency — that file is shared).
+// Frosted glass styling (`glass-strong`) with warm amber pulse aura.
 
 import { useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
@@ -63,8 +63,14 @@ export function ThinkingIndicator({
     <div className="flex items-center gap-3" role="status" aria-label="وكيل بيفكر">
       {showAvatar && <AgentAvatar state="thinking" size="sm" />}
 
-      <div className="flex min-w-0 flex-col gap-1.5">
-        <div className="flex items-center gap-3">
+      <div className="glass-strong relative flex min-w-0 flex-col gap-1.5 overflow-hidden rounded-2xl border border-amber-500/25 px-3.5 py-2 shadow-sm shadow-amber-500/5 backdrop-blur-xl">
+        {/* Warm amber aura pulse */}
+        <span
+          className="pointer-events-none absolute -inset-1 animate-pulse rounded-2xl bg-gradient-to-r from-amber-500/15 via-amber-400/10 to-orange-500/15 blur-xs"
+          aria-hidden="true"
+        />
+
+        <div className="relative z-10 flex items-center gap-3">
           {/* the animation of the moment — swaps with a soft fade */}
           <motion.span
             key={mode}
@@ -85,7 +91,7 @@ export function ThinkingIndicator({
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             transition={{ duration: 0.2 }}
-            className="truncate text-sm text-muted-foreground"
+            className="truncate text-xs font-medium text-foreground/90 sm:text-sm"
           >
             {STATUSES[statusIdx]}
           </motion.span>
@@ -98,7 +104,7 @@ export function ThinkingIndicator({
         {shownStep && (
           <div
             className={cn(
-              'flex items-center gap-1.5 text-xs text-muted-foreground/80',
+              'relative z-10 flex items-center gap-1.5 text-xs text-muted-foreground/90',
               (shownStep.icon === 'research' || shownStep.icon === 'note') &&
                 'border-s-2 border-[var(--wakil-amber)]/40 ps-1.5',
             )}

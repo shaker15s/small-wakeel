@@ -13,6 +13,7 @@
 import { useRef, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { FileSpreadsheet, Loader2, Upload } from 'lucide-react'
+import * as XLSX from 'xlsx'
 
 import { Button } from '@/components/ui/button'
 import {
@@ -67,9 +68,28 @@ export function ImportItemsDialog({ businessId, userId }: { businessId: string; 
   })
 
   async function readFile(file: File) {
-    const text = await file.text()
-    setCsv(text)
-    setPreview(null)
+    try {
+      const lower = file.name.toLowerCase()
+      if (lower.endsWith('.xlsx') || lower.endsWith('.xls') || lower.endsWith('.ods')) {
+        const buffer = await file.arrayBuffer()
+        const wb = XLSX.read(buffer, { type: 'array' })
+        const firstSheetName = wb.SheetNames[0]
+        if (!firstSheetName) throw new Error('الملف لا يحتوي على أوراق عمل')
+        const ws = wb.Sheets[firstSheetName]
+        const csvData = XLSX.utils.sheet_to_csv(ws)
+        setCsv(csvData)
+      } else {
+        const text = await file.text()
+        setCsv(text)
+      }
+      setPreview(null)
+    } catch (err) {
+      toast({
+        title: 'خطأ في قراءة ملف الإكسل',
+        description: err instanceof Error ? err.message : 'تعذر استخراج البيانات من الملف',
+        variant: 'destructive',
+      })
+    }
   }
 
   return (
@@ -89,7 +109,7 @@ export function ImportItemsDialog({ businessId, userId }: { businessId: string; 
         <DialogHeader>
           <DialogTitle>استيراد أصناف من Excel أو CSV</DialogTitle>
           <DialogDescription>
-            انسخ الصفوف من Excel والصقهم هنا، أو اختار الملف. الأعمدة المفهومة: اسم الصنف،
+            انسخ الصفوف من Excel والصقهم هنا، أو اختار الملف (.xlsx أو .csv). الأعمدة المفهومة: اسم الصنف،
             سعر الشراء، سعر البيع، الكمية، الوحدة، حد الطلب، الباركود، تاريخ الصلاحية — والترتيب مش مهم.
             الأسعار بالجنيه وهي بتتحوّل لقروش تلقائيًا.
           </DialogDescription>
@@ -100,7 +120,7 @@ export function ImportItemsDialog({ businessId, userId }: { businessId: string; 
             <input
               ref={fileRef}
               type="file"
-              accept=".csv,.txt,.tsv,text/csv,text/plain"
+              accept=".xlsx,.xls,.ods,.csv,.txt,.tsv,text/csv,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
               className="sr-only"
               onChange={(e) => {
                 const file = e.target.files?.[0]
