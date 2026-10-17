@@ -186,11 +186,16 @@ model Message {
   cards          String? // JSON — result cards (tables)
   thinking       String? // agent visible thinking steps
   actions        String? // JSON — deep-link action buttons (ChatActionDTO[])
-  modelLabel     String?
+    modelLabel     String?
   research       String? // JSON — ResearchDTO (deep-research plan + sources)
   verified       String? // JSON — VerifyDTO (self-verification result)
+  /* The client's per-send id. A dropped SSE stream used to cost the owner a
+     second identical message AND a second draft on «جرّب تاني»; with this id
+     the retry reuses the turn (or replays the finished reply) instead. */
+  clientTurnId   String?
   createdAt      DateTime     @default(now())
 
+  @@unique([conversationId, clientTurnId])
   @@index([conversationId, createdAt])
 }
 

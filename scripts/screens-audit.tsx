@@ -6,6 +6,8 @@
 //
 //   • real data      → the screen must show the shop's own numbers/names
 //   • empty ledger   → a brand-new shop must SEE what to do next, not a blank
+//   • network down   → every query in `error` state: the screen must say so and
+//                      offer «جرّب تاني», never impersonate a quiet empty day
 //
 // Rendering React on the server is the same code path the browser runs for the
 // first paint (hooks, derived state, conditional sections), so a crash, a
@@ -119,6 +121,35 @@ function clientFor(biz: Biz, p: Payload | null): QueryClient {
     put(QUERY_KEYS.suggestions(biz.id, biz.userId), [])
     put(QUERY_KEYS.tools(biz.id, biz.userId), [])
     put(['bootstrap'], { businesses: [{ id: biz.id, name: biz.name, type: biz.type, users: [{ id: biz.userId, name: 'صاحب الشغل', role: 'owner' }] }] })
+  }
+  return qc
+}
+
+/** Every query the screens read is in `error` state (a dead API). */
+function errorClient(biz: Biz): QueryClient {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity, gcTime: Infinity } } })
+  const keys = [
+    QUERY_KEYS.overview(biz.id, biz.userId),
+    QUERY_KEYS.items(biz.id),
+    QUERY_KEYS.operations(biz.id),
+    QUERY_KEYS.memories(biz.id),
+    QUERY_KEYS.reports(biz.id, '7d'),
+    QUERY_KEYS.reports(biz.id, '30d'),
+    QUERY_KEYS.tasks(biz.id),
+    QUERY_KEYS.providers,
+    QUERY_KEYS.radar(biz.id),
+    QUERY_KEYS.suggestions(biz.id, biz.userId),
+    QUERY_KEYS.tools(biz.id, biz.userId),
+    ['bootstrap'] as const,
+  ]
+  for (const key of keys) {
+    // retryOnMount:false keeps the state error instead of silently refetching
+    // during render; without it the statically rendered screen shows skeletons
+    // and the audit would pass a screen the owner sees as «فاضية».
+    qc.setQueryDefaults(key as never, { enabled: false, retryOnMount: false, staleTime: Infinity })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const q = qc.getQueryCache().build(qc, { queryKey: key as any })
+    q.setState({ status: 'error', error: new Error('تعذر الاتصال بالسيرفر'), fetchStatus: 'idle' })
   }
   return qc
 }
@@ -262,9 +293,24 @@ async function main() {
         problems.push(`أول يوم وقعت: ${e instanceof Error ? e.message : String(e)}`)
       }
 
+      // ---- 3) network down (every query in `error` state) -----------------
+      try {
+        const html = renderScreen(screen, biz, errorClient(biz))
+        const text = textOf(html)
+        // The right answer is short — an error card with a retry button. What
+        // must NOT happen is a quiet empty ledger that looks like a slow day.
+        if (!/مش قادرين|تعذر|حصلت مشكلة/.test(text)) {
+          problems.push('الشبكة واقعة: الشاشة ما بتقولش إن فيه مشكلة (بتبان فاضية)')
+        } else if (!/جرّب تاني/.test(text)) {
+          problems.push('الشبكة واقعة: مفيش زرار «جرّب تاني»')
+        }
+      } catch (e) {
+        problems.push(`الشبكة واقعة: الشاشة وقعت (${e instanceof Error ? e.message : String(e)})`)
+      }
+
       const ok = problems.length === 0
       results.push({ name: `${biz.type}/${screen.key}`, problems })
-      console.log(`${ok ? '✅' : '❌'} ${screen.key.padEnd(10)} ${ok ? 'اترسمت ببيانات حقيقية + أول يوم' : problems.join(' · ')}`)
+      console.log(`${ok ? '✅' : '❌'} ${screen.key.padEnd(10)} ${ok ? 'اترسمت: بيانات حقيقية + أول يوم + شبكة واقعة' : problems.join(' · ')}`)
     }
   }
 

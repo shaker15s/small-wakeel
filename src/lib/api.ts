@@ -257,6 +257,8 @@ export async function streamChat(
     suggestionId?: string | null
     /** R15 — «بحث عميق» composer toggle: force the plan-and-execute research pipeline */
     deepResearch?: boolean
+    /** R34 — stable per-send id so «جرّب تاني» is idempotent on the server */
+    turnId?: string
   },
   handlers: StreamHandlers,
   signal?: AbortSignal,

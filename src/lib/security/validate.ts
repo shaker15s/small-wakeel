@@ -44,6 +44,12 @@ export const chatPostSchema = z.object({
   conversationId: idSchema.nullish(),
   suggestionId: z.string().trim().max(80).nullish(),
   deepResearch: z.boolean().optional().default(false),
+  /* R34: stable per-send id from the composer — makes «جرّب تاني» idempotent */
+  turnId: z
+    .string()
+    .trim()
+    .regex(/^[A-Za-z0-9_-]{6,80}$/, 'turnId غير صالح')
+    .nullish(),
 })
 
 /* -------------------------------------------------------------- operations */

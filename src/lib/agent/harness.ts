@@ -114,6 +114,8 @@ interface TurnContext {
   history: { role: string; text: string }[]
   /** R15: user-toggled deep research («بحث عميق») — forces the research pipeline */
   deepResearch?: boolean
+  /** R34: stable composer id — a retried turn must not draft the same op twice */
+  turnId?: string
 }
 
 /** Context handed to entity resolution — lexicon + active rules + usage side-effects. */
@@ -474,6 +476,11 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
       const query = s
         .replace(/(بعت|مبيعات|اتبيع|بيع|حصلت|تحصيل|قبضت|استلمت|اشتريت|مشتريات|الشرا|شراء|صرفت|مصروفات|مصاريف|مصروف)/g, ' ')
         .replace(/(كام|قد\s*ايه|قدايه|النهارده|اليوم|الشهر|هذا|ده|دي|الاسبوع|الأسبوع|الفتره|الفترة|الماضي|الجاي|علبه|علبة|كرتونه|كرتونة|كيلو|قطعه|قطعة|جرام|شريط|لتر)/g, ' ')
+        // connectors + generic nouns are not names: «اشتريت كام من الموردين؟»
+        // must not filter by a customer/supplier called «من المور ن» (the
+        // normalizer splits «الموردين»), it must aggregate ALL purchases.
+        // normalizeAr already split «الموردين» → «المور ن»; strip both spellings
+        .replace(/(^|\s)(من|في|ف|علي|على|عن|مع|كل|اللي|المور\s*ن|الموردين|الموردون|المورد|موردين|مورد|العملاء|للعملاء|العميل|للعميل|المحل|العياده|العيادة|الشغل|الفاتوره|الفاتورة)(?=\s|$)/g, ' ')
         .replace(/[؟?]/g, ' ')
         .replace(/\s+/g, ' ')
         .trim()
@@ -2238,6 +2245,36 @@ interface TurnMeta {
  * turn {kind, label = أول ٤٠ حرف من رسالة المستخدم, latencyMs, ttftMs,
  * tokens ≈ len/3, fallback}, plus a 'verify' event when verification did work.
  */
+/**
+ * R34 — the idempotency key of one draft.
+ *
+ * The owner's network drops mid-reply; the composer offers «جرّب تاني» with the
+ * SAME `turnId`. The key is then derived from (turn, op type, summary), so the
+ * retried turn hits `createDraft`'s existing-key path and gets the draft that
+ * already exists instead of a twin. A turn that really does create two
+ * different drafts still gets two keys (type/summary differ).
+ */
+const opSeqs = new WeakMap<TurnContext, Map<string, number>>()
+
+function turnIdem(ctx: TurnContext, type: string, summary: string): string {
+  const base = `${ctx.business.id}:${ctx.user.id}`
+  if (!ctx.turnId) return `${base}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
+  let h = 0
+  const key = `${type}|${summary}`
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) | 0
+  // Two IDENTICAL ops in one turn must both be drafted («بعت ٢ لبن» مرتين) —
+  // the n-th occurrence gets an `-n` suffix, and a retry replays 1,2,… in the
+  // same order so it still lands on the same keys.
+  let seqs = opSeqs.get(ctx)
+  if (!seqs) {
+    seqs = new Map()
+    opSeqs.set(ctx, seqs)
+  }
+  const n = (seqs.get(key) ?? 0) + 1
+  seqs.set(key, n)
+  return `${base}:${ctx.turnId}:${type}:${(h >>> 0).toString(36)}${n > 1 ? `-${n}` : ''}`
+}
+
 export async function runAgentTurn(ctx: TurnContext, emit: TurnEmit): Promise<TurnResult> {
   ensurePrismaFresh() // dev-server prisma hot-reload seam (no-op on fresh processes)
   const t0 = Date.now()
@@ -2826,7 +2863,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             brainFailures.push(resolved.failMessage ?? `ناقص ${resolved.missing ?? 'بيانات'} — ${TYPE_AR[resolved.opType] ?? resolved.opType} ماتسجلتش`)
             return
           }
-          const idem = `${business.id}:${user.id}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
+          const idem = turnIdem(ctx, resolved.opType, resolved.summary)
           const reflection = await reflectOnDraft({
             businessId: business.id,
             userId: user.id,
@@ -3472,7 +3509,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           replyParts.push(`طلب رقم ${AR_ORDINALS[i]} ناقص بيانات: ${resolved.failMessage ?? resolved.missing ?? ''}`)
           continue
         }
-        const idem = `${business.id}:${user.id}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
+        const idem = turnIdem(ctx, resolved.opType, resolved.summary)
         const reflection = await reflectOnDraft({
           businessId: business.id,
           userId: user.id,
@@ -3613,7 +3650,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       } else {
         done(IDX.verify, `حسبت الإجمالي من السعر الحقيقي: ${resolved.summary}`)
         emit({ event: 'step', label: `بجهّز مسودة ${TYPE_AR[resolved.opType]}`, state: 'active' })
-        const idem = `${business.id}:${user.id}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
+        const idem = turnIdem(ctx, resolved.opType, resolved.summary)
         // «تأمل» — self-critique BEFORE the draft exists, so the card carries
         // the doubt (and a dangerous draft can be escalated to R3).
         const reflection = await reflectOnDraft({

@@ -91,7 +91,8 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
   const scrollRef = useRef<HTMLDivElement>(null)
   const nearBottomRef = useRef(true)
   const sendingRef = useRef(false)
-  const retryRef = useRef<string | null>(null)
+  // R34: text + id of the last send, so «جرّب تاني» re-sends the SAME turn
+  const retryRef = useRef<{ text: string; turnId: string } | null>(null)
   const creatingRef = useRef(false)
 
   // ---- load conversation history (keyed to the ACTIVE conversation) ----
@@ -202,7 +203,10 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
   const [queuedCount, setQueuedCount] = useState(0)
 
   const send = useCallback(
-    async (text: string, opts?: { suggestionId?: string; deepResearch?: boolean }) => {
+    async (
+      text: string,
+      opts?: { suggestionId?: string; deepResearch?: boolean; turnId?: string; replaceTurnId?: string },
+    ) => {
       if (!text.trim()) return
       const trimmed = text.trim()
       if (sendingRef.current) {
@@ -215,25 +219,41 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
       setSending(true)
       setFailedId(null)
       setRevealId(null)
-      retryRef.current = trimmed
+      // retry keeps the id (and therefore the server-side turn), a fresh send
+      // mints one — `crypto.randomUUID` needs a secure context, hence the shim
+      const turnId =
+        opts?.turnId ?? globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+      retryRef.current = { text: trimmed, turnId }
       // the conversation the scratchpad invalidation targets at done time
       let convId = activeConversationId ?? loadedConvId
 
       const userLocalId = `local-user-${Date.now()}`
       const liveId = `local-live-${Date.now()}`
 
-      setTurns((prev) => [
-        ...prev,
-        { id: userLocalId, role: 'user', text: trimmed, createdAt: new Date().toISOString() },
-        {
-          id: liveId,
-          role: 'assistant',
-          text: '',
-          thinking: [],
-          createdAt: new Date().toISOString(),
-          streaming: true,
-        },
-      ])
+      setTurns((prev) => {
+        // a retry replaces the failed pair (question + dead answer) instead of
+        // stacking a duplicate question under it
+        let base = prev
+        if (opts?.replaceTurnId) {
+          const idx = prev.findIndex((t) => t.id === opts.replaceTurnId)
+          if (idx >= 0) {
+            const start = idx > 0 && prev[idx - 1].role === 'user' ? idx - 1 : idx
+            base = prev.filter((_, i) => i < start || i > idx)
+          }
+        }
+        return [
+          ...base,
+          { id: userLocalId, role: 'user', text: trimmed, createdAt: new Date().toISOString() },
+          {
+            id: liveId,
+            role: 'assistant',
+            text: '',
+            thinking: [],
+            createdAt: new Date().toISOString(),
+            streaming: true,
+          },
+        ]
+      })
       nearBottomRef.current = true
       setNearBottom(true)
 
@@ -265,6 +285,7 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
             conversationId: activeConversationId ?? loadedConvId,
             suggestionId: opts?.suggestionId ?? null,
             deepResearch: opts?.deepResearch ?? false,
+            turnId,
           },
           {
             onStart: (cid, userMessageId) => {
@@ -378,8 +399,12 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
   )
 
   const retry = useCallback(() => {
-    if (retryRef.current) void send(retryRef.current)
-  }, [send])
+    const last = retryRef.current
+    if (!last) return
+    // same turnId → the server reuses the turn (or replays the finished reply,
+    // `replayed: true`) and never drafts the op twice
+    void send(last.text, { turnId: last.turnId, replaceTurnId: failedId ?? undefined })
+  }, [send, failedId])
 
   // ---- suggestion / quick-command chips send their prompt directly ----
   const sendSuggestion = useCallback(
