@@ -55,7 +55,7 @@ async function api<T>(path: string): Promise<T> {
 
 /** Everything the eight screens can read, fetched once per business. */
 async function payloadFor(biz: Biz) {
-  const [overview, items, operations, memories, reports7, reports30, tasks, providers, radar, suggestions, tools, bootstrap] = await Promise.all([
+  const [overview, items, operations, memories, reports7, reports30, tasks, providers, radar, suggestions, tools, bootstrap, brief] = await Promise.all([
     api(`/api/overview?businessId=${biz.id}&userId=${biz.userId}`),
     api(`/api/items?businessId=${biz.id}`),
     api(`/api/operations?businessId=${biz.id}`),
@@ -68,8 +68,9 @@ async function payloadFor(biz: Biz) {
     api(`/api/suggestions?businessId=${biz.id}&userId=${biz.userId}`),
     api(`/api/tools?businessId=${biz.id}&userId=${biz.userId}`),
     api('/api/bootstrap'),
+    api(`/api/morning-brief?businessId=${biz.id}&userId=${biz.userId}`),
   ])
-  return { overview, items, operations, memories, reports7, reports30, tasks, providers, radar, suggestions, tools, bootstrap }
+  return { overview, items, operations, memories, reports7, reports30, tasks, providers, radar, suggestions, tools, bootstrap, brief }
 }
 
 type Payload = Awaited<ReturnType<typeof payloadFor>>
@@ -107,6 +108,7 @@ function clientFor(biz: Biz, p: Payload | null): QueryClient {
     put(QUERY_KEYS.radar(biz.id), p.radar)
     put(QUERY_KEYS.suggestions(biz.id, biz.userId), p.suggestions)
     put(QUERY_KEYS.tools(biz.id, biz.userId), p.tools)
+    put(QUERY_KEYS.morningBrief(biz.id, biz.userId), p.brief)
     put(['bootstrap'], p.bootstrap)
   } else {
     put(QUERY_KEYS.overview(biz.id, biz.userId), ZERO_OVERVIEW)
@@ -120,6 +122,7 @@ function clientFor(biz: Biz, p: Payload | null): QueryClient {
     put(QUERY_KEYS.radar(biz.id), [])
     put(QUERY_KEYS.suggestions(biz.id, biz.userId), [])
     put(QUERY_KEYS.tools(biz.id, biz.userId), [])
+    put(QUERY_KEYS.morningBrief(biz.id, biz.userId), { headline: 'كل حاجة تحت السيطرة — مفيش حاجة مستعجلة النهاردة', items: [] })
     put(['bootstrap'], { businesses: [{ id: biz.id, name: biz.name, type: biz.type, users: [{ id: biz.userId, name: 'صاحب الشغل', role: 'owner' }] }] })
   }
   return qc
@@ -166,7 +169,7 @@ interface Screen {
 const SCREENS: Screen[] = [
   {
     key: 'today',
-    signal: /رصيد الخزنة|مبيعات النهاردة|آخر الحركات|النهاردة/,
+    signal: /رصيد الخزنة|مبيعات النهاردة|آخر الحركات|النهاردة|ابدأ يومك/,
     emptySignal: /ابدأ|ضيف|سجّل|لسه|مفيش/,
     render: (b) => h(TodayView, { businessId: b.id, userId: b.userId }),
   },
@@ -274,6 +277,14 @@ async function main() {
                 ? egp((payload.overview as { cash: { net: number } }).cash.net)
                 : null
         if (expected && !text.includes(expected)) problems.push(`الرقم الظاهر مش رقم السجل (المتوقع ${expected})`)
+        // «الشاشة تاخد عرض اللاب/الكمبيوتر/الموبايل بالكامل» — a screen that
+        // caps itself at a phone-sized column leaves dead gutters on a 27".
+        if (/max-w-5xl|max-w-4xl/.test(html)) {
+          problems.push('الشاشة محصورة في عمود ضيق (max-w-5xl) — مش بتستخدم عرض الشاشة')
+        }
+        if (!/max-w-\[1800px\]/.test(html)) {
+          problems.push('الشاشة مش داخلة حاوية PAGE المشتركة')
+        }
         // the shop's own catalog must appear on the inventory screen
         if (screen.key === 'inventory' && itemNames.length > 0) {
           const shown = itemNames.filter((n) => text.includes(n.split(' ')[0])).length

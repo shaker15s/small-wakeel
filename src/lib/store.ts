@@ -37,9 +37,13 @@ interface WakilState {
   onboardingDone: boolean
   // conversation (last-used per business — so switching businesses keeps context)
   activeConversationId: string | null
+  /** a prompt handed from «ابدأ يومك» to the composer — sent once, then cleared */
+  pendingPrompt: string | null
   // setters
   setSession: (businessId: string, userId: string) => void
   setActiveConversation: (id: string | null) => void
+  queuePrompt: (text: string) => void
+  clearPrompt: () => void
   setModel: (modelKey: string | null) => void
   setView: (view: ViewKey) => void
   toggleDark: () => void
@@ -64,6 +68,7 @@ export const useWakil = create<WakilState>((set, get) => ({
   dark: false,
   onboardingDone: false,
   activeConversationId: null,
+  pendingPrompt: null,
   setSession: (businessId, userId) => {
     localStorage.setItem(LS.business, businessId)
     localStorage.setItem(LS.user, userId)
@@ -72,6 +77,8 @@ export const useWakil = create<WakilState>((set, get) => ({
       typeof window !== 'undefined' ? localStorage.getItem(LS.conversation(businessId)) : null
     set({ businessId, userId, view: 'chat', activeConversationId: storedConversation })
   },
+  queuePrompt: (text) => set({ pendingPrompt: text, view: 'chat' }),
+  clearPrompt: () => set({ pendingPrompt: null }),
   setActiveConversation: (id) => {
     const businessId = get().businessId
     if (businessId) {
@@ -119,6 +126,7 @@ export const QUERY_KEYS = {
   providers: ['providers'] as const,
   conversations: (b: string, u: string) => ['conversations', b, u] as const,
   suggestions: (b: string, u: string) => ['suggestions', b, u] as const,
+  morningBrief: (b: string, u: string) => ['morning-brief', b, u] as const,
   quickCommands: (b: string) => ['quickCommands', b] as const,
   notes: (b: string, c: string) => ['notes', b, c] as const,
   radar: (b: string) => ['radar', b] as const,

@@ -51,6 +51,13 @@ export const AGENT_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   'expense_breakdown',
   // «بعت كام لبن الشهر ده؟ / حصلت كام من أم حسن؟» — period aggregates
   'get_period_totals',
+  // R36: the ledger questions an owner asks every week, answered without a model
+  'get_stock_value',
+  'get_top_items',
+  'get_dead_stock',
+  'get_customer_ranking',
+  'get_staff_performance',
+  'get_price_check',
   // R29 (chat→world): the agent can look OUTSIDE the ledger and ADVISE
   'search_web',
   'business_advice',

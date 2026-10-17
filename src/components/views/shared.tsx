@@ -414,6 +414,18 @@ export function SectionCard({
   )
 }
 
+/**
+ * The one page container.
+ *
+ * The app shell is full-bleed (`h-dvh`, no max-width), but every screen used to
+ * cap itself at `max-w-5xl` — so on a laptop the owner got a phone-sized column
+ * with two dead gutters. One shared container means the content uses the whole
+ * screen on a 27" monitor and still breathes on a phone, and no screen can drift
+ * out of alignment with the others.
+ */
+export const PAGE = 'mx-auto w-full max-w-[1800px] space-y-4 px-3 pb-10 pt-2 sm:space-y-5 sm:px-6 xl:px-10'
+export const PAGE_PLAIN = 'mx-auto w-full max-w-[1800px] px-3 pb-10 pt-2 sm:px-6 xl:px-10'
+
 export function ViewHeader({
   title,
   subtitle,
@@ -424,9 +436,9 @@ export function ViewHeader({
   action?: React.ReactNode
 }) {
   return (
-    <header className="flex flex-wrap items-end justify-between gap-3">
+    <header className="flex flex-wrap items-end justify-between gap-3 pb-1">
       <div className="min-w-0">
-        <h1 className="text-xl font-bold sm:text-2xl">{title}</h1>
+        <h1 className="text-2xl font-bold tracking-tight sm:text-[1.7rem]">{title}</h1>
         {subtitle && <p className="mt-1 text-sm text-muted-foreground">{subtitle}</p>}
       </div>
       {action}

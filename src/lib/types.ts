@@ -341,6 +341,19 @@ export interface ConversationSummaryDTO {
 }
 
 /** A dynamic quick-command chip — computed from live data + usage history (بتتغير مع شغلك) */
+/** «ابدأ يومك» — rendered at the top of اليوم; each item is a ready prompt. */
+export interface MorningBriefDTO {
+  headline: string
+  items: {
+    id: string
+    tone: 'money' | 'stock' | 'time' | 'risk'
+    title: string
+    why: string
+    impact: number
+    cta: { label: string; prompt?: string; view?: string }
+  }[]
+}
+
 export interface SuggestionDTO {
   id: string
   label: string

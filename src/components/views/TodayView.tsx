@@ -19,6 +19,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   ShoppingCart,
+  Sparkles,
   TriangleAlert,
   Wallet,
   X,
@@ -29,7 +30,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { api } from '@/lib/api'
 import { arAgo, arDate, egp, isTodayCairo, qty as fmtQty } from '@/lib/format'
 import { arUnit } from '@/lib/verticals'
-import { QUERY_KEYS } from '@/lib/store'
+import { QUERY_KEYS, useWakil } from '@/lib/store'
 import type { ViewKey } from '@/lib/store'
 import type { RadarInsightDTO } from '@/lib/types'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -46,7 +47,7 @@ import {
   ViewProps,
   arNum,
   safeView,
-  TypeBadge,
+  TypeBadge, PAGE, PAGE_PLAIN
 } from './shared'
 
 const ALERT_STYLE = {
@@ -66,6 +67,92 @@ const ALERT_STYLE = {
     rowClass: 'border-wakil-navy/25 bg-muted/40 hover:bg-muted/70',
   },
 } as const
+
+/**
+ * «ابدأ يومك» — the agent's opening move.
+ *
+ * The owner said «مش مساعد كفايه»: the app waited to be asked. This card is the
+ * first thing on اليوم — three actions computed from the ledger (no model call,
+ * so it is instant and free), ranked by the money at stake. Each button sends
+ * the exact sentence that fixes the item, so «recommendation» and «doing» are
+ * one tap apart.
+ */
+function MorningBriefCard({ businessId, userId, onNavigate }: ViewProps) {
+  const queuePrompt = useWakil((s) => s.queuePrompt)
+  const { data, isError } = useQuery({
+    queryKey: QUERY_KEYS.morningBrief(businessId, userId),
+    queryFn: () => api.morningBrief(businessId, userId),
+    refetchInterval: 60_000,
+  })
+  // the KPI block already apologies for a dead API — never stack two errors
+  if (isError) return null
+  // fixed-height skeleton: the brief must not push the KPIs down after load
+  if (!data) return <Skeleton className="h-[5.5rem] w-full rounded-xl" />
+
+  const run = (item: (typeof data.items)[number]) => {
+    if (item.cta.prompt) queuePrompt(item.cta.prompt)
+    onNavigate?.(safeView(item.cta.view) ?? 'chat')
+  }
+
+  if (data.items.length === 0) {
+    return (
+      <div className="flex items-center gap-3 rounded-xl border bg-card px-4 py-3 text-sm shadow-sm">
+        <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-emerald-500/10 text-emerald-600">
+          <CheckCircle2 className="size-4" aria-hidden />
+        </span>
+        <p className="min-w-0 text-muted-foreground">{data.headline}</p>
+      </div>
+    )
+  }
+
+  return (
+    <section
+      className="card-enter card-sheen overflow-hidden rounded-xl border bg-card shadow-sm"
+      aria-label="ابدأ يومك"
+    >
+      <span
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-l from-transparent via-wakil-amber/60 to-transparent"
+      />
+      <div className="flex items-center gap-2 border-b px-4 py-3">
+        <Sparkles className="size-4 shrink-0 text-wakil-amber" aria-hidden />
+        <h2 className="text-sm font-semibold">ابدأ يومك</h2>
+        <span className="ms-auto text-xs text-muted-foreground">{data.headline}</span>
+      </div>
+      <ul className="divide-y">
+        {data.items.map((item) => {
+          const Icon = item.tone === 'money' ? Wallet : item.tone === 'time' ? CalendarClock : TriangleAlert
+          const toneClass =
+            item.tone === 'money'
+              ? 'bg-emerald-500/10 text-emerald-600'
+              : item.tone === 'time'
+                ? 'bg-wakil-amber/15 text-wakil-amber'
+                : 'bg-destructive/10 text-destructive'
+          return (
+            <li key={item.id} className="flex items-start gap-3 px-4 py-3">
+              <span className={cn('flex size-9 shrink-0 items-center justify-center rounded-full', toneClass)}>
+                <Icon className="size-4" aria-hidden />
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium leading-snug">{item.title}</p>
+                <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">{item.why}</p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                className="min-h-10 shrink-0 gap-1"
+                onClick={() => run(item)}
+              >
+                {item.cta.label}
+                <ChevronLeft className="size-3.5" aria-hidden />
+              </Button>
+            </li>
+          )
+        })}
+      </ul>
+    </section>
+  )
+}
 
 export default function TodayView({ businessId, userId, onNavigate }: ViewProps) {
   const { toast } = useToast()
@@ -114,8 +201,11 @@ export default function TodayView({ businessId, userId, onNavigate }: ViewProps)
 
   if (isError) {
     return (
-      <div className="mx-auto w-full max-w-5xl px-4 pb-8 pt-2 sm:px-6">
+      <div className={PAGE_PLAIN}>
         <ViewHeader title="اليوم" subtitle={arDate(new Date())} />
+
+      {/* المساعد بيبدأ اليوم — مش مستني سؤال */}
+      <MorningBriefCard businessId={businessId} userId={userId} onNavigate={onNavigate} />
         <div className="mt-4">
           <ErrorState message={error.message} onRetry={() => refetch()} />
         </div>
@@ -133,7 +223,7 @@ export default function TodayView({ businessId, userId, onNavigate }: ViewProps)
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.2, ease: 'easeOut' }}
-      className="mx-auto w-full max-w-5xl space-y-4 px-4 pb-8 pt-2 sm:space-y-5 sm:px-6"
+      className={PAGE}
     >
       <ViewHeader title="اليوم" subtitle={arDate(new Date())} />
 

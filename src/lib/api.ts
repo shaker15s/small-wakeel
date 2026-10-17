@@ -23,6 +23,7 @@ import type {
   ResearchDTO,
   VerifyDTO,
   CustomToolDTO,
+  MorningBriefDTO,
 } from './types'
 
 /**
@@ -198,6 +199,9 @@ export const api = {
   // — الاقتراحات الديناميكية (بتتغير مع شغلك)
   suggestions: (businessId: string, userId: string) =>
     get<SuggestionDTO[]>(`/api/suggestions?businessId=${businessId}&userId=${userId}`),
+  // — «ابدأ يومك»: تلات توصيات محسوبة من السجل نفسه (بدون موديل)
+  morningBrief: (businessId: string, userId: string) =>
+    get<MorningBriefDTO>(`/api/morning-brief?businessId=${businessId}&userId=${userId}`),
   // — أدواتك السريعة (user-extensible tools)
   quickCommands: (businessId: string) => get<QuickCommandDTO[]>(`/api/quick-commands?businessId=${businessId}`),
   createQuickCommand: (c: { businessId: string; userId: string; label: string; prompt: string; icon: string }) =>

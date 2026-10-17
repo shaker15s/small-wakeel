@@ -399,7 +399,7 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
   const s = normalizeAr(text)
   const isGym = businessType === 'gym'
 
-  if (/(السلام|اهلا|هلا|صباح|مساء|ازيك|عامل ايه|شكرا)/.test(s) && s.length < 25) {
+  if (/(السلام|اهلا|هلا|صباح|مساء|ازيك|عامل ايه|شكرا)/.test(s) && s.length < 25 && !/(فريق|موظف|مخزون|خزنه|خزنة|أصناف|اصناف|عملاء|مبيعات|ورديه|وردية|شغل)/.test(s)) {
     return { intent: 'chat', fields: {}, replyHint: 'تحية' }
   }
   // ---- R29 (1) WEB SEARCH beats every local keyword: the owner EXPLICITLY asked
@@ -452,6 +452,22 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
     return { intent: 'write', opType: 'stock_adjustment', fields: {} }
   }
   if (/(وضع|رصيد|حاله) الخزنه|الخزنه|كاش/.test(s)) return { intent: 'read', tool: 'get_cash_position', fields: {} }
+  // ---- R36: the weekly ledger questions, answered deterministically -------
+  // They must sit BEFORE the generic «مخزون/ناقص» rule: «المخزون ده مكلّفني
+  // كام؟» is a VALUE question, not a shortfall list. Patterns use literal
+  // spaces because `s` is already normalized (whitespace collapsed).
+  if (/(قيمة المخزون|المخزون.*(مكلفني|مكلّفني|يساوي|بكام)|راس المال|رأس المال|فلوس محبوس)/.test(s))
+    return { intent: 'read', tool: 'get_stock_value', fields: {} }
+  if (/(راكد|راكده|راكدة|مش بتتباع|مش بيتحرك|بضاعه راكنه|بضاعة راكنة)/.test(s))
+    return { intent: 'read', tool: 'get_dead_stock', fields: {} }
+  if (/(أفضل|افضل|أكبر|اكبر|أكتر|اكتر).*(عميل|عملاء)|مين بيشتري|ترتيب العملاء|(عميل|عملاء).*(أكتر|اكتر|أفضل|افضل)/.test(s))
+    return { intent: 'read', tool: 'get_customer_ranking', fields: {} }
+  if (/(أداء|اداء) (الفريق|الموظفين|الموظف)|احسن موظف|أحسن موظف|مين شغله|الموظفين بيعملوا/.test(s))
+    return { intent: 'read', tool: 'get_staff_performance', fields: {} }
+  if (/(بخساره|بخسارة|سعر التكلفه|سعر التكلفة|راجع الاسعار|راجع الأسعار|اسعار غلط)/.test(s))
+    return { intent: 'read', tool: 'get_price_check', fields: {} }
+  if (/(أكتر|اكتر|أعلى|اعلى|افضل|أفضل).*(بيتباع|بتتباع|مبيع|مبيعات)|(بيتباع|بتتباع) (أكتر|اكتر)|أعلى الأصناف|الاصناف اللي بتتباع|الأصناف اللي بتتباع/.test(s))
+    return { intent: 'read', tool: 'get_top_items', fields: {} }
   // «النواقص» / «نواقص» are the broken plurals an Egyptian owner actually uses —
   // a substring test for «ناقص» misses them entirely.
   if (/(مخزون|ناقص|نواقص|استوك|تحت الحد)/.test(s) && !/(بعت|بيع|شرا|اشتري)/.test(s)) return { intent: 'read', tool: 'list_low_stock', fields: {} }
@@ -1592,12 +1608,15 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
         }
       }
       if (amount == null || amount <= 0) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'المبلغ', failMessage: 'المبلغ قد إيه؟' }
-      const label = String(f.label ?? '') || (norm.includes('كهربا') ? 'كهربا' : norm.includes('ايجار') ? 'إيجار' : norm.includes('تليفون') ? 'تليفون' : 'مصروف')
-      const payload = { label, total: amount }
+      const rawLabel = String(f.label ?? '')
+      const label = rawLabel || (norm.includes('كهربا') ? 'كهربا' : norm.includes('ايجار') ? 'إيجار' : norm.includes('تليفون') ? 'تليفون' : '')
+      const payload = label ? { label, total: amount } : { total: amount }
       const risk = computeRisk(type, amount)
-      const summary = `مصروف ${label} بـ${egp(amount)}`
+      // «مصروف مصروف بـ١٢٥» was the summary of every unlabelled expense —
+      // the type already says «مصروف», so the word must not repeat.
+      const summary = label ? `مصروف ${label} بـ${egp(amount)}` : `مصروف بـ${egp(amount)}`
       const card = fieldsToCard('', type, risk, summary, [
-        { label: 'البند', value: label },
+        ...(label ? [{ label: 'البند', value: label }] : []),
         { label: 'المبلغ', value: egp(amount) },
       ], [{ label: 'الخزنة', value: egp(-amount), tone: 'bad' }], RISK_META[risk].hint)
       return { ok: true, opType: type, payload, summary, card }
@@ -3367,6 +3386,12 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       'expense_breakdown',
       'compare_periods',
       'get_period_totals',
+      'get_stock_value',
+      'get_top_items',
+      'get_dead_stock',
+      'get_customer_ranking',
+      'get_staff_performance',
+      'get_price_check',
     ])
     if (!SAFE.has(r.tool)) return null
     const hasDigits = /[0-9٠-٩۰-۹]/.test(text)

@@ -31,6 +31,12 @@ export type ReadTool =
   | 'compare_periods'
   | 'expense_breakdown'
   | 'get_period_totals'
+  | 'get_stock_value'
+  | 'get_top_items'
+  | 'get_dead_stock'
+  | 'get_customer_ranking'
+  | 'get_staff_performance'
+  | 'get_price_check'
   | 'search_web'
   | 'business_advice'
 
@@ -56,6 +62,12 @@ export const READ_TOOLS: ReadonlySet<string> = new Set<string>([
   'search_web',
   'business_advice',
   'get_period_totals',
+  'get_stock_value',
+  'get_top_items',
+  'get_dead_stock',
+  'get_customer_ranking',
+  'get_staff_performance',
+  'get_price_check',
 ])
 
 /**
@@ -197,6 +209,55 @@ function opLines(payload: string): { itemId: string; qty: number; total: number 
 }
 
 /** Sales rows (SUCCEEDED) inside a window, newest first. */
+// ---------------------------------------------------------------------------
+// Payload readers shared by the aggregate tools.
+//
+// Seeded/real operations store money in four different shapes: `total` (sales,
+// purchases), `amount` (collections, expenses, memberships), `paid`, and a
+// `lines[]` array whose money is unitPrice×qty. One reader means every screen
+// and every answer adds the ledger the same way.
+type OpPayload = Record<string, unknown>
+
+function readPayload(raw: string): OpPayload {
+  try {
+    return JSON.parse(raw) as OpPayload
+  } catch {
+    return {}
+  }
+}
+
+function linesOf(p: OpPayload): { name: string; qty: number; money: number }[] {
+  if (!Array.isArray(p.lines)) return []
+  return (p.lines as OpPayload[])
+    .map((l) => {
+      const qty = Number(l.qty)
+      const price = Number(l.unitPrice ?? l.price ?? 0)
+      const money = Number(l.total)
+      return {
+        name: String(l.name ?? l.itemName ?? '').trim(),
+        qty: Number.isFinite(qty) && qty > 0 ? qty : 0,
+        money: Number.isFinite(money) && money > 0 ? money : (Number.isFinite(price) ? price : 0) * (Number.isFinite(qty) ? qty : 0),
+      }
+    })
+    .filter((l) => l.name.length > 0)
+}
+
+function payloadMoney(p: OpPayload): number {
+  for (const k of ['total', 'amount', 'paid', 'value']) {
+    const n = Number(p[k])
+    if (Number.isFinite(n) && n > 0) return Math.round(n)
+  }
+  const sum = linesOf(p).reduce((s, l) => s + l.money, 0)
+  return sum > 0 ? Math.round(sum) : 0
+}
+
+function payloadQty(p: OpPayload): number {
+  const n = Number(p.qty)
+  let qty = Number.isFinite(n) && n > 0 ? n : 0
+  for (const l of linesOf(p)) qty += l.qty
+  return qty
+}
+
 async function salesIn(businessId: string, days: number) {
   const since = startOfCairoDay(-(days - 1))
   return db.operation.findMany({
@@ -237,11 +298,7 @@ export async function runReadTool(
         where: { businessId, status: 'SUCCEEDED', createdAt: { gte: today } },
       })
       const sum = (type: string) =>
-        ops.filter((o) => o.type === type).reduce((s, o) => {
-          const p = JSON.parse(o.payload) as Record<string, unknown>
-          const key = 'total' in p ? 'total' : 'amount'
-          return s + Number(p[key] ?? 0)
-        }, 0)
+        ops.filter((o) => o.type === type).reduce((s, o) => s + payloadMoney(readPayload(o.payload)), 0)
       return [
         {
           kind: 'kv',
@@ -280,20 +337,7 @@ export async function runReadTool(
       const ops = await db.operation.findMany({
         where: { businessId, status: 'SUCCEEDED', type: { in: types }, createdAt: { gte: from } },
       })
-      const money = (payload: string): number => {
-        const p = (() => {
-          try {
-            return JSON.parse(payload) as Record<string, unknown>
-          } catch {
-            return {}
-          }
-        })()
-        for (const k of ['total', 'amount', 'paid', 'value']) {
-          const n = Number(p[k])
-          if (Number.isFinite(n) && n > 0) return Math.round(n)
-        }
-        return 0
-      }
+      const money = (payload: string): number => payloadMoney(readPayload(payload))
       const flat = (x: string) => normalizeAr(x).replace(/\s+/g, ' ').trim()
       const query = flat(String(args.query ?? ''))
       // a name in the question («لبن» / «أم حسن») narrows the same numbers
@@ -313,24 +357,7 @@ export async function runReadTool(
       }
       // a gym «sells» memberships: call them مبيعات in the same number
       const total = matched.reduce((sum, o) => sum + money(o.payload), 0)
-      let qty = 0
-      if (metric === 'sales') {
-        for (const o of matched) {
-          try {
-            const p = JSON.parse(o.payload) as Record<string, unknown>
-            const n = Number(p.qty)
-            if (Number.isFinite(n) && n > 0) qty += n
-            // a seeded sale is stored as `lines` — the quantity lives there
-            const lines = Array.isArray(p.lines) ? (p.lines as Record<string, unknown>[]) : []
-            for (const l of lines) {
-              const ln = Number(l.qty)
-              if (Number.isFinite(ln) && ln > 0) qty += ln
-            }
-          } catch {
-            /* a payload we cannot read contributes money only */
-          }
-        }
-      }
+      const qty = metric === 'sales' ? matched.reduce((sum, o) => sum + payloadQty(readPayload(o.payload)), 0) : 0
       const period = days === 1 ? 'النهارده' : days === 7 ? 'آخر ٧ أيام' : `آخر ${fmtQty(days)} يوم`
       return [
         {
@@ -344,6 +371,291 @@ export async function runReadTool(
           ...(matched.length === 0
             ? { rows: [{ label: 'النتيجة', value: `مفيش ${label} مسجلة ${period}${subject ? ` ل${subject}` : ''}` }] }
             : {}),
+        },
+      ]
+    }
+
+    case 'get_stock_value': {
+      // «المخزون ده مكلّفني كام؟» — the capital asleep on the shelves. The
+      // owner asks this before every restock, and it must be exact: cost basis
+      // and retail basis, never the same number twice.
+      const items = await db.item.findMany({ where: { businessId } })
+      const cost = items.reduce((s, it) => s + it.stockQty * it.costPrice, 0)
+      const retail = items.reduce((s, it) => s + it.stockQty * it.sellPrice, 0)
+      const low = items.filter((it) => it.stockQty <= it.lowStockThreshold).length
+      return [
+        {
+          kind: 'kv',
+          title: 'قيمة المخزون',
+          rows: [
+            { label: 'بسعر التكلفة', value: egp(cost) },
+            { label: 'لو اتباع بسعر البيع', value: egp(retail) },
+            { label: 'الربح المتوقع', value: egp(retail - cost) },
+            { label: 'عدد الأصناف', value: fmtQty(items.length) },
+            { label: 'أصناف ناقصة', value: fmtQty(low) },
+          ],
+        },
+      ]
+    }
+
+    case 'get_top_items': {
+      const days = Math.max(1, Math.min(365, Number(args.days ?? 30) || 30))
+      const since = days === 1 ? startOfCairoDay(0) : new Date(Date.now() - days * 86400000)
+      const ops = await db.operation.findMany({
+        where: { businessId, status: 'SUCCEEDED', type: { in: ['sale', 'membership'] }, createdAt: { gte: since } },
+      })
+      // Some sales carry only `itemId` (older rows, and the owner's own quick
+      // sales). Without resolving the id they all collapse into «عملية بيع» and
+      // the ranking lies — so resolve ids → names in one query.
+      const itemIds = new Set<string>()
+      for (const o of ops) {
+        const p = readPayload(o.payload)
+        if (typeof p.itemId === 'string') itemIds.add(p.itemId)
+      }
+      const itemNames = new Map(
+        itemIds.size > 0
+          ? (await db.item.findMany({ where: { id: { in: [...itemIds] } }, select: { id: true, name: true } })).map((i) => [i.id, i.name] as const)
+          : [],
+      )
+      const byName = new Map<string, { qty: number; money: number; count: number }>()
+      for (const o of ops) {
+        const p = readPayload(o.payload)
+        const lines = linesOf(p)
+        if (lines.length > 0) {
+          for (const l of lines) {
+            const cur = byName.get(l.name) ?? { qty: 0, money: 0, count: 0 }
+            byName.set(l.name, { qty: cur.qty + l.qty, money: cur.money + l.money, count: cur.count + 1 })
+          }
+        } else {
+          // a gym membership, or a one-line sale typed by the owner
+          const name =
+            String(p.itemName ?? itemNames.get(String(p.itemId ?? '')) ?? p.member ?? p.customer ?? '').trim() ||
+            (String(p.plan ?? '') ? `اشتراك ${String(p.plan)}` : 'عملية بيع')
+          const cur = byName.get(name) ?? { qty: 0, money: 0, count: 0 }
+          byName.set(name, { qty: cur.qty + payloadQty(p), money: cur.money + payloadMoney(p), count: cur.count + 1 })
+        }
+      }
+      const rows = [...byName.entries()].sort((a, b) => b[1].money - a[1].money).slice(0, 10)
+      const period = days === 1 ? 'النهارده' : days === 7 ? 'آخر ٧ أيام' : `آخر ${fmtQty(days)} يوم`
+      if (rows.length === 0) {
+        return [{ kind: 'kv', title: `أعلى الأصناف مبيعًا · ${period}`, rows: [{ label: 'النتيجة', value: 'مفيش مبيعات مسجلة في الفترة دي' }] }]
+      }
+      const total = rows.reduce((s, [, v]) => s + v.money, 0)
+      return [
+        {
+          kind: 'table',
+          title: `أعلى الأصناف مبيعًا · ${period}`,
+          columns: [
+            { key: 'name', label: 'الصنف' },
+            { key: 'qty', label: 'الكمية' },
+            { key: 'money', label: 'الإيراد' },
+            { key: 'count', label: 'مرات البيع' },
+          ],
+          rows: rows.map(([name, v]) => ({ name, qty: fmtQty(v.qty), money: egp(v.money), count: fmtQty(v.count) })),
+          footer: [
+            { label: 'إجمالي أعلى ١٠', value: egp(total) },
+            { label: 'عدد الأصناف', value: fmtQty(byName.size) },
+          ],
+        },
+      ]
+    }
+
+    case 'get_dead_stock': {
+      // Money that stopped moving. A shelf full of stock nobody buys looks
+      // like an asset on paper and like cash burned in the drawer.
+      const days = Math.max(7, Math.min(365, Number(args.days ?? 30) || 30))
+      const since = new Date(Date.now() - days * 86400000)
+      const [items, ops] = await Promise.all([
+        db.item.findMany({ where: { businessId, stockQty: { gt: 0 } } }),
+        db.operation.findMany({
+          where: { businessId, status: 'SUCCEEDED', type: 'sale', createdAt: { gte: since } },
+          select: { payload: true },
+        }),
+      ])
+      const sold = new Set<string>()
+      const soldIds = new Set<string>()
+      for (const o of ops) {
+        const p = readPayload(o.payload)
+        for (const l of linesOf(p)) sold.add(l.name)
+        if (typeof p.itemId === 'string') soldIds.add(p.itemId)
+      }
+      const dead = items
+        .filter((it) => !sold.has(it.name) && !soldIds.has(it.id))
+        .map((it) => ({ it, value: it.stockQty * it.costPrice }))
+        .sort((a, b) => b.value - a.value)
+      if (dead.length === 0) {
+        return [
+          {
+            kind: 'kv',
+            title: `البضاعة الراكدة · آخر ${fmtQty(days)} يوم`,
+            rows: [{ label: 'النتيجة', value: 'كل صنف عندك اتحرك في الفترة دي — مفيش رأس مال راكد' }],
+          },
+        ]
+      }
+      const capital = dead.reduce((s, d) => s + d.value, 0)
+      return [
+        {
+          kind: 'table',
+          title: `البضاعة اللي مش بتتحرك · آخر ${fmtQty(days)} يوم`,
+          columns: [
+            { key: 'name', label: 'الصنف' },
+            { key: 'stock', label: 'الرصيد' },
+            { key: 'value', label: 'رأس المال المحبوس' },
+          ],
+          rows: dead.slice(0, 12).map(({ it, value }) => ({ name: it.name, stock: fmtQty(it.stockQty, arUnit(it.unit)), value: egp(value) })),
+          footer: [
+            { label: 'إجمالي المحبوس', value: egp(capital) },
+            { label: 'عدد الأصناف', value: fmtQty(dead.length) },
+          ],
+        },
+      ]
+    }
+
+    case 'get_customer_ranking': {
+      // «مين أفضل عميل عندي؟» — a relationship question answered with numbers.
+      const since = new Date(Date.now() - 90 * 86400000)
+      const [ops, customers] = await Promise.all([
+        db.operation.findMany({
+          where: { businessId, status: 'SUCCEEDED', type: { in: ['sale', 'membership', 'collection'] }, createdAt: { gte: since } },
+          select: { type: true, payload: true },
+        }),
+        db.customer.findMany({ where: { businessId }, select: { name: true, balance: true } }),
+      ])
+      const balances = new Map(customers.map((c) => [c.name, c.balance]))
+      // collections store `customer`, newer sales store `customerId`
+      const ids = new Set<string>()
+      for (const o of ops) {
+        const p = readPayload(o.payload)
+        if (typeof p.customerId === 'string') ids.add(p.customerId)
+      }
+      const namesById = new Map(
+        ids.size > 0
+          ? (await db.customer.findMany({ where: { id: { in: [...ids] } }, select: { id: true, name: true } })).map((c) => [c.id, c.name] as const)
+          : [],
+      )
+      const book = new Map<string, { bought: number; collected: number; count: number }>()
+      for (const o of ops) {
+        const p = readPayload(o.payload)
+        const name = String(p.customer ?? p.member ?? namesById.get(String(p.customerId ?? '')) ?? '').trim()
+        if (!name) continue
+        const cur = book.get(name) ?? { bought: 0, collected: 0, count: 0 }
+        if (o.type === 'collection') cur.collected += payloadMoney(p)
+        else cur.bought += payloadMoney(p)
+        cur.count += 1
+        book.set(name, cur)
+      }
+      const rows = [...book.entries()].sort((a, b) => b[1].bought - a[1].bought).slice(0, 10)
+      if (rows.length === 0) {
+        return [{ kind: 'kv', title: 'أفضل العملاء · آخر ٩٠ يوم', rows: [{ label: 'النتيجة', value: 'مفيش عمليات مسجلة باسم عميل في الفترة دي' }] }]
+      }
+      return [
+        {
+          kind: 'table',
+          title: 'أفضل العملاء · آخر ٩٠ يوم',
+          columns: [
+            { key: 'name', label: 'العميل' },
+            { key: 'bought', label: 'شرا' },
+            { key: 'collected', label: 'تحصيل' },
+            { key: 'balance', label: 'عليه دلوقتي' },
+            { key: 'count', label: 'عمليات' },
+          ],
+          rows: rows.map(([name, v]) => ({
+            name,
+            bought: v.bought > 0 ? egp(v.bought) : '—',
+            collected: v.collected > 0 ? egp(v.collected) : '—',
+            balance: (balances.get(name) ?? 0) > 0 ? egp(balances.get(name) ?? 0) : '—',
+            count: fmtQty(v.count),
+          })),
+          footer: [{ label: 'عدد العملاء النشطين', value: fmtQty(book.size) }],
+        },
+      ]
+    }
+
+    case 'get_staff_performance': {
+      const since = new Date(Date.now() - 30 * 86400000)
+      const [ops, users] = await Promise.all([
+        db.operation.findMany({
+          where: { businessId, status: 'SUCCEEDED', createdAt: { gte: since } },
+          select: { userId: true, type: true, payload: true, createdAt: true },
+        }),
+        db.user.findMany({ where: { businessId }, select: { id: true, name: true, role: true } }),
+      ])
+      const book = new Map<string, { count: number; sold: number; last: Date }>()
+      for (const o of ops) {
+        const cur = book.get(o.userId) ?? { count: 0, sold: 0, last: o.createdAt }
+        cur.count += 1
+        if (o.type === 'sale' || o.type === 'membership' || o.type === 'collection') cur.sold += payloadMoney(readPayload(o.payload))
+        if (o.createdAt > cur.last) cur.last = o.createdAt
+        book.set(o.userId, cur)
+      }
+      if (book.size === 0) {
+        return [{ kind: 'kv', title: 'أداء الفريق · آخر ٣٠ يوم', rows: [{ label: 'النتيجة', value: 'مفيش عمليات مكتملة في الفترة دي' }] }]
+      }
+      const rows = users
+        .filter((u) => book.has(u.id))
+        .map((u) => ({ u, v: book.get(u.id)! }))
+        .sort((a, b) => b.v.sold - a.v.sold)
+      return [
+        {
+          kind: 'table',
+          title: 'أداء الفريق · آخر ٣٠ يوم',
+          columns: [
+            { key: 'name', label: 'الموظف' },
+            { key: 'role', label: 'الدور' },
+            { key: 'count', label: 'عمليات' },
+            { key: 'sold', label: 'مبيعات وتحصيل' },
+            { key: 'last', label: 'آخر عملية' },
+          ],
+          rows: rows.map(({ u, v }) => ({
+            name: u.name,
+            role: u.role === 'owner' ? 'صاحب' : u.role === 'manager' ? 'مشرف' : 'كاشير',
+            count: fmtQty(v.count),
+            sold: egp(v.sold),
+            last: arDate(v.last),
+          })),
+          footer: [{ label: 'إجمالي العمليات', value: fmtQty(ops.length) }],
+        },
+      ]
+    }
+
+    case 'get_price_check': {
+      // Selling below cost is silent, permanent loss. The owner never sees it
+      // in a sales report — only in the cash drawer at the end of the month.
+      const items = await db.item.findMany({ where: { businessId, stockQty: { gt: 0 }, costPrice: { gt: 0 } } })
+      const bad = items
+        .map((it) => ({ it, margin: it.sellPrice - it.costPrice, pct: it.costPrice > 0 ? ((it.sellPrice - it.costPrice) / it.costPrice) * 100 : 0 }))
+        .filter((x) => x.pct < 15)
+        .sort((a, b) => a.pct - b.pct)
+      if (bad.length === 0) {
+        return [
+          {
+            kind: 'kv',
+            title: 'فحص الأسعار',
+            rows: [{ label: 'النتيجة', value: 'كل الأصناف هامشها ١٥٪ أو أكتر — مفيش بيع بخسارة' }],
+          },
+        ]
+      }
+      const losing = bad.filter((x) => x.margin <= 0).length
+      return [
+        {
+          kind: 'table',
+          title: 'أصناف هامشها ضعيف أو بتتبيع بخسارة',
+          columns: [
+            { key: 'name', label: 'الصنف' },
+            { key: 'cost', label: 'التكلفة' },
+            { key: 'sell', label: 'البيع' },
+            { key: 'margin', label: 'الهامش' },
+          ],
+          rows: bad.slice(0, 12).map(({ it, margin, pct }) => ({
+            name: it.name,
+            cost: egp(it.costPrice),
+            sell: egp(it.sellPrice),
+            margin: margin <= 0 ? `${egp(margin)} (خسارة)` : `${egp(margin)} · ${fmtQty(Math.round(pct))}٪`,
+          })),
+          footer: [
+            { label: 'أصناف بخسارة', value: fmtQty(losing) },
+            { label: 'تحت ١٥٪', value: fmtQty(bad.length) },
+          ],
         },
       ]
     }

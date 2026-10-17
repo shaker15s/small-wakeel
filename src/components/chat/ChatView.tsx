@@ -67,6 +67,9 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
   const setSession = useWakil((s) => s.setSession)
   const activeConversationId = useWakil((s) => s.activeConversationId)
   const setActiveConversation = useWakil((s) => s.setActiveConversation)
+  // «ابدأ يومك» hands the composer a ready sentence — send it once, then clear
+  const pendingPrompt = useWakil((s) => s.pendingPrompt)
+  const clearPrompt = useWakil((s) => s.clearPrompt)
   const queryClient = useQueryClient()
   const { toast } = useToast()
   const { theme, setTheme } = useTheme()
@@ -397,6 +400,14 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
     },
     [business.id, userId, modelKey, activeConversationId, loadedConvId, toast, queryClient],
   )
+
+  // A recommendation tapped on اليوم becomes a real request here — the owner
+  // never retypes what the agent already worked out.
+  useEffect(() => {
+    if (!pendingPrompt) return
+    clearPrompt()
+    void send(pendingPrompt)
+  }, [pendingPrompt, clearPrompt, send])
 
   const retry = useCallback(() => {
     const last = retryRef.current

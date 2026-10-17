@@ -30,7 +30,7 @@ import {
   TYPE_AR,
   ViewHeader,
   ViewProps,
-  arNum,
+  arNum, PAGE, PAGE_PLAIN
 } from './shared'
 
 export interface ReportsViewProps extends ViewProps {
@@ -51,7 +51,7 @@ export default function ReportsView({ businessId, businessName }: ReportsViewPro
 
   if (isError) {
     return (
-      <div className="mx-auto w-full max-w-5xl px-4 pb-8 pt-2 sm:px-6">
+      <div className={PAGE_PLAIN}>
         <ViewHeader title="التقارير" />
         <div className="mt-4">
           <ErrorState message={error.message} onRetry={() => refetch()} />
@@ -78,7 +78,7 @@ export default function ReportsView({ businessId, businessName }: ReportsViewPro
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.2, ease: 'easeOut' }}
-      className="mx-auto w-full max-w-4xl space-y-4 px-4 pb-8 pt-2 sm:px-6"
+      className={PAGE}
     >
       <ViewHeader
         title="التقارير"
