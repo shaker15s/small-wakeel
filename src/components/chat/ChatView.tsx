@@ -21,7 +21,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AnimatePresence, motion, MotionConfig } from 'framer-motion'
-import { ChevronDown, History, LayoutGrid, Loader2, Moon, NotebookPen, Search, SquarePen, Sun } from 'lucide-react'
+import { ChevronDown, ChevronLeft, History, LayoutGrid, Loader2, Moon, NotebookPen, Search, SquarePen, Sun } from 'lucide-react'
 import { useTheme } from 'next-themes'
 
 import { api, messageToTurn, streamChat, type ChatTurnWithMeta } from '@/lib/api'
@@ -614,15 +614,15 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
                     {vertical.welcome}
                   </p>
                 </div>
-                <div className="flex flex-wrap justify-center gap-1.5">
+                <div className="grid w-full max-w-3xl grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
                   {suggestionsQ.isPending ? (
-                    <div className="flex flex-wrap justify-center gap-1.5" aria-busy="true" aria-label="بيجهّز الاقتراحات">
-                      {[0, 1, 2, 3].map((i) => (
-                        <span key={i} className="skel h-[4.25rem] w-32 rounded-2xl" />
+                    <div className="col-span-full grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3" aria-busy="true" aria-label="بيجهّز الاقتراحات">
+                      {[0, 1, 2, 3, 4, 5].map((i) => (
+                        <span key={i} className="skel h-[4.25rem] w-full rounded-xl" />
                       ))}
                     </div>
                   ) : heroSuggestions ? (
-                    heroSuggestions.map((s, i) => (
+                    heroSuggestions.slice(0, 6).map((s, i) => (
                       <SuggestionPill key={s.id} s={s} index={i} onPick={() => sendSuggestion(s)} />
                     ))
                   ) : (
@@ -1014,24 +1014,32 @@ function SuggestionPill({ s, index, onPick }: { s: SuggestionDTO; index: number;
       aria-label={s.reasonLabel ? `${s.label} — ${s.reasonLabel}` : s.label}
       title={s.prompt}
       className={cn(
-        'press chip-lift flex min-h-11 max-w-full flex-col items-start gap-0.5 rounded-2xl border px-3.5 py-2 text-start transition-all focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50',
+        'press chip-lift group flex w-full items-center gap-3 rounded-xl border p-3 text-start transition-all focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50',
         primary
           ? 'border-transparent bg-primary text-primary-foreground hover:bg-primary/90'
           : 'border-border bg-card/70 backdrop-blur-sm hover:border-wakil-amber/50 hover:bg-accent hover:text-accent-foreground',
       )}
     >
-      <span className="flex items-center gap-1.5 text-xs font-medium">
-        <Icon
-          className={cn('size-3.5 shrink-0', primary ? 'text-primary-foreground/80' : 'text-wakil-amber')}
-          aria-hidden="true"
-        />
-        <span className="max-w-56 truncate">{s.label}</span>
+      <span
+        className={cn(
+          'flex size-9 shrink-0 items-center justify-center rounded-lg',
+          primary ? 'bg-primary-foreground/15' : 'bg-wakil-amber/10',
+        )}
+      >
+        <Icon className={cn('size-4', primary ? 'text-primary-foreground/90' : 'text-wakil-amber')} aria-hidden="true" />
       </span>
-      {s.reasonLabel && (
-        <span className={cn('text-[10px]', primary ? 'text-primary-foreground/70' : 'text-muted-foreground')}>
-          {s.reasonLabel}
-        </span>
-      )}
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm font-medium">{s.label}</span>
+        {s.reasonLabel && (
+          <span className={cn('mt-0.5 block truncate text-xs', primary ? 'text-primary-foreground/70' : 'text-muted-foreground')}>
+            {s.reasonLabel}
+          </span>
+        )}
+      </span>
+      <ChevronLeft
+        className={cn('size-4 shrink-0 opacity-40 transition-transform group-hover:-translate-x-0.5', primary && 'opacity-70')}
+        aria-hidden="true"
+      />
     </motion.button>
   )
 }

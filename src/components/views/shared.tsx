@@ -194,6 +194,14 @@ const KPI_ICON_BG: Record<KpiTone, string> = {
   muted: 'bg-muted',
 }
 
+const KPI_HAIRLINE: Record<KpiTone, string> = {
+  teal: 'via-wakil-teal/50',
+  amber: 'via-wakil-amber/60',
+  navy: 'via-wakil-navy/40',
+  red: 'via-destructive/50',
+  muted: 'via-border',
+}
+
 const KPI_TONE_TEXT: Record<KpiTone, string> = {
   teal: 'text-wakil-teal',
   amber: 'text-wakil-amber',
@@ -221,14 +229,18 @@ export function KpiCard({
   return (
     <div
       className={cn(
-        'chip-lift group flex h-24 flex-col justify-between rounded-xl border bg-card p-4 shadow-sm',
+        'chip-lift group relative flex h-24 flex-col justify-between overflow-hidden rounded-xl border bg-gradient-to-b from-card to-card/60 p-4 shadow-sm sm:h-28 sm:p-5',
         index != null ? 'list-enter' : 'card-enter',
       )}
       style={index != null ? { animationDelay: `${index * 40}ms` } : undefined}
       title={title}
     >
+      <span
+        aria-hidden
+        className={cn('pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-l from-transparent to-transparent', KPI_HAIRLINE[tone])}
+      />
       <div className="flex items-center justify-between gap-2">
-        <span className="text-xs font-medium text-muted-foreground">{label}</span>
+        <span className="text-xs font-medium text-muted-foreground sm:text-[13px]">{label}</span>
         <span
           className={cn(
             'icon-wiggle flex size-7 shrink-0 items-center justify-center rounded-lg transition-transform duration-200 group-hover:scale-110',
@@ -240,7 +252,7 @@ export function KpiCard({
       </div>
       <div
         className={cn(
-          'num truncate text-xl font-bold leading-none tabular-nums',
+          'num truncate text-xl font-bold leading-none tabular-nums sm:text-[1.7rem]',
           KPI_TONE_TEXT[tone],
         )}
       >
@@ -254,7 +266,7 @@ export function LoadingKpis({ count = 4 }: { count?: number }) {
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4" aria-busy="true" aria-label="بيتحمّل">
       {Array.from({ length: count }).map((_, i) => (
-        <div key={i} className="skel h-24 rounded-xl" />
+        <div key={i} className="skel h-24 rounded-xl sm:h-28" />
       ))}
     </div>
   )

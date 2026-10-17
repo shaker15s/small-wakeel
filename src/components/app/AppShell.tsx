@@ -274,7 +274,7 @@ export function AppShell() {
         {/* desktop nav — active pill slides between views */}
         <nav
           aria-label="التنقل الرئيسي"
-          className="scroll-warm mx-auto hidden w-full max-w-none gap-1 overflow-x-auto px-3 pb-2 sm:flex sm:px-4"
+          className="scroll-warm mx-auto hidden w-full max-w-none gap-1 overflow-x-auto px-3 pb-2 sm:flex sm:px-4 lg:hidden"
         >
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon
@@ -306,9 +306,53 @@ export function AppShell() {
         </nav>
       </header>
 
-      {/* ===== main — other views scroll inside ===== */}
-      <main className="mx-auto min-h-0 w-full max-w-none flex-1 overflow-hidden">
-        <div className="scroll-warm h-full overflow-y-auto overflow-x-clip px-3 pb-24 pt-4 sm:px-0 sm:pb-10">
+      {/* ===== workspace: desktop rail + the scrolling screen ===== */}
+      <div className="flex min-h-0 w-full flex-1 overflow-hidden">
+        {/* Desktop rail — a laptop screen has width; a row of tabs wastes the
+            left edge and hides the product's structure. Hidden below lg, where
+            the header tabs + the bottom bar already do this job. */}
+        <aside
+          aria-label="التنقل الجانبي"
+          className="hidden w-56 shrink-0 flex-col border-e border-border/70 bg-gradient-to-b from-card/70 via-card/40 to-background lg:flex xl:w-60"
+        >
+          <nav className="flex flex-col gap-0.5 p-2.5 pt-3">
+            {NAV_ITEMS.map((item) => {
+              const Icon = item.icon
+              const active = view === item.key
+              return (
+                <button
+                  key={item.key}
+                  onClick={() => setView(item.key)}
+                  aria-current={active ? 'page' : undefined}
+                  className={`press focus-warm group relative flex h-11 items-center gap-3 rounded-lg px-3 text-sm font-medium transition-colors ${
+                    active
+                      ? 'bg-primary/10 text-primary'
+                      : 'text-muted-foreground hover:bg-accent/70 hover:text-accent-foreground'
+                  }`}
+                >
+                  {active && (
+                    <motion.span
+                      layoutId="rail-active"
+                      transition={{ type: 'spring', stiffness: 420, damping: 36 }}
+                      className="absolute inset-y-1.5 start-0 w-1 rounded-full bg-primary"
+                      aria-hidden
+                    />
+                  )}
+                  <Icon className={`size-4.5 shrink-0 ${active ? 'text-primary' : ''}`} aria-hidden />
+                  <span className="truncate">{VIEW_LABELS[item.key]}</span>
+                </button>
+              )
+            })}
+          </nav>
+          <div className="mt-auto space-y-2 p-4">
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              وكيل — مساعد شغلك اليومي. كل عملية بتتحقق قبل ما تتسجل.
+            </p>
+          </div>
+        </aside>
+
+        <main className="min-h-0 w-full flex-1 overflow-hidden">
+          <div className="scroll-warm h-full overflow-y-auto overflow-x-clip px-3 pb-24 pt-4 sm:px-0 sm:pb-10">
           {view === 'today' && <TodayView businessId={activeBusiness.id} userId={activeUser.id} onNavigate={setView} />}
           {view === 'inventory' && <InventoryView businessId={activeBusiness.id} userId={activeUser.id} onNavigate={setView} />}
           {view === 'journal' && <JournalView businessId={activeBusiness.id} userId={activeUser.id} onNavigate={setView} />}
@@ -317,11 +361,12 @@ export function AppShell() {
           {view === 'reports' && <ReportsView businessId={activeBusiness.id} userId={activeUser.id} businessName={activeBusiness.name} />}
           {view === 'memory' && <MemoryView businessId={activeBusiness.id} userId={activeUser.id} onNavigate={setView} />}
           {view === 'settings' && <SettingsView businessId={activeBusiness.id} userId={activeUser.id} onNavigate={setView} />}
-          <p className="hidden pt-8 text-center text-[11px] text-muted-foreground sm:block">
-            وكيل — مساعد شغلك اليومي · كل عملية بتتحقق قبل ما تتسجل
-          </p>
-        </div>
-      </main>
+            <p className="hidden pt-8 text-center text-[11px] text-muted-foreground sm:block lg:hidden">
+              وكيل — مساعد شغلك اليومي · كل عملية بتتحقق قبل ما تتسجل
+            </p>
+          </div>
+        </main>
+      </div>
 
       {/* ===== footer (always pinned bottom via h-dvh flex) ===== */}
       <footer className="glass-strong shrink-0 border-t border-border/60 pb-[max(0.25rem,env(safe-area-inset-bottom))] sm:hidden">
