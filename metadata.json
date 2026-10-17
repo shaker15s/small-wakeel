@@ -3,5 +3,8 @@
   "description": "مساعد ذكي لصحاب المحلات والجيمات والصيدليات والعطارات — سجّل بع صرف بثقة، وكل حاجة موثقة ومتحققة.",
   "capabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]
 }

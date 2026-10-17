@@ -1,0 +1,122 @@
+// /api/plugins — Dynamic AI-Powered Plugin Harness API
+// GET    ?businessId= → { plugins: AgentPluginDTO[] }
+// POST   { businessId, userId, prompt?, slug?, name?, runImmediately? } → synthesizes/installs plugin & optionally runs it
+// PATCH  { id, active } → toggles plugin active state
+// DELETE ?id= → removes an installed plugin
+
+import { NextRequest, NextResponse } from 'next/server'
+import {
+  deletePlugin,
+  executePlugin,
+  getBusinessPlugins,
+  installOrUpdatePlugin,
+  STARTER_PLUGIN_CATALOG,
+  synthesizePluginWithAI,
+  togglePluginActive,
+} from '@/lib/agent/plugin-harness'
+import { badRequest, notFound, serverError } from '../_lib/http'
+
+export const dynamic = 'force-dynamic'
+
+export async function GET(req: NextRequest) {
+  try {
+    const businessId = req.nextUrl.searchParams.get('businessId')
+    if (!businessId) return badRequest('businessId مطلوب')
+    const plugins = await getBusinessPlugins(businessId)
+    return NextResponse.json({ plugins })
+  } catch (e) {
+    return serverError('plugins-get', e)
+  }
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    const body = (await req.json().catch(() => ({}))) as {
+      businessId?: string
+      userId?: string
+      action?: 'install' | 'run'
+      prompt?: string
+      slug?: string
+      name?: string
+      runImmediately?: boolean
+    }
+    if (!body.businessId) return badRequest('businessId مطلوب')
+
+    // Action: run an existing or starter plugin
+    if (body.action === 'run' && body.slug) {
+      const result = await executePlugin({
+        businessId: body.businessId,
+        pluginOrSlug: body.slug,
+      })
+      return NextResponse.json(result)
+    }
+
+    if (!body.userId) return badRequest('userId مطلوب')
+
+    let plugin
+    if (body.slug) {
+      const starter = STARTER_PLUGIN_CATALOG.find((s) => s.slug === body.slug)
+      if (!starter) return notFound('البلاجن غير موجود في الكتالوج')
+      plugin = await installOrUpdatePlugin({
+        businessId: body.businessId,
+        userId: body.userId,
+        spec: starter,
+      })
+    } else if (body.prompt?.trim()) {
+      plugin = await synthesizePluginWithAI({
+        businessId: body.businessId,
+        userId: body.userId,
+        prompt: body.prompt.trim(),
+        preferredName: body.name?.trim(),
+      })
+    } else {
+      return badRequest('يرجى إدخال وصف الميزة أو اختيار بلاجن من الكتالوج')
+    }
+
+    if (body.runImmediately !== false) {
+      const execution = await executePlugin({
+        businessId: body.businessId,
+        pluginOrSlug: plugin,
+      })
+      return NextResponse.json({
+        plugin: execution.plugin,
+        cards: execution.cards,
+        alerts: execution.alerts,
+        summaryText: execution.summaryText,
+      }, { status: 201 })
+    }
+
+    return NextResponse.json({ plugin }, { status: 201 })
+  } catch (e) {
+    return serverError('plugins-post', e)
+  }
+}
+
+export async function PATCH(req: NextRequest) {
+  try {
+    const body = (await req.json().catch(() => ({}))) as {
+      id?: string
+      active?: boolean
+    }
+    if (!body.id || typeof body.active !== 'boolean') {
+      return badRequest('id و active مطلوبين')
+    }
+    const updated = await togglePluginActive(body.id, body.active)
+    if (!updated) return notFound('البلاجن غير موجود')
+    return NextResponse.json({ plugin: updated })
+  } catch (e) {
+    return serverError('plugins-patch', e)
+  }
+}
+
+export async function DELETE(req: NextRequest) {
+  try {
+    const id = req.nextUrl.searchParams.get('id')
+    if (!id) return badRequest('id مطلوب')
+    const ok = await deletePlugin(id)
+    if (!ok) return notFound('البلاجن غير موجود')
+    return NextResponse.json({ ok: true })
+  } catch (e) {
+    return serverError('plugins-delete', e)
+  }
+}

@@ -141,6 +141,8 @@ export interface SearchResultDTO {
 
 export const api = {
   bootstrap: () => get<BootstrapDTO>('/api/bootstrap'),
+  createBusiness: (body: { name: string; type: string; ownerName?: string; openingCash?: number; customItems?: string[] }) =>
+    post<{ business: import('./types').BusinessLite }>('/api/bootstrap', body),
   overview: (businessId: string, userId: string) =>
     get<OverviewDTO>(`/api/overview?businessId=${businessId}&userId=${userId}`),
   items: (businessId: string) => get<ItemDTO[]>(`/api/items?businessId=${businessId}`),
@@ -180,7 +182,8 @@ export const api = {
   deleteProvider: (id: string) => fetch(`/api/providers/${id}`, { method: 'DELETE', headers: apiHeaders() }),
   createTask: (t: { businessId: string; userId: string; title: string; tool: string; fields?: Record<string, unknown>; whenLabel?: string; recurrence?: string }) =>
     post<{ task: ScheduledTaskDTO }>('/api/tasks', t),
-  tickTasks: () => post<{ ran: number; due: number }>('/api/tasks/tick', {}),
+  tickTasks: (opts?: { businessId?: string; force?: boolean; taskIds?: string[] }) =>
+    post<{ ran: number; due: number }>('/api/tasks/tick', opts ?? {}),
   addMemory: (m: { businessId: string; userId: string; text: string; kind?: string }) =>
     post<MemoryDTO>('/api/memories', m),
   confirmOperation: (opId: string, action: 'approve' | 'reject', userId: string, reason?: string) =>
@@ -223,6 +226,40 @@ export const api = {
   updateTool: (id: string, patchBody: { active?: boolean; name?: string; config?: Record<string, unknown> }) =>
     patch<CustomToolDTO>('/api/tools', { id, ...patchBody }),
   deleteTool: (id: string) => del(`/api/tools?id=${id}`),
+  // — معمارية البلاجنز الذكية (Dynamic AI Plugin Harness)
+  plugins: (businessId: string) =>
+    get<{ plugins: import('./types').AgentPluginDTO[] }>(`/api/plugins?businessId=${businessId}`).then((r) => r.plugins),
+  installPlugin: (body: { businessId: string; userId: string; prompt?: string; slug?: string; name?: string; runImmediately?: boolean }) =>
+    post<{
+      plugin: import('./types').AgentPluginDTO
+      cards?: ResultCardDTO[]
+      alerts?: import('./types').ProactiveAlertDTO[]
+      summaryText?: string
+    }>('/api/plugins', { ...body, action: 'install' }),
+  runPlugin: (body: { businessId: string; slug: string }) =>
+    post<{
+      plugin: import('./types').AgentPluginDTO
+      cards: ResultCardDTO[]
+      alerts: import('./types').ProactiveAlertDTO[]
+      summaryText: string
+    }>('/api/plugins', { ...body, action: 'run' }),
+  togglePlugin: (id: string, active: boolean) =>
+    patch<{ plugin: import('./types').AgentPluginDTO }>('/api/plugins', { id, active }),
+  deletePlugin: (id: string) => del(`/api/plugins?id=${id}`),
+  // — محرك المهام الخلفية المتوازية ورادار المخاطر والفرص (Concurrent Background Tasks & Proactive Alerts)
+  backgroundTasks: (businessId: string) =>
+    get<{
+      jobs: import('./types').BackgroundJobDTO[]
+      proactiveAlerts: import('./types').ProactiveAlertDTO[]
+    }>(`/api/background-tasks?businessId=${businessId}`),
+  dispatchBackgroundTasks: (body: {
+    businessId: string
+    userId: string
+    conversationId?: string | null
+    jobKinds?: import('./types').BackgroundJobKind[]
+    catalogUpdates?: { name: string; sellPriceEgp?: number; buyPriceEgp?: number; stockQty?: number; minQty?: number }[]
+    postToChat?: boolean
+  }) => post<import('./types').BackgroundBatchResultDTO>('/api/background-tasks', body),
 }
 
 // ---------------------------------------------------------------------------

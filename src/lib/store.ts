@@ -1,6 +1,7 @@
-// وكيل — client state (Zustand). Persisted prefs: business/user/model choice.
-
-'use client'
+// وكيل — global app state (Zustand) + React Query cache keys.
+// Preserves the full useWakil / VIEW_LABELS / QUERY_KEYS contract and adds
+// Superpower Command Palette (Cmd+K), Dynamic Business Builder Modal, and
+// cross-view instant agent prompts.
 
 import { create } from 'zustand'
 
@@ -12,124 +13,195 @@ export type ViewKey =
   | 'accounts'
   | 'stats'
   | 'reports'
-  | 'settings'
   | 'memory'
+  | 'settings'
 
 export const VIEW_LABELS: Record<ViewKey, string> = {
-  chat: 'المحادثة',
+  chat: 'وكيل',
   today: 'اليوم',
   inventory: 'المخزون',
   journal: 'السجل',
   accounts: 'الحسابات',
   stats: 'الإحصائيات',
   reports: 'التقارير',
-  settings: 'الإعدادات',
   memory: 'ذاكرة وكيل',
+  settings: 'الإعدادات',
 }
+
+export const QUERY_KEYS = {
+  bootstrap: ['bootstrap'] as const,
+  overview: (businessId: string, userId: string) => ['overview', businessId, userId] as const,
+  items: (businessId: string) => ['items', businessId] as const,
+  operations: (businessId: string) => ['operations', businessId] as const,
+  members: (businessId: string) => ['members', businessId] as const,
+  tasks: (businessId: string) => ['tasks', businessId] as const,
+  memories: (businessId: string) => ['memories', businessId] as const,
+  reports: (businessId: string, range: string) => ['reports', businessId, range] as const,
+  providers: ['providers'] as const,
+  chat: (businessId: string, userId: string) => ['chat', businessId, userId] as const,
+  chatConversation: (businessId: string, userId: string, conversationId?: string | null) =>
+    ['chat', businessId, userId, conversationId ?? 'latest'] as const,
+  conversations: (businessId: string, userId: string) => ['conversations', businessId, userId] as const,
+  suggestions: (businessId: string, userId: string) => ['suggestions', businessId, userId] as const,
+  quickCommands: (businessId: string) => ['quickCommands', businessId] as const,
+  radar: (businessId: string) => ['radar', businessId] as const,
+  notes: (businessId: string, conversationId: string) => ['notes', businessId, conversationId] as const,
+  tools: (businessId: string, userId?: string) => ['tools', businessId, userId ?? 'all'] as const,
+  plugins: (businessId: string) => ['plugins', businessId] as const,
+  backgroundTasks: (businessId: string) => ['backgroundTasks', businessId] as const,
+}
+
+const STORAGE_KEY = 'wakil.session.v2'
+const ONBOARDING_KEY = 'wakil.onboarded.v1'
+
+export type PluginStudioTab = 'plugins' | 'background' | 'alerts'
 
 interface WakilState {
-  // session
   businessId: string | null
   userId: string | null
-  modelKey: string | null
   view: ViewKey
-  dark: boolean
-  onboardingDone: boolean
-  // conversation (last-used per business — so switching businesses keeps context)
+  modelKey: string
   activeConversationId: string | null
-  /** a prompt handed from «ابدأ يومك» to the composer — sent once, then cleared */
-  pendingPrompt: string | null
-  // setters
-  setSession: (businessId: string, userId: string) => void
-  setActiveConversation: (id: string | null) => void
-  queuePrompt: (text: string) => void
-  clearPrompt: () => void
-  setModel: (modelKey: string | null) => void
-  setView: (view: ViewKey) => void
-  toggleDark: () => void
-  finishOnboarding: () => void
-  hydrate: () => void
-}
+  onboardingDone: boolean
+  /** Superpower Command Palette (Cmd+K / Ctrl+K) */
+  commandPaletteOpen: boolean
+  /** Dynamic Business & Vertical Builder Modal */
+  businessBuilderOpen: boolean
+  /** Dynamic Plugin Harness & Concurrent Background Task Studio Modal */
+  pluginStudioOpen: boolean
+  pluginStudioTab: PluginStudioTab
+  /** Cross-view prompt queued for immediate execution in ChatView */
+  pendingPrompt: { text: string; deepResearch?: boolean } | null
+  /** Interactive Sound Effects toggle (Web Audio API) */
+  soundEnabled: boolean
 
-const LS = {
-  business: 'wakil.businessId',
-  user: 'wakil.userId',
-  model: 'wakil.modelKey',
-  onboarding: 'wakil.onboarding',
-  /** per-business last-used conversation key (wakil.conversation.{businessId}) */
-  conversation: (businessId: string) => `wakil.conversation.${businessId}`,
+  setSession: (businessId: string, userId: string) => void
+  setView: (view: ViewKey) => void
+  setModel: (modelKey: string) => void
+  setActiveConversation: (conversationId: string | null) => void
+  hydrate: () => void
+  finishOnboarding: () => void
+  reopenOnboarding: () => void
+  toggleSound: () => void
+  setCommandPaletteOpen: (open: boolean) => void
+  setBusinessBuilderOpen: (open: boolean) => void
+  setPluginStudioOpen: (open: boolean, tab?: PluginStudioTab) => void
+  askAgent: (text: string, opts?: { deepResearch?: boolean }) => void
+  consumePendingPrompt: () => { text: string; deepResearch?: boolean } | null
 }
 
 export const useWakil = create<WakilState>((set, get) => ({
   businessId: null,
   userId: null,
-  modelKey: 'builtin-deep',
   view: 'chat',
-  dark: false,
-  onboardingDone: false,
+  modelKey: 'auto',
   activeConversationId: null,
+  onboardingDone: true,
+  commandPaletteOpen: false,
+  businessBuilderOpen: false,
+  pluginStudioOpen: false,
+  pluginStudioTab: 'plugins',
   pendingPrompt: null,
+  soundEnabled: true,
+
   setSession: (businessId, userId) => {
-    localStorage.setItem(LS.business, businessId)
-    localStorage.setItem(LS.user, userId)
-    // restore the last-used conversation for THIS business (kept in its own key)
-    const storedConversation =
-      typeof window !== 'undefined' ? localStorage.getItem(LS.conversation(businessId)) : null
-    set({ businessId, userId, view: 'chat', activeConversationId: storedConversation })
-  },
-  queuePrompt: (text) => set({ pendingPrompt: text, view: 'chat' }),
-  clearPrompt: () => set({ pendingPrompt: null }),
-  setActiveConversation: (id) => {
-    const businessId = get().businessId
-    if (businessId) {
-      if (id) localStorage.setItem(LS.conversation(businessId), id)
-      else localStorage.removeItem(LS.conversation(businessId))
+    set({ businessId, userId, activeConversationId: null })
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ businessId, userId, modelKey: get().modelKey }))
+      } catch {
+        /* ignore */
+      }
     }
-    set({ activeConversationId: id })
   },
-  setModel: (modelKey) => {
-    localStorage.setItem(LS.model, modelKey ?? 'builtin-deep')
-    set({ modelKey })
-  },
+
   setView: (view) => set({ view }),
-  toggleDark: () => set({ dark: !get().dark }),
-  finishOnboarding: () => {
-    localStorage.setItem(LS.onboarding, '1')
-    set({ onboardingDone: true })
+
+  setModel: (modelKey) => {
+    set({ modelKey })
+    if (typeof window !== 'undefined') {
+      try {
+        const cur = get()
+        localStorage.setItem(
+          STORAGE_KEY,
+          JSON.stringify({ businessId: cur.businessId, userId: cur.userId, modelKey }),
+        )
+      } catch {
+        /* ignore */
+      }
+    }
   },
+
+  setActiveConversation: (activeConversationId) => set({ activeConversationId }),
+
   hydrate: () => {
     if (typeof window === 'undefined') return
-    const businessId = localStorage.getItem(LS.business)
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY)
+      const onboarded = localStorage.getItem(ONBOARDING_KEY) === '1'
+      const soundRaw = localStorage.getItem('wakil.sound.v1')
+      const soundEnabled = soundRaw === null ? true : soundRaw !== '0'
+      if (raw) {
+        const parsed = JSON.parse(raw) as { businessId?: string; userId?: string; modelKey?: string }
+        set({
+          businessId: parsed.businessId ?? null,
+          userId: parsed.userId ?? null,
+          modelKey: parsed.modelKey ?? 'auto',
+          onboardingDone: onboarded,
+          soundEnabled,
+        })
+      } else {
+        set({ onboardingDone: onboarded, soundEnabled })
+      }
+    } catch {
+      /* ignore */
+    }
+  },
+
+  finishOnboarding: () => {
+    set({ onboardingDone: true })
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(ONBOARDING_KEY, '1')
+      } catch {
+        /* ignore */
+      }
+    }
+  },
+
+  reopenOnboarding: () => {
+    set({ onboardingDone: false })
+  },
+
+  toggleSound: () => {
+    const next = !get().soundEnabled
+    set({ soundEnabled: next })
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('wakil.sound.v1', next ? '1' : '0')
+      } catch {
+        /* ignore */
+      }
+    }
+  },
+
+  setCommandPaletteOpen: (commandPaletteOpen) => set({ commandPaletteOpen }),
+  setBusinessBuilderOpen: (businessBuilderOpen) => set({ businessBuilderOpen }),
+  setPluginStudioOpen: (pluginStudioOpen, tab) =>
+    set((state) => ({
+      pluginStudioOpen,
+      pluginStudioTab: tab ?? state.pluginStudioTab,
+    })),
+  askAgent: (text, opts) =>
     set({
-      businessId,
-      userId: localStorage.getItem(LS.user),
-      modelKey: localStorage.getItem(LS.model) ?? 'builtin-deep',
-      onboardingDone: localStorage.getItem(LS.onboarding) === '1',
-      // page reload → return to the last-used conversation of the hydrated business
-      activeConversationId: businessId ? localStorage.getItem(LS.conversation(businessId)) : null,
-    })
+      view: 'chat',
+      pendingPrompt: { text, deepResearch: opts?.deepResearch },
+    }),
+  consumePendingPrompt: () => {
+    const p = get().pendingPrompt
+    if (p) set({ pendingPrompt: null })
+    return p
   },
 }))
 
-/** Invalidate all TanStack Query caches for lists after a mutation. */
-export const QUERY_KEYS = {
-  overview: (b: string, u: string) => ['overview', b, u] as const,
-  items: (b: string) => ['items', b] as const,
-  operations: (b: string) => ['operations', b] as const,
-  chat: (b: string, u: string) => ['chat', b, u] as const,
-  /** chat history scoped to ONE conversation (null → follow the latest) */
-  chatConversation: (b: string, u: string, c: string | null) => ['chat', b, u, c ?? 'latest'] as const,
-  members: (b: string) => ['members', b] as const,
-  tasks: (b: string) => ['tasks', b] as const,
-  memories: (b: string) => ['memories', b] as const,
-  reports: (b: string, r: string) => ['reports', b, r] as const,
-  providers: ['providers'] as const,
-  conversations: (b: string, u: string) => ['conversations', b, u] as const,
-  suggestions: (b: string, u: string) => ['suggestions', b, u] as const,
-  morningBrief: (b: string, u: string) => ['morning-brief', b, u] as const,
-  quickCommands: (b: string) => ['quickCommands', b] as const,
-  notes: (b: string, c: string) => ['notes', b, c] as const,
-  radar: (b: string) => ['radar', b] as const,
-  /** R16 «أدوات بتاعتك» — the owner's own tools (web sources + webhooks) */
-  tools: (b: string, u: string) => ['tools', b, u] as const,
-}
+export const useWakeel = useWakil

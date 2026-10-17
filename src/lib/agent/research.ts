@@ -10,9 +10,10 @@
 // Every LLM step has a deterministic fallback — 429s happen.
 
 import type { Business, User } from '@prisma/client'
+import ZAI from 'z-ai-web-dev-sdk'
 import { db } from '@/lib/db'
 import type { ResearchDTO, ResultCardDTO, SourceDTO, ThinkingStep, VerifyDTO } from '@/lib/types'
-import { completeChat, type LLMMessage, type ModelInfo } from './llm'
+import { completeChat, getGeminiClient, type LLMMessage, type ModelInfo } from './llm'
 import { runReadTool, type ReadTool } from './tools'
 import { jotNote } from './scratchpad'
 import { activeTools, runUserTool, userToolsPromptLine } from './userTools'
@@ -22,29 +23,8 @@ import { normalizeAr } from './arabic'
 import type { TurnEmit } from './harness'
 
 /** Auto-detect trigger (explicit deepResearch flag OR these words). */
-/**
- * Auto-research triggers — EGYPTIAN dialect aware, and deliberately
- * WORD-BOUNDED.
- *
- * Why the boundaries matter: «ليه» (why) is a substring of «عليه» / «إليه» /
- * «اللي عليه», which appear in the most ordinary shop sentences — «حسن دفع
- * ٥٠ من اللي عليه» used to be hijacked into a full deep-research report
- * (2.6 s, web queries, a sources card) instead of booking a collection.
- * Same for «سوق» inside «بيسوق» and «بحث» inside «مباحث». Only a standalone
- * word may trigger the expensive pipeline.
- */
 export const RESEARCH_TRIGGER_RE =
-  /(?:^| )(?:ابحث|بحث|حلّل|حلل|قارن|مقارنة|دراسة|ادرس|ليه|استراتيجية|إزاي أحسن|سوق|الأسواق)(?: |$|؟|\?)|بكام في السوق|أسعار المنافسين/i
-
-/**
- * True when the message is a concrete business COMMAND (a write, or a read of
- * a named tool). Such messages must never be auto-hijacked by the research
- * pipeline: «بعت ٢ علبة لبن» is an instruction, not a research question.
- * Explicit toggles and genuine analysis questions still research.
- */
-export function isActionableIntent(intent: { intent: string; tool?: string }): boolean {
-  return intent.intent === 'write' || (intent.intent === 'read' && Boolean(intent.tool))
-}
+  /ابحث|بحث|حلّل|حلل|قارن|مقارنة|دراسة|ادرس|ليه|استراتيجية|إزاي أحسن|بكام في السوق|سوق|أسعار المنافسين/i
 
 const AR_ORDINALS = ['١', '٢', '٣', '٤', '٥', '٦']
 
@@ -132,32 +112,104 @@ function craftWebQueries(text: string, mentionedItem: MentionedItem | null, vert
 }
 
 // ---------------------------------------------------------------------------
-// Web search — PLUGGABLE (see ./websearch). «ابحث في الويب» used to work only
-// on a machine with `.z-ai-config`; on every other install the research report
-// silently leaned on the ledger alone while the owner was asking for market
-// prices. The backends now are: z-ai gateway → WAKIL_SEARCH_URL → the local dev
-// fixture, and a total failure is REPORTED instead of faked.
+// Web search — Gemini Google Search Grounding first + z-ai fallback
 // ---------------------------------------------------------------------------
 
-interface WebHit {
+export interface WebHit {
   url: string
   name: string
   snippet: string
   host: string
 }
 
-async function webSearch(query: string, num: number): Promise<WebHit[]> {
-  const { searchWeb: run } = await import('./websearch')
-  const outcome = await run(query, num)
-  if (outcome.results.length === 0 && outcome.error) {
-    console.warn(`[research] بحث الويب فشل (${outcome.backend}): ${outcome.error}`)
+export async function searchWebWithGemini(query: string, num = 5): Promise<{
+  summaryText: string
+  hits: WebHit[]
+}> {
+  const ai = getGeminiClient()
+  if (ai) {
+    for (const modelName of ['gemini-3-flash-preview', 'gemini-2.5-flash']) {
+      try {
+        const response = await ai.models.generateContent({
+          model: modelName,
+          contents: `ابحث في الإنترنت عن: "${query}" وقدم ملخصاً دقيقاً ومباشراً باللغة العربية مع ذكر الأسعار أو الحقائق الحديثة إن وجدت.`,
+          config: {
+            tools: [{ googleSearch: {} }],
+          },
+        })
+
+        const summaryText = (response.text ?? '').trim()
+        const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks ?? []
+        const hits: WebHit[] = []
+        const seen = new Set<string>()
+
+        for (const chunk of chunks) {
+          const uri = chunk?.web?.uri
+          const title = chunk?.web?.title
+          if (uri && typeof uri === 'string' && !seen.has(uri)) {
+            seen.add(uri)
+            let host = 'google.com'
+            try {
+              host = new URL(uri).hostname.replace(/^www\./, '')
+            } catch {
+              /* ignore */
+            }
+            hits.push({
+              url: uri,
+              name: (title && String(title).trim()) || host,
+              snippet: summaryText.slice(0, 220),
+              host,
+            })
+          }
+        }
+
+        if (summaryText || hits.length > 0) {
+          if (hits.length === 0 && summaryText) {
+            hits.push({
+              url: `https://www.google.com/search?q=${encodeURIComponent(query)}`,
+              name: `بحث Google الحي — ${query.slice(0, 48)}`,
+              snippet: summaryText.slice(0, 240),
+              host: 'google.com',
+            })
+          }
+          return { summaryText, hits: hits.slice(0, num) }
+        }
+      } catch (err) {
+        console.warn(`[research] Gemini Google Search (${modelName}) fell back:`, err instanceof Error ? err.message : err)
+      }
+    }
   }
-  return outcome.results.map((r) => ({
-    url: r.url,
-    name: r.title || r.url,
-    snippet: r.snippet,
-    host: r.host,
-  }))
+
+  // Fallback to ZAI web_search if Gemini search is unavailable
+  try {
+    const zai = await ZAI.create()
+    const results = await zai.functions.invoke('web_search', { query, num })
+    if (Array.isArray(results)) {
+      const hits: WebHit[] = []
+      for (const r of results) {
+        if (!r || typeof r.url !== 'string' || !/^https?:\/\//.test(r.url)) continue
+        hits.push({
+          url: r.url,
+          name: String(r.name ?? r.url).trim() || r.url,
+          snippet: String(r.snippet ?? '').trim(),
+          host: String(r.host_name ?? '').trim(),
+        })
+      }
+      return {
+        summaryText: hits.map((h) => `• ${h.name}: ${h.snippet}`).join('\n'),
+        hits,
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+
+  return { summaryText: '', hits: [] }
+}
+
+async function webSearch(query: string, num: number): Promise<WebHit[]> {
+  const res = await searchWebWithGemini(query, num)
+  return res.hits
 }
 
 // ---------------------------------------------------------------------------

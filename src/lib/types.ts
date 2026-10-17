@@ -1,6 +1,17 @@
 // وكيل — shared type contracts
 
-export type Vertical = 'supermarket' | 'gym' | 'pharmacy' | 'attar'
+export type PresetVertical =
+  | 'supermarket'
+  | 'gym'
+  | 'pharmacy'
+  | 'attar'
+  | 'restaurant'
+  | 'clinic'
+  | 'electronics'
+  | 'wholesale'
+  | 'clothing'
+
+export type Vertical = PresetVertical | (string & {})
 export type Role = 'owner' | 'cashier' | 'reception' | 'supervisor'
 export type Risk = 'R0' | 'R1' | 'R2' | 'R3' | 'R4'
 export type OpStatus =
@@ -186,7 +197,7 @@ export type ResultCardDTO =
       rows: Record<string, string>[]
       footer?: { label: string; value: string }[]
     }
-  | { kind: 'kv'; title: string; rows: { label: string; value: string }[] }
+  | { kind: 'kv'; title: string; rows: { label: string; value: string; tone?: 'good' | 'bad' | 'neutral' }[] }
   | { kind: 'text'; title: string; body: string }
   | { kind: 'sources'; title: string; sources: SourceDTO[] }
 
@@ -406,6 +417,103 @@ export interface ReportsDTO {
   byType: { type: string; count: number; amount: number }[]
 }
 
+export type PluginCategory = 'inventory' | 'sales' | 'finance' | 'customers' | 'operations'
+
+export type PluginPipelineModule =
+  | 'inventory_audit'
+  | 'sales_analytics'
+  | 'margin_audit'
+  | 'receivables_aging'
+  | 'supplier_payables'
+  | 'expiry_shield'
+  | 'custom_query'
+
+export interface PluginStepSpec {
+  module: PluginPipelineModule
+  label: string
+  params?: {
+    targetEntity?: 'items' | 'operations' | 'customers' | 'suppliers'
+    filterCategory?: string
+    minMarginPct?: number
+    daysWindow?: number
+    sortBy?: 'margin' | 'stock' | 'velocity' | 'balance' | 'revenue'
+    limit?: number
+  }
+}
+
+export interface PluginProactiveRule {
+  kind: 'risk' | 'opportunity'
+  metric: 'low_stock_ratio' | 'low_margin_items' | 'overdue_receivables' | 'high_velocity_star' | 'dead_stock_value'
+  threshold: number
+  title: string
+  recommendation: string
+}
+
+export interface AgentPluginDTO {
+  id: string
+  slug: string
+  name: string
+  description: string
+  category: PluginCategory
+  icon: 'spark' | 'boxes' | 'users' | 'wallet' | 'chart' | 'book' | 'today' | 'alert'
+  version: string
+  author: 'ai-synthesized' | 'wakil-core'
+  active: boolean
+  installed: boolean
+  usageCount: number
+  lastUsedAt?: string | null
+  triggers: string[]
+  capabilities: string[]
+  pipeline: PluginStepSpec[]
+  proactiveRules: PluginProactiveRule[]
+  quickPrompt: string
+}
+
+export interface ProactiveAlertDTO {
+  id: string
+  category: 'risk' | 'opportunity'
+  level: 'danger' | 'warning' | 'info'
+  title: string
+  detail: string
+  metricValue?: string
+  sourcePlugin?: string
+  actionLabel: string
+  actionPrompt: string
+  view?: 'journal' | 'accounts' | 'inventory' | 'stats' | 'today'
+}
+
+export type BackgroundJobKind =
+  | 'sync_and_audit_records'
+  | 'analyze_financial_report'
+  | 'forecast_inventory_velocity'
+  | 'scan_risks_and_opportunities'
+  | 'run_active_plugins'
+  | 'upsert_catalog_batch'
+
+export interface BackgroundJobDTO {
+  id: string
+  kind: BackgroundJobKind
+  title: string
+  status: 'pending' | 'running' | 'done' | 'failed'
+  progress: number
+  stepLabel: string
+  summary?: string | null
+  durationMs?: number | null
+  cards?: ResultCardDTO[]
+  alertsFound?: number
+  startedAt: string
+  completedAt?: string | null
+}
+
+export interface BackgroundBatchResultDTO {
+  batchId: string
+  jobs: BackgroundJobDTO[]
+  cards: ResultCardDTO[]
+  proactiveAlerts: ProactiveAlertDTO[]
+  totalDurationMs: number
+  summaryText: string
+}
+
 // SSE chat stream events (POST /api/chat)
 export type ChatStreamEvent =
   | { event: 'start'; conversationId: string; messageId: string }
@@ -440,3 +548,4 @@ export interface ChatTurn {
     failReason?: string
   }
 }
+

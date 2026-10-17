@@ -76,7 +76,7 @@ export function parseToolConfig(raw: string | null | undefined): Partial<Record<
 export async function activeTools(businessId: string): Promise<CustomToolRow[]> {
   try {
     return await db.customTool.findMany({
-      where: { businessId, active: true },
+      where: { businessId, active: true, kind: { in: ['web_source', 'webhook'] } },
       orderBy: { name: 'asc' },
     })
   } catch (e) {

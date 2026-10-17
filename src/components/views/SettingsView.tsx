@@ -77,16 +77,34 @@ import {
 // الموديلات الجاهزة (built-in عبر z-ai-web-dev-sdk على السيرفر)
 // ---------------------------------------------------------------------------
 
-const BUILTIN_MODELS: { key: string; label: string; tier: 'air' | 'deep'; note: string }[] = [
+const BUILTIN_MODELS: { key: string; label: string; tier: 'air' | 'balanced' | 'deep'; note: string }[] = [
+  {
+    key: 'auto',
+    label: 'تلقائي ذكي · Gemini + المحرك الحتمي',
+    tier: 'balanced',
+    note: 'أفضل سرعة ودقة تلقائيًا',
+  },
+  {
+    key: 'gemini-flash',
+    label: 'سريع ذكي · Gemini 2.5 Flash',
+    tier: 'air',
+    note: 'ردود فائقة السرعة ومباشرة للشغل اليومي',
+  },
+  {
+    key: 'gemini-pro',
+    label: 'عميق مفكّر · Gemini 2.5 Pro',
+    tier: 'deep',
+    note: 'تحليل مالي عميق وتخطيط للمنشأة',
+  },
   {
     key: 'builtin-deep',
-    label: 'عميق مفكّر · glm-4.6',
+    label: 'عميق احتياطي · glm-4.6',
     tier: 'deep',
     note: 'تفكير أعمق للعمليات المعقدة',
   },
   {
     key: 'builtin-air',
-    label: 'خفيف سريع · glm-4.5-air',
+    label: 'خفيف احتياطي · glm-4.5-air',
     tier: 'air',
     note: 'ردود أسرع للشغل اليومي',
   },
@@ -347,11 +365,12 @@ export default function SettingsView({ businessId, userId }: ViewProps) {
   async function handleTickTasks() {
     setTickBusy(true)
     try {
-      const r = await api.tickTasks()
+      const r = await api.tickTasks({ businessId, force: true })
       await qc.invalidateQueries({ queryKey: QUERY_KEYS.tasks(businessId) })
+      await qc.invalidateQueries({ queryKey: QUERY_KEYS.overview(businessId, userId) })
       toast({
-        title: r.due === 0 ? 'مفيش مهام مستحقة دلوقتي' : `شغّلنا ${arNum(r.ran)} مهمة`,
-        description: r.due > 0 ? `كان فيه ${arNum(r.due)} مهمة مستحقة` : undefined,
+        title: r.due === 0 ? 'مفيش مهام مستحقة دلوقتي' : `شغّلنا ${arNum(r.ran)} مهمة على التوازي`,
+        description: r.due > 0 ? `تم تنفيذ ${arNum(r.due)} مهمة وإرسال النتايج للمحادثة` : undefined,
       })
     } catch (e) {
       toast({

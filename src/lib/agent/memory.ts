@@ -600,7 +600,7 @@ export async function getActiveMemories(businessId: string, userId: string): Pro
   return db.agentMemory.findMany({
     where: { businessId, userId, active: true },
     orderBy: { createdAt: 'desc' },
-    take: 12,
+    take: 24,
   })
 }
 
@@ -615,5 +615,485 @@ export function memoryQuotesForAdvisory(memories: AgentMemory[]): { rules: strin
     else if (m.kind === 'fact') preferences.push(m.text)
     else if (m.kind === 'lexicon') lexicon.push(m.text)
   }
-  return { rules: rules.slice(0, 5), preferences: preferences.slice(0, 6), lexicon: lexicon.slice(0, 6) }
+  return { rules: rules.slice(0, 6), preferences: preferences.slice(0, 8), lexicon: lexicon.slice(0, 8) }
 }
+
+// ---------------------------------------------------------------------------
+// NEXT-GEN 5-LAYER CONTEXTUAL MEMORY ENGINE (منظومة الذاكرة السياقية خماسية الطبقات)
+// ---------------------------------------------------------------------------
+// Layer 1: BUSINESS_DNA (دستور المنشأة وقواعد العمل — kind='rule') with Patch/Override
+// Layer 2: LEXICON_GRAPH (القاموس الدلالي والأسماء الدارجة — kind='lexicon')
+// Layer 3: SKILLS_PLAYBOOKS (المهارات وطرق العمل والقدرات المفعّلة — kind='insight' | 'fact')
+// Layer 4: EPISODIC_LOG & Task Evolution (سجل تطور المهام السابقة والذاكرة الحادثية)
+// Layer 5: SESSION_COMPACTOR (ضاغط الجلسة النشطة مع حماية المعرفات والأرقام)
+// ---------------------------------------------------------------------------
+
+export interface UpsertRuleResult {
+  memory: AgentMemory
+  patched: boolean
+  previousText?: string | null
+  category: string
+}
+
+/**
+ * Layer 1 (`BUSINESS_DNA`): Upsert or patch a permanent business rule.
+ * When the owner updates an existing policy (e.g. changing a credit limit for the same
+ * customer or modifying freeze days in `membership_policies`), this patches the existing
+ * rule instead of leaving contradictory rules active, and writes an immutable AuditEvent.
+ */
+export async function upsertBusinessRule(params: {
+  businessId: string
+  userId: string
+  text: string
+  category?: string
+  ruleKey?: string
+}): Promise<UpsertRuleResult> {
+  const cleanText = params.text.trim().slice(0, 350)
+  const normNew = normalizeAr(cleanText)
+  const resolvedCategory = params.category?.trim() || ruleCategory(normNew)
+
+  const existingRules = await db.agentMemory.findMany({
+    where: { businessId: params.businessId, kind: 'rule', active: true },
+    orderBy: { updatedAt: 'desc' },
+  })
+
+  // Exact duplicate check
+  const exactDup = existingRules.find((r) => normalizeAr(r.text) === normNew)
+  if (exactDup) {
+    return { memory: exactDup, patched: false, category: exactDup.category }
+  }
+
+  // Smart conflict / patch detection: same category + overlapping subject tokens
+  const newTokens = normNew
+    .split(/\s+/)
+    .filter((w) => w.length >= 3 && !NAME_STOPWORDS.has(w) && !/^\d+$/.test(w))
+
+  let candidateToPatch: AgentMemory | null = null
+  if (params.ruleKey) {
+    candidateToPatch =
+      existingRules.find((r) => r.entityRef === `rule:${params.ruleKey}`) ?? null
+  }
+  if (!candidateToPatch && newTokens.length >= 2) {
+    for (const r of existingRules) {
+      if (r.category !== resolvedCategory) continue
+      const rNorm = normalizeAr(r.text)
+      const shared = newTokens.filter((t) => rNorm.includes(t))
+      if (shared.length >= Math.min(3, newTokens.length)) {
+        candidateToPatch = r
+        break
+      }
+    }
+  }
+
+  if (candidateToPatch) {
+    const previousText = candidateToPatch.text
+    const updated = await db.agentMemory.update({
+      where: { id: candidateToPatch.id },
+      data: {
+        text: cleanText,
+        category: resolvedCategory,
+        ...(params.ruleKey ? { entityRef: `rule:${params.ruleKey}` } : {}),
+        confidence: 95,
+        usageCount: { increment: 1 },
+        updatedAt: new Date(),
+      },
+    })
+    await db.auditEvent.create({
+      data: {
+        businessId: params.businessId,
+        actor: params.userId,
+        action: 'memory.rule_patched',
+        detail: JSON.stringify({
+          memoryId: updated.id,
+          category: resolvedCategory,
+          previousText,
+          newText: cleanText,
+        }),
+      },
+    })
+    return { memory: updated, patched: true, previousText, category: resolvedCategory }
+  }
+
+  const created = await db.agentMemory.create({
+    data: {
+      businessId: params.businessId,
+      userId: params.userId,
+      kind: 'rule',
+      category: resolvedCategory,
+      text: cleanText,
+      entityRef: params.ruleKey ? `rule:${params.ruleKey}` : null,
+      confidence: 90,
+      active: true,
+    },
+  })
+  await db.auditEvent.create({
+    data: {
+      businessId: params.businessId,
+      actor: params.userId,
+      action: 'memory.rule_created',
+      detail: JSON.stringify({
+        memoryId: created.id,
+        category: resolvedCategory,
+        text: cleanText,
+      }),
+    },
+  })
+  return { memory: created, patched: false, category: resolvedCategory }
+}
+
+/**
+ * Layer 3 (`SKILLS_PLAYBOOKS`): Save or update a recurring operational playbook / skill
+ * and optionally pin a 1-click QuickCommand shortcut in the UI.
+ */
+export async function upsertSkillPlaybook(params: {
+  businessId: string
+  userId: string
+  slug?: string
+  title: string
+  stepsText: string
+  shortcutPrompt?: string
+  icon?: string
+}): Promise<{ memory: AgentMemory; quickCommandCreated: boolean }> {
+  const cleanTitle = params.title.trim().slice(0, 80)
+  const cleanSteps = params.stepsText.trim().slice(0, 350)
+  const entityRef = `skill:${(params.slug || cleanTitle).toLowerCase().replace(/\s+/g, '_').slice(0, 40)}`
+  const fullText = `مهارة تشغيلية «${cleanTitle}»: ${cleanSteps}`
+
+  const existing = await db.agentMemory.findFirst({
+    where: { businessId: params.businessId, entityRef },
+  })
+
+  const memory = existing
+    ? await db.agentMemory.update({
+        where: { id: existing.id },
+        data: { text: fullText, category: 'playbooks', active: true, updatedAt: new Date() },
+      })
+    : await db.agentMemory.create({
+        data: {
+          businessId: params.businessId,
+          userId: params.userId,
+          kind: 'insight',
+          category: 'playbooks',
+          text: fullText,
+          entityRef,
+          confidence: 90,
+          active: true,
+        },
+      })
+
+  let quickCommandCreated = false
+  if (params.shortcutPrompt && params.shortcutPrompt.trim()) {
+    const existingCmd = await db.quickCommand.findFirst({
+      where: { businessId: params.businessId, label: cleanTitle.slice(0, 40) },
+    })
+    if (!existingCmd) {
+      await db.quickCommand.create({
+        data: {
+          businessId: params.businessId,
+          userId: params.userId,
+          label: cleanTitle.slice(0, 40),
+          prompt: params.shortcutPrompt.trim().slice(0, 220),
+          icon: params.icon || 'spark',
+        },
+      })
+      quickCommandCreated = true
+    }
+  }
+
+  return { memory, quickCommandCreated }
+}
+
+/**
+ * Layer 4 (`EPISODIC_LOG` & Task Evolution): Tracks how the user's tasks, operations,
+ * scheduled routines, and active capabilities evolved so the assistant has continuous
+ * temporal awareness across sessions.
+ */
+export interface TaskEvolutionSnapshot {
+  recentSucceededOps: { ref: string; type: string; summary: string; executedAt: string }[]
+  pendingApprovalOps: { ref: string; type: string; summary: string; risk: string }[]
+  scheduledTasks: { title: string; whenLabel: string; status: string; recurrence?: string | null; result?: string | null }[]
+  recentBackgroundBatches: { title: string; status: string; result?: string | null }[]
+  promptSummary: string
+}
+
+export async function getTaskEvolutionContext(businessId: string): Promise<TaskEvolutionSnapshot> {
+  const [succeededOps, pendingOps, allTasks] = await Promise.all([
+    db.operation.findMany({
+      where: { businessId, status: 'SUCCEEDED' },
+      orderBy: { executedAt: 'desc' },
+      take: 6,
+      select: { ref: true, type: true, summary: true, executedAt: true, createdAt: true },
+    }),
+    db.operation.findMany({
+      where: { businessId, status: 'AWAITING_APPROVAL' },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+      select: { ref: true, type: true, summary: true, risk: true },
+    }),
+    db.scheduledTask.findMany({
+      where: { businessId },
+      orderBy: { createdAt: 'desc' },
+      take: 10,
+      select: { title: true, tool: true, whenLabel: true, status: true, recurrence: true, result: true },
+    }),
+  ])
+
+  const regularTasks = allTasks.filter((t) => !t.tool.startsWith('bg:'))
+  const bgTasks = allTasks.filter((t) => t.tool.startsWith('bg:'))
+
+  const lines: string[] = []
+  if (succeededOps.length > 0) {
+    lines.push(
+      `- آخر عمليات مؤكدة تم تنفيذها: ${succeededOps
+        .slice(0, 4)
+        .map((o) => `${o.ref} (${o.summary})`)
+        .join(' · ')}`,
+    )
+  }
+  if (pendingOps.length > 0) {
+    lines.push(
+      `- مسودات حالية تنتظر اعتماد المستخدم: ${pendingOps
+        .map((o) => `${o.ref} [${o.risk}]: ${o.summary}`)
+        .join(' · ')}`,
+    )
+  }
+  if (regularTasks.length > 0) {
+    const pendingT = regularTasks.filter((t) => t.status === 'pending')
+    const doneT = regularTasks.filter((t) => t.status === 'done')
+    if (pendingT.length > 0) {
+      lines.push(
+        `- مهام وتذكيرات مجدولة قادمة: ${pendingT
+          .slice(0, 4)
+          .map((t) => `«${t.title}» (${t.whenLabel}${t.recurrence ? ` - ${t.recurrence}` : ''})`)
+          .join('، ')}`,
+      )
+    }
+    if (doneT.length > 0) {
+      lines.push(
+        `- مهام دورية تم إنجازها مؤخراً: ${doneT
+          .slice(0, 3)
+          .map((t) => `«${t.title}»`)
+          .join('، ')}`,
+      )
+    }
+  }
+  if (bgTasks.length > 0) {
+    lines.push(
+      `- آخر فحوصات ومهام متوازية نُفذت: ${bgTasks
+        .slice(0, 3)
+        .map((t) => `«${t.title}» (${t.status === 'done' ? 'مكتملة' : 'قيد التشغيل'})`)
+        .join('، ')}`,
+    )
+  }
+
+  return {
+    recentSucceededOps: succeededOps.map((o) => ({
+      ref: o.ref,
+      type: o.type,
+      summary: o.summary,
+      executedAt: (o.executedAt ?? o.createdAt).toISOString(),
+    })),
+    pendingApprovalOps: pendingOps,
+    scheduledTasks: regularTasks.slice(0, 5),
+    recentBackgroundBatches: bgTasks.slice(0, 4),
+    promptSummary:
+      lines.length > 0
+        ? `## تطور المهام والعمليات السابقة (ذاكرة الاستمرارية السياقية)\n${lines.join('\n')}`
+        : '',
+  }
+}
+
+/**
+ * Layer 4 (`EPISODIC_LOG`): On-demand episodic search across past conversations,
+ * operations, and agent notes (`memory_search_episodes`).
+ */
+export async function searchEpisodicMemory(params: {
+  businessId: string
+  query: string
+  limit?: number
+}): Promise<{
+  episodes: { source: 'operation' | 'conversation' | 'memory' | 'note'; refOrDate: string; text: string }[]
+}> {
+  const q = normalizeAr(params.query.trim())
+  const limit = params.limit ?? 8
+  const [ops, msgs, mems, notes] = await Promise.all([
+    db.operation.findMany({
+      where: { businessId: params.businessId },
+      orderBy: { createdAt: 'desc' },
+      take: 40,
+    }),
+    db.message.findMany({
+      where: { conversation: { businessId: params.businessId } },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    }),
+    db.agentMemory.findMany({
+      where: { businessId: params.businessId, active: true },
+      orderBy: { updatedAt: 'desc' },
+      take: 30,
+    }),
+    db.agentNote.findMany({
+      where: { businessId: params.businessId, active: true },
+      orderBy: { createdAt: 'desc' },
+      take: 25,
+    }),
+  ])
+
+  const tokens = q.split(/\s+/).filter((w) => w.length >= 2)
+  const matchesQuery = (raw: string) => {
+    if (!q) return true
+    const n = normalizeAr(raw)
+    if (n.includes(q)) return true
+    return tokens.length > 0 && tokens.some((t) => n.includes(t))
+  }
+
+  const episodes: { source: 'operation' | 'conversation' | 'memory' | 'note'; refOrDate: string; text: string }[] = []
+
+  for (const op of ops) {
+    if (matchesQuery(`${op.ref} ${op.summary} ${op.reason ?? ''}`)) {
+      episodes.push({
+        source: 'operation',
+        refOrDate: `${op.ref} (${op.status})`,
+        text: op.summary,
+      })
+    }
+    if (episodes.length >= limit) break
+  }
+
+  for (const m of mems) {
+    if (episodes.length >= limit) break
+    if (matchesQuery(m.text)) {
+      episodes.push({
+        source: 'memory',
+        refOrDate: `ذاكرة (${m.kind})`,
+        text: m.text,
+      })
+    }
+  }
+
+  for (const n of notes) {
+    if (episodes.length >= limit) break
+    if (matchesQuery(n.text)) {
+      episodes.push({
+        source: 'note',
+        refOrDate: `ملاحظة (${n.kind})`,
+        text: n.text,
+      })
+    }
+  }
+
+  for (const msg of msgs) {
+    if (episodes.length >= limit) break
+    if (matchesQuery(msg.text)) {
+      episodes.push({
+        source: 'conversation',
+        refOrDate: msg.role === 'user' ? 'رسالة سابقة من المستخدم' : 'رد سابق من وكيل',
+        text: msg.text.slice(0, 160),
+      })
+    }
+  }
+
+  return { episodes: episodes.slice(0, limit) }
+}
+
+/**
+ * Layer 5 (`SESSION_COMPACTOR`): Compacts long conversation histories (> 8 messages)
+ * while preserving all operation references (`WKL-####`), monetary amounts, and entity
+ * mentions in a protected summary block so the context window stays fast and sharp.
+ */
+export function compactSessionHistory(
+  history: { role: string; text: string }[],
+  userName: string,
+): string {
+  if (!history || history.length === 0) return ''
+  if (history.length <= 8) {
+    return `\n## آخر حوار بيننا (لسياق الكلام والضمائر — الأرقام الحقيقية من السجل فوق)\n${history
+      .map((h) => `${h.role === 'user' ? userName : 'وكيل'}: ${h.text.slice(0, 200)}`)
+      .join('\n')}`
+  }
+
+  const older = history.slice(0, -6)
+  const recent = history.slice(-6)
+
+  // Extract protected refs (WKL-####) and key topics from older messages
+  const refs = new Set<string>()
+  for (const m of older) {
+    const found = m.text.match(/WKL-\d+/g)
+    if (found) for (const r of found) refs.add(r)
+  }
+  const olderUserTopics = older
+    .filter((m) => m.role === 'user')
+    .slice(-4)
+    .map((m) => m.text.slice(0, 80))
+    .join(' ← ')
+
+  const compactedHeader = `[ملخص مضغوط لبداية الجلسة (${older.length} رسائل سابقة): ${olderUserTopics || 'نقاش تشغيلي'}${
+    refs.size > 0 ? ` | مراجع العمليات المحمية: ${[...refs].join(', ')}` : ''
+  }]`
+
+  return `\n## سجل الحوار في الجلسة الحالية (مع ضغط السياق الذكي)\n${compactedHeader}\n${recent
+    .map((h) => `${h.role === 'user' ? userName : 'وكيل'}: ${h.text.slice(0, 200)}`)
+    .join('\n')}`
+}
+
+/**
+ * Formats the complete 5-Layer Contextual Memory block (`BUSINESS_DNA`, `USER_PREFS`,
+ * `LEXICON_GRAPH`, `SKILLS_PLAYBOOKS`, and `EPISODIC_LOG` Task Evolution) for injection
+ * into the Agent System Prompt.
+ */
+export function buildContextualMemoryPromptBlock(params: {
+  userName: string
+  memories: AgentMemory[]
+  taskEvolution?: TaskEvolutionSnapshot
+  compactedSessionSummary?: string
+}): string {
+  const active = params.memories.filter((m) => m.active)
+  const rules = active.filter((m) => m.kind === 'rule')
+  const prefs = active.filter((m) => m.kind === 'preference' || m.kind === 'fact')
+  const lexicon = active.filter((m) => m.kind === 'lexicon')
+  const skills = active.filter((m) => m.kind === 'skill' || m.category === 'playbooks')
+
+  const sections: string[] = []
+  if (rules.length > 0) {
+    sections.push(
+      `## ١. دستور وقوانين المنشأة (BUSINESS_DNA — تُنفذ حرفياً وتلقائياً)\n${rules
+        .slice(0, 8)
+        .map((r) => `- [قاعدة #${r.id.slice(-5)} | ${r.category}] ${r.text}`)
+        .join('\n')}`,
+    )
+  }
+  if (prefs.length > 0) {
+    sections.push(
+      `## ٢. تفضيلات ${params.userName} وطبيعة نشاطه التجاري (USER_PREFS)\n${prefs
+        .slice(0, 8)
+        .map((m) => `- ${m.text}`)
+        .join('\n')}`,
+    )
+  }
+  if (lexicon.length > 0) {
+    sections.push(
+      `## ٣. قاموس اللهجة والأسماء الدارجة بالمحل (LEXICON_GRAPH)\n${lexicon
+        .slice(0, 10)
+        .map((m) => `- ${m.text}`)
+        .join('\n')}`,
+    )
+  }
+  if (skills.length > 0) {
+    sections.push(
+      `## ٤. خطط العمل والإجراءات التشغيلية المتعلمة (SKILLS_PLAYBOOKS)\n${skills
+        .slice(0, 6)
+        .map((s) => `- ${s.text}`)
+        .join('\n')}`,
+    )
+  }
+  if (params.taskEvolution?.promptSummary) {
+    sections.push(params.taskEvolution.promptSummary)
+  }
+  if (params.compactedSessionSummary) {
+    sections.push(`## ٥. ملخص الجلسات والرسائل السابقة المضغوط (SESSION_COMPACTOR)\n${params.compactedSessionSummary}`)
+  }
+
+  return sections.join('\n\n')
+}
+
+

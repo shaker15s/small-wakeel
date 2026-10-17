@@ -4,6 +4,7 @@
 // (tables / key-value / plain text). All digit-runs are wrapped in .num spans
 // so money & quantities stay LTR inside the RTL layout.
 
+import { useEffect } from 'react'
 import { motion } from 'framer-motion'
 import { BookOpen, ExternalLink, FileText, Info, Table as TableIcon } from 'lucide-react'
 
@@ -17,6 +18,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+import { sfx } from '@/lib/sound-effects'
 import { cn } from '@/lib/utils'
 import type { ResultCardDTO, SourceDTO } from '@/lib/types'
 
@@ -33,6 +35,12 @@ function withNums(text: string): React.ReactNode {
 }
 
 export function ResultCards({ cards }: { cards: ResultCardDTO[] }) {
+  useEffect(() => {
+    if (cards.length > 0) {
+      sfx.playCardReveal(0)
+    }
+  }, [cards.length])
+
   if (!cards.length) return null
 
   return (
@@ -40,9 +48,15 @@ export function ResultCards({ cards }: { cards: ResultCardDTO[] }) {
       {cards.map((card, i) => (
         <motion.div
           key={i}
-          initial={{ opacity: 0, y: 6 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.18, ease: 'easeOut' }}
+          initial={{ opacity: 0, y: 18, scale: 0.96 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          whileHover={{ y: -2 }}
+          transition={{
+            type: 'spring',
+            stiffness: 380,
+            damping: 26,
+            delay: i * 0.065,
+          }}
           className="w-full"
         >
           {card.kind === 'table' ? (

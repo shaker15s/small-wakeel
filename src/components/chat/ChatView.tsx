@@ -21,12 +21,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AnimatePresence, motion, MotionConfig } from 'framer-motion'
-import { ChevronDown, ChevronLeft, History, LayoutGrid, Loader2, Moon, NotebookPen, Search, SquarePen, Sun } from 'lucide-react'
+import {
+  Camera,
+  ChevronDown,
+  History,
+  LayoutGrid,
+  Loader2,
+  Moon,
+  NotebookPen,
+  SquarePen,
+  Sun,
+  Volume2,
+  VolumeX,
+} from 'lucide-react'
 import { useTheme } from 'next-themes'
 
 import { api, messageToTurn, streamChat, type ChatTurnWithMeta } from '@/lib/api'
 import { getVertical } from '@/lib/verticals'
 import { useWakil, QUERY_KEYS, type ViewKey } from '@/lib/store'
+import { sfx } from '@/lib/sound-effects'
 import type {
   ActionCardDTO,
   AlertDTO,
@@ -37,12 +50,12 @@ import type {
   ResultCardDTO,
   SuggestionDTO,
 } from '@/lib/types'
-import { openCommandPalette } from '@/components/app/CommandPalette'
 import { AgentAvatar, type AgentState } from './AgentAvatar'
 import { MessageBubble } from './MessageBubble'
 import { Composer } from './Composer'
 import { ConversationDrawer } from './ConversationDrawer'
 import { NotesSheet } from './NotesSheet'
+import { ProactivePulseBar } from './ProactivePulseBar'
 import { TOOL_ICONS } from './QuickCommandsManager'
 import { BusinessMenu } from '@/components/app/BusinessMenu'
 import { NotificationBell } from '@/components/app/NotificationBell'
@@ -67,9 +80,6 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
   const setSession = useWakil((s) => s.setSession)
   const activeConversationId = useWakil((s) => s.activeConversationId)
   const setActiveConversation = useWakil((s) => s.setActiveConversation)
-  // «ابدأ يومك» hands the composer a ready sentence — send it once, then clear
-  const pendingPrompt = useWakil((s) => s.pendingPrompt)
-  const clearPrompt = useWakil((s) => s.clearPrompt)
   const queryClient = useQueryClient()
   const { toast } = useToast()
   const { theme, setTheme } = useTheme()
@@ -94,8 +104,7 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
   const scrollRef = useRef<HTMLDivElement>(null)
   const nearBottomRef = useRef(true)
   const sendingRef = useRef(false)
-  // R34: text + id of the last send, so «جرّب تاني» re-sends the SAME turn
-  const retryRef = useRef<{ text: string; turnId: string } | null>(null)
+  const retryRef = useRef<string | null>(null)
   const creatingRef = useRef(false)
 
   // ---- load conversation history (keyed to the ACTIVE conversation) ----
@@ -107,11 +116,6 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
   // One effect owns the transcript: it applies the fetched history whenever
   // the data or the target conversation changes, and drops the old transcript
   // while a NEW key has no cached data yet (so stale messages never linger).
-  /* eslint-disable react-hooks/set-state-in-effect -- Deliberate: this effect
-     mirrors an EXTERNAL store (the React Query cache) into the local transcript,
-     which is exactly the pattern the rule's docs call out as valid. Every branch
-     runs only when the query data / conversation key actually changed, so no
-     cascading render loop is possible (the rule cannot see that invariant). */
   useEffect(() => {
     if (!data) {
       setTurns([])
@@ -125,7 +129,6 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
     setRevealId(null)
     setFailedId(null)
   }, [data, business.id, userId, activeConversationId])
-  /* eslint-enable react-hooks/set-state-in-effect */
 
   // ---- smart scroll: follow only while the user is near the bottom ----
   const scrollToBottom = useCallback((smooth = true) => {
@@ -153,26 +156,20 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
     queryFn: () => api.providers(),
   })
   const currentLabel = useMemo(() => {
+    if (modelKey === 'auto') return 'تلقائي ذكي (Gemini)'
+    if (modelKey === 'gemini-flash') return 'Gemini 2.5 Flash'
+    if (modelKey === 'gemini-pro') return 'Gemini 2.5 Pro'
     if (modelKey === 'builtin-deep') return 'عميق مفكّر'
     if (modelKey === 'builtin-air') return 'خفيف سريع'
     const ext = providersData?.providers.flatMap((p) => p.models).find((m) => `ext:${m.id}` === modelKey)
-    return ext?.label ?? 'عميق مفكّر'
+    return ext?.label ?? 'تلقائي ذكي (Gemini)'
   }, [modelKey, providersData])
 
   // carry the provider name so two providers exposing the same model label
   // (e.g. مزوّد تجريبي + مزوّد الاختبار → وكيل خفيف ×2) stay distinguishable
-  // نفس الموديل متعرّض من أكتر من مزوّد (مزوّد تجريبي + مزوّد الاختبار بيشاوروا
-  // على نفس الـremoteId) — القايمة كانت بتعرضه مرتين وتخلي الاختيار ملتبس.
-  // القرار: الموديل يظهر مرة واحدة (أول مزوّد مفعّل)، واسم المزوّد يفضل ظاهر.
-  const seenRemote = new Set<string>()
   const enabledExternal = (providersData?.providers ?? [])
     .flatMap((p) => p.models.map((m) => ({ ...m, providerName: p.name })))
     .filter((m) => m.enabled)
-    .filter((m) => {
-      if (seenRemote.has(m.remoteId)) return false
-      seenRemote.add(m.remoteId)
-      return true
-    })
 
   // ---- notifications (same query key as AppShell → shared cache, no extra fetch) ----
   const { data: overview } = useQuery({
@@ -215,10 +212,7 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
   const [queuedCount, setQueuedCount] = useState(0)
 
   const send = useCallback(
-    async (
-      text: string,
-      opts?: { suggestionId?: string; deepResearch?: boolean; turnId?: string; replaceTurnId?: string },
-    ) => {
+    async (text: string, opts?: { suggestionId?: string; deepResearch?: boolean }) => {
       if (!text.trim()) return
       const trimmed = text.trim()
       if (sendingRef.current) {
@@ -231,41 +225,25 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
       setSending(true)
       setFailedId(null)
       setRevealId(null)
-      // retry keeps the id (and therefore the server-side turn), a fresh send
-      // mints one — `crypto.randomUUID` needs a secure context, hence the shim
-      const turnId =
-        opts?.turnId ?? globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
-      retryRef.current = { text: trimmed, turnId }
+      retryRef.current = trimmed
       // the conversation the scratchpad invalidation targets at done time
       let convId = activeConversationId ?? loadedConvId
 
       const userLocalId = `local-user-${Date.now()}`
       const liveId = `local-live-${Date.now()}`
 
-      setTurns((prev) => {
-        // a retry replaces the failed pair (question + dead answer) instead of
-        // stacking a duplicate question under it
-        let base = prev
-        if (opts?.replaceTurnId) {
-          const idx = prev.findIndex((t) => t.id === opts.replaceTurnId)
-          if (idx >= 0) {
-            const start = idx > 0 && prev[idx - 1].role === 'user' ? idx - 1 : idx
-            base = prev.filter((_, i) => i < start || i > idx)
-          }
-        }
-        return [
-          ...base,
-          { id: userLocalId, role: 'user', text: trimmed, createdAt: new Date().toISOString() },
-          {
-            id: liveId,
-            role: 'assistant',
-            text: '',
-            thinking: [],
-            createdAt: new Date().toISOString(),
-            streaming: true,
-          },
-        ]
-      })
+      setTurns((prev) => [
+        ...prev,
+        { id: userLocalId, role: 'user', text: trimmed, createdAt: new Date().toISOString() },
+        {
+          id: liveId,
+          role: 'assistant',
+          text: '',
+          thinking: [],
+          createdAt: new Date().toISOString(),
+          streaming: true,
+        },
+      ])
       nearBottomRef.current = true
       setNearBottom(true)
 
@@ -273,7 +251,6 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
       const buf = {
         card: null as ActionCardDTO | null,
         cards: null as ResultCardDTO[] | null,
-        plan: null as string[] | null,
         actions: null as ChatActionDTO[] | null,
       }
       let errored = false
@@ -297,7 +274,6 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
             conversationId: activeConversationId ?? loadedConvId,
             suggestionId: opts?.suggestionId ?? null,
             deepResearch: opts?.deepResearch ?? false,
-            turnId,
           },
           {
             onStart: (cid, userMessageId) => {
@@ -325,12 +301,6 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
             },
             onCards: (cards) => {
               buf.cards = cards
-            },
-            // R28: the agent announces the read-only plan it is running, so a
-            // compound question shows its work instead of a long silence
-            onPlan: (steps) => {
-              buf.plan = steps
-              patchTurn({ plan: steps })
             },
             onActions: (actions) => {
               buf.actions = actions
@@ -382,13 +352,21 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
           // keep the failed bubble (retry button) — the server never persisted
           // a reply, so a refetch here would wipe the retry UI
         } else if (doneId) {
-          // chat state is already exact locally — refresh the app-wide caches
+          // chat state is already exact locally — refresh all app-wide caches
+          // so any tool the Brain ran (quick commands, plugins, catalog items,
+          // parties, memories, tasks, or new businesses) appears immediately!
           void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.overview(business.id, userId) })
           void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.operations(business.id) })
-          // the conversation list (title/preview/counts) + suggestions follow
-          // the user's work and update live after every turn
           void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.conversations(business.id, userId) })
           void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.suggestions(business.id, userId) })
+          void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.quickCommands(business.id) })
+          void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.memories(business.id) })
+          void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.items(business.id) })
+          void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.members(business.id) })
+          void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.tasks(business.id) })
+          void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.plugins(business.id) })
+          void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.backgroundTasks(business.id) })
+          void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.bootstrap })
           // «ورقة وكيل» — the agent jots notes while it works; refresh the
           // scratchpad (header badge + sheet) after every completed turn
           if (convId) {
@@ -410,21 +388,20 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
     [business.id, userId, modelKey, activeConversationId, loadedConvId, toast, queryClient],
   )
 
-  // A recommendation tapped on اليوم becomes a real request here — the owner
-  // never retypes what the agent already worked out.
-  useEffect(() => {
-    if (!pendingPrompt) return
-    clearPrompt()
-    void send(pendingPrompt)
-  }, [pendingPrompt, clearPrompt, send])
-
   const retry = useCallback(() => {
-    const last = retryRef.current
-    if (!last) return
-    // same turnId → the server reuses the turn (or replays the finished reply,
-    // `replayed: true`) and never drafts the op twice
-    void send(last.text, { turnId: last.turnId, replaceTurnId: failedId ?? undefined })
-  }, [send, failedId])
+    if (retryRef.current) void send(retryRef.current)
+  }, [send])
+
+  // Consume cross-view pendingPrompt (e.g. from CommandPalette or TodayView)
+  const pendingPrompt = useWakil((s) => s.pendingPrompt)
+  const consumePendingPrompt = useWakil((s) => s.consumePendingPrompt)
+  useEffect(() => {
+    if (!pendingPrompt || isLoading) return
+    const item = consumePendingPrompt()
+    if (item && item.text.trim()) {
+      void send(item.text, { deepResearch: item.deepResearch })
+    }
+  }, [pendingPrompt, isLoading, consumePendingPrompt, send])
 
   // ---- suggestion / quick-command chips send their prompt directly ----
   const sendSuggestion = useCallback(
@@ -451,11 +428,7 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
   )
 
   // ---- «محادثة جديدة» → create + activate + empty hero ----
-  // Not wrapped in useCallback on purpose: the React Compiler cannot preserve
-  // the manual memoization here (ref-guarded async handler) and the eslint
-  // rule flags the mismatch. A plain handler is correct and cheaper to reason
-  // about; it is only passed to click targets that re-render anyway.
-  const startNewChat = async () => {
+  const startNewChat = useCallback(async () => {
     if (creatingRef.current) return
     creatingRef.current = true
     setCreating(true)
@@ -477,7 +450,7 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
       creatingRef.current = false
       setCreating(false)
     }
-  }
+  }, [business.id, userId, setActiveConversation, queryClient, toast])
 
   // ---- approvals (R2+ / R3 reason flow) ----
   const approve = useCallback(
@@ -538,14 +511,22 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
 
   // ---- derived ----
   const lastTurn = turns.length > 0 ? turns[turns.length - 1] : null
-  const pillAvatarState: AgentState =
-    failedId && lastTurn?.id === failedId
-      ? 'error'
-      : lastTurn?.role === 'assistant' && lastTurn.streaming
-        ? lastTurn.text
-          ? 'writing'
-          : 'thinking'
-        : 'idle'
+  const pillAvatarState: AgentState = (() => {
+    if (failedId && lastTurn?.id === failedId) return 'error'
+    if (lastTurn?.role === 'assistant' && lastTurn.streaming) {
+      if (lastTurn.text) return 'replying'
+      const steps = lastTurn.thinking ?? []
+      const activeStep = steps[steps.length - 1]
+      if (activeStep) {
+        const lbl = `${activeStep.label} ${activeStep.detail}`
+        if (/أداة|بلاجن|نظام|قدرة|تفعيل/.test(lbl)) return 'analyzing_tools'
+        if (/أرقام|حساب|ربح|خزنة|يتحقق/.test(lbl)) return 'calculating'
+        if (/بحث|ويب|سوق/.test(lbl)) return 'searching'
+      }
+      return 'thinking'
+    }
+    return 'idle'
+  })()
   const showWelcome = !isLoading && turns.length === 0
   const showJump = !nearBottom && !isLoading
   // the composer auto-hides while reading history — but a live draft/focus
@@ -585,6 +566,13 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
           className="scroll-warm h-full overflow-y-auto overflow-x-clip"
         >
           <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 pb-44 pt-16 sm:px-6">
+            <ProactivePulseBar
+              business={business}
+              userId={userId}
+              onRunPrompt={(p) => void send(p)}
+              onNavigate={onNavigate}
+              disabled={sending}
+            />
             {isLoading && (
               <div className="flex flex-col gap-5" role="status" aria-label="بيحمّل المحادثة">
                 <div className="ms-auto h-12 w-2/5 animate-pulse rounded-2xl bg-muted" />
@@ -608,30 +596,18 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
               >
                 <AgentAvatar state="idle" size="lg" />
                 <div>
-                  {/* the greeting is the first thing a new owner sees — it gets
-                      the same kinetic treatment as the marketing surface
-                      (words rise 55ms apart) instead of a static <h2> */}
-                  <h2 className="text-lg font-bold" aria-label="أهلاً بيك">
-                    {['أهلاً', 'بيك', '👋'].map((w, i) => (
-                      <span key={w} style={{ ['--word-i' as string]: i }} className="kinetic-word">
-                        {w}
-                        {i < 2 ? ' ' : ''}
-                      </span>
-                    ))}
-                  </h2>
-                  <p className="blur-in mt-1.5 max-w-md text-sm leading-relaxed text-muted-foreground" style={{ animationDelay: '0.22s' }}>
-                    {vertical.welcome}
-                  </p>
+                  <h2 className="text-lg font-bold">أهلاً بيك 👋</h2>
+                  <p className="mt-1.5 max-w-md text-sm leading-relaxed text-muted-foreground">{vertical.welcome}</p>
                 </div>
-                <div className="grid w-full max-w-3xl grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                <div className="flex flex-wrap justify-center gap-1.5">
                   {suggestionsQ.isPending ? (
-                    <div className="col-span-full grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3" aria-busy="true" aria-label="بيجهّز الاقتراحات">
-                      {[0, 1, 2, 3, 4, 5].map((i) => (
-                        <span key={i} className="skel h-[4.25rem] w-full rounded-xl" />
+                    <div className="flex flex-wrap justify-center gap-1.5" aria-busy="true" aria-label="بيجهّز الاقتراحات">
+                      {[0, 1, 2, 3].map((i) => (
+                        <span key={i} className="skel h-[4.25rem] w-32 rounded-2xl" />
                       ))}
                     </div>
                   ) : heroSuggestions ? (
-                    heroSuggestions.slice(0, 6).map((s, i) => (
+                    heroSuggestions.map((s, i) => (
                       <SuggestionPill key={s.id} s={s} index={i} onPick={() => sendSuggestion(s)} />
                     ))
                   ) : (
@@ -793,6 +769,9 @@ function FloatingPill({
 }) {
   const [hovered, setHovered] = useState(false)
   const setSession = useWakil((s) => s.setSession)
+  const soundEnabled = useWakil((s) => s.soundEnabled)
+  const toggleSound = useWakil((s) => s.toggleSound)
+  const reopenOnboarding = useWakil((s) => s.reopenOnboarding)
   const expanded = hovered || pinned
 
   // HOVER-INTENT (macOS-style): enter clears the pending hide; leave arms a
@@ -893,17 +872,6 @@ function FloatingPill({
                 )}
               </Button>
 
-              {/* بحث سريع في كل حاجة (⌘K) */}
-              <Button
-                variant="ghost"
-                className="press-apple icon-seat size-9 shrink-0 text-muted-foreground hover:text-foreground"
-                onClick={openCommandPalette}
-                aria-label="بحث سريع"
-                title="بحث سريع (⌘K)"
-              >
-                <Search className="size-4" aria-hidden="true" />
-              </Button>
-
               {/* history */}
               <Button
                 variant="ghost"
@@ -934,6 +902,45 @@ function FloatingPill({
                   >
                     {arNum(notesCount)}
                   </motion.span>
+                )}
+              </Button>
+
+              {/* Live Multimodal Onboarding Studio */}
+              <Button
+                variant="ghost"
+                className="press-apple icon-seat size-9 shrink-0 text-[var(--wakil-amber)] hover:bg-[var(--wakil-amber)]/15 hover:text-[var(--wakil-amber)]"
+                onClick={() => {
+                  sfx.playPop(580, 0.03)
+                  reopenOnboarding()
+                }}
+                aria-label="جلسة التأسيس الاستكشافية الحية (كاميرا وصوت)"
+                title="جلسة التأسيس الاستكشافية الحية (كاميرا الكشكول/المخزن + صوت)"
+              >
+                <Camera className="size-4" aria-hidden="true" />
+              </Button>
+
+              {/* Sound Effects toggle */}
+              <Button
+                variant="ghost"
+                className={cn(
+                  'press-apple icon-seat size-9 shrink-0 transition-colors',
+                  soundEnabled
+                    ? 'text-[var(--wakil-amber)] hover:text-foreground'
+                    : 'text-muted-foreground hover:text-foreground',
+                )}
+                onClick={() => {
+                  const next = !soundEnabled
+                  toggleSound()
+                  sfx.setMuted(!next)
+                  if (next) sfx.playPop(640, 0.03)
+                }}
+                aria-label={soundEnabled ? 'كتم المؤثرات الصوتية' : 'تشغيل المؤثرات الصوتية'}
+                title={soundEnabled ? 'كتم المؤثرات الصوتية التفاعلية' : 'تشغيل المؤثرات الصوتية التفاعلية'}
+              >
+                {soundEnabled ? (
+                  <Volume2 className="size-4" aria-hidden="true" />
+                ) : (
+                  <VolumeX className="size-4 opacity-60" aria-hidden="true" />
                 )}
               </Button>
 
@@ -1016,39 +1023,42 @@ function SuggestionPill({ s, index, onPick }: { s: SuggestionDTO; index: number;
   return (
     <motion.button
       type="button"
-      initial={{ opacity: 0, y: 8, scale: 0.97 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{ delay: 0.15 + index * 0.05, duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
-      onClick={onPick}
+      initial={{ opacity: 0, y: 14, scale: 0.92, rotateX: -8 }}
+      animate={{ opacity: 1, y: 0, scale: 1, rotateX: 0 }}
+      whileHover={{ y: -2.5, scale: 1.02 }}
+      whileTap={{ scale: 0.96 }}
+      transition={{
+        type: 'spring',
+        stiffness: 410,
+        damping: 26,
+        delay: 0.1 + index * 0.055,
+      }}
+      onMouseEnter={() => sfx.playPop(540 + index * 35, 0.014)}
+      onClick={() => {
+        sfx.playPop(680, 0.03)
+        onPick()
+      }}
       aria-label={s.reasonLabel ? `${s.label} — ${s.reasonLabel}` : s.label}
       title={s.prompt}
       className={cn(
-        'press chip-lift group flex w-full items-center gap-3 rounded-xl border p-3 text-start transition-all focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50',
+        'press chip-lift flex min-h-11 max-w-full flex-col items-start gap-0.5 rounded-2xl border px-3.5 py-2 text-start transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50',
         primary
-          ? 'border-transparent bg-primary text-primary-foreground hover:bg-primary/90'
-          : 'border-border bg-card/70 backdrop-blur-sm hover:border-wakil-amber/50 hover:bg-accent hover:text-accent-foreground',
+          ? 'border-transparent bg-primary text-primary-foreground shadow-sm hover:bg-primary/90'
+          : 'border-border bg-card/75 backdrop-blur-sm hover:border-[var(--wakil-amber)]/60 hover:bg-accent hover:text-accent-foreground hover:shadow-md',
       )}
     >
-      <span
-        className={cn(
-          'flex size-9 shrink-0 items-center justify-center rounded-lg',
-          primary ? 'bg-primary-foreground/15' : 'bg-wakil-amber/10',
-        )}
-      >
-        <Icon className={cn('size-4', primary ? 'text-primary-foreground/90' : 'text-wakil-amber')} aria-hidden="true" />
+      <span className="flex items-center gap-1.5 text-xs font-medium">
+        <Icon
+          className={cn('size-3.5 shrink-0', primary ? 'text-primary-foreground/80' : 'text-[var(--wakil-amber)]')}
+          aria-hidden="true"
+        />
+        <span className="max-w-56 truncate">{s.label}</span>
       </span>
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-sm font-medium">{s.label}</span>
-        {s.reasonLabel && (
-          <span className={cn('mt-0.5 block truncate text-xs', primary ? 'text-primary-foreground/70' : 'text-muted-foreground')}>
-            {s.reasonLabel}
-          </span>
-        )}
-      </span>
-      <ChevronLeft
-        className={cn('size-4 shrink-0 opacity-40 transition-transform group-hover:-translate-x-0.5', primary && 'opacity-70')}
-        aria-hidden="true"
-      />
+      {s.reasonLabel && (
+        <span className={cn('text-[10px]', primary ? 'text-primary-foreground/70' : 'text-muted-foreground')}>
+          {s.reasonLabel}
+        </span>
+      )}
     </motion.button>
   )
 }

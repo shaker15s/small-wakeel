@@ -15,7 +15,9 @@ export async function GET(req: Request) {
     const gate = await guard(req, { businessId, scope: 'business' })
     if (!gate.ok) return gate.res
 
-    const tasks = await db.scheduledTask.findMany({ where: { businessId } })
+    const tasks = await db.scheduledTask.findMany({
+      where: { businessId, NOT: { tool: { startsWith: 'bg:' } } },
+    })
     const pending = tasks
       .filter((t) => t.status === 'pending')
       .sort((a, b) => a.scheduledFor.getTime() - b.scheduledFor.getTime())
@@ -68,6 +70,9 @@ const READ_TOOLS = new Set([
   'list_receivables',
   'list_payables',
   'get_activity_history',
+  'analyze_profitability',
+  'forecast_stock',
+  'get_proactive_insights',
 ])
 
 export async function POST(req: Request) {

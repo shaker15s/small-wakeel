@@ -107,6 +107,19 @@ export function BusinessMenu({
             </motion.div>
           )
         })}
+        <div className="mt-1 border-t border-border/60 pt-1.5">
+          <button
+            type="button"
+            onClick={() => {
+              setOpen(false)
+              import('@/lib/store').then(({ useWakil }) => useWakil.getState().setBusinessBuilderOpen(true))
+            }}
+            className="press focus-warm flex w-full items-center justify-between rounded-xl px-3 py-2 text-xs font-semibold text-primary hover:bg-primary/10"
+          >
+            <span>+ إنشاء نشاط تجاري جديد...</span>
+            <span className="text-[10px] text-muted-foreground">أي مجال</span>
+          </button>
+        </div>
       </PopoverContent>
     </Popover>
   )

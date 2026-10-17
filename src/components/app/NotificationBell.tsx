@@ -11,7 +11,7 @@ import { Bell, CheckCircle2, ChevronLeft, CircleAlert, Info, TriangleAlert } fro
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import type { AlertDTO } from '@/lib/types'
-import type { ViewKey } from '@/lib/store'
+import { useWakil, type ViewKey } from '@/lib/store'
 import { arNum, safeView } from '@/components/views/shared'
 import { cn } from '@/lib/utils'
 
@@ -33,6 +33,7 @@ export function NotificationBell({
   className?: string
 }) {
   const [open, setOpen] = useState(false)
+  const { setPluginStudioOpen } = useWakil()
   const alertCount = useMemo(
     () => alerts.filter((a) => a.level === 'danger' || a.level === 'warning').length,
     [alerts],
@@ -69,16 +70,28 @@ export function NotificationBell({
         side="bottom"
         align="center"
         sideOffset={10}
-        className="glass w-[21rem] max-h-[24rem] overflow-y-auto scroll-warm rounded-2xl p-0"
+        className="glass w-[22rem] max-h-[26rem] overflow-y-auto scroll-warm rounded-2xl p-0"
         dir="rtl"
       >
         <div className="sticky top-0 z-10 flex items-center justify-between gap-2 border-b border-border/60 bg-popover/90 px-4 py-3 backdrop-blur-md">
-          <span className="text-sm font-bold">التنبيهات</span>
-          {alerts.length > 0 && (
-            <span className="num rounded-full bg-muted px-2.5 py-0.5 text-[11px] font-semibold text-muted-foreground tabular-nums">
-              {arNum(alerts.length)}
-            </span>
-          )}
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-bold">التنبيهات</span>
+            {alerts.length > 0 && (
+              <span className="num rounded-md bg-muted px-2 py-0.5 text-[11px] font-semibold text-muted-foreground tabular-nums">
+                {arNum(alerts.length)}
+              </span>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setOpen(false)
+              setPluginStudioOpen(true, 'radar')
+            }}
+            className="rounded-lg bg-primary/10 hover:bg-primary/15 border border-primary/25 px-2.5 py-1 text-[11px] font-semibold text-primary transition-colors"
+          >
+            رادار المخاطر والفرص
+          </button>
         </div>
         <NotificationList
           alerts={alerts}

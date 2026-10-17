@@ -333,22 +333,67 @@ export default function MemoryView({ businessId, userId, onNavigate }: ViewProps
       transition={{ duration: 0.2, ease: 'easeOut' }}
       className={PAGE}
     >
-      {/* hero — the mascot + stats */}
-      <header className="rise-in flex items-start gap-3 sm:gap-4">
-        <AgentAvatar state="searching" size="lg" />
-        <div className="min-w-0 flex-1">
-          <h1 className="text-xl font-bold sm:text-2xl">ذاكرة وكيل</h1>
-          <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
-            كل اللي اتعلمته عنك وعن شغلك — بتتطور كل يوم معاك
-          </p>
-          <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-            <span className="chip-lift rounded-full border border-wakil-amber/25 bg-wakil-amber/10 px-2.5 py-1 text-[11px] font-semibold text-wakil-amber">
-              <span className="num tabular-nums">{arNum(activeCount)}</span> حاجة فاكرها
-            </span>
-            <span className="chip-lift rounded-full border bg-card px-2.5 py-1 text-[11px] font-medium text-muted-foreground">
-              استخدمت <span className="num tabular-nums">{arNum(totalUsage)}</span> مرة
-            </span>
+      {/* hero — the mascot + stats + 5-Layer Contextual Memory Architecture */}
+      <header className="rise-in space-y-3.5">
+        <div className="flex items-start gap-3 sm:gap-4">
+          <AgentAvatar state="searching" size="lg" />
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-xl font-bold sm:text-2xl">الذاكرة السياقية ودستور الشغل</h1>
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">
+                <span className="size-1.5 animate-pulse rounded-full bg-emerald-500" />
+                متزامنة لحظياً مع محرك القرار
+              </span>
+            </div>
+            <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
+              ذاكرة «وكيل» من ٥ طبقات حية: بتحفظ قواعد عملك، تفضيلاتك، لهجة محلك، خططك المتكررة، وتطور مهامك — وأي تعديل هنا بيتطبق فوراً في نفس اللحظة.
+            </p>
+            <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+              <span className="chip-lift rounded-full border border-wakil-amber/25 bg-wakil-amber/10 px-2.5 py-1 text-[11px] font-semibold text-wakil-amber">
+                <span className="num tabular-nums">{arNum(activeCount)}</span> عنصر نشط في الذاكرة
+              </span>
+              <span className="chip-lift rounded-full border bg-card px-2.5 py-1 text-[11px] font-medium text-muted-foreground">
+                استُخدمت في اتخاذ القرار <span className="num tabular-nums">{arNum(totalUsage)}</span> مرة
+              </span>
+            </div>
           </div>
+        </div>
+
+        {/* 5-Layer Contextual Memory Architecture Strip */}
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          {KIND_ORDER.map((k) => {
+            const meta = KIND_META[k]
+            const Icon = meta.icon
+            const count = memories.filter((m) => m.kind === k && m.active).length
+            return (
+              <button
+                key={k}
+                type="button"
+                onClick={() => {
+                  setAddKind(k)
+                  setAddOpen(true)
+                }}
+                className="group flex flex-col justify-between rounded-xl border bg-card/80 p-3 text-right transition-all hover:border-wakil-amber/50 hover:bg-accent/40"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="flex size-7 items-center justify-center rounded-lg bg-wakil-amber/10 text-wakil-amber">
+                    <Icon className="size-3.5" aria-hidden />
+                  </span>
+                  <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-bold tabular-nums">
+                    {arNum(count)}
+                  </span>
+                </div>
+                <div className="mt-2">
+                  <p className="text-xs font-bold text-foreground group-hover:text-wakil-amber">
+                    {meta.label}
+                  </p>
+                  <p className="mt-0.5 line-clamp-1 text-[10px] text-muted-foreground">
+                    + إضافة سريعة
+                  </p>
+                </div>
+              </button>
+            )
+          })}
         </div>
       </header>
 

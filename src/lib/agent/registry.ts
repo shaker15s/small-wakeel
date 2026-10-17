@@ -1,10 +1,10 @@
 // وكيل — AGENT TOOL REGISTRY (العيون والأيدي اللي العقل بيشوف ويمسك بيها الشغل).
 //
-// This is the «4 ERP systems as tools» layer from the research PDF: the whole
-// domain (finance / inventory / parties / operations / memory) is exposed to
-// the MODEL as typed tools the model itself chooses between — DeepSeek-style
-// tool calling, emulated in JSON so it works on ANY provider (builtin z-ai or
-// external OpenAI-compatible).
+// This is the «4 ERP systems + Self-Configuring Plugin Engine» layer: the whole
+// domain (finance / inventory / parties / operations / memory / analytics /
+// system config) is exposed to the MODEL as typed tools the model itself chooses
+// between — DeepSeek-style tool calling, emulated in JSON so it works on ANY
+// provider (builtin Google Gemini or external OpenAI-compatible).
 //
 // Split output contract (PDF: Structured Split Tool Results):
 //   - `details` (ResultCardDTO[]) → goes straight to the UI (cards/tables).
@@ -79,6 +79,22 @@ export const AGENT_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   'calculate',
   'schedule_task',
   'set_persona',
+  // Next-Gen Employee Superpower tools
+  'analyze_profitability',
+  'forecast_stock',
+  'get_proactive_insights',
+  'upsert_catalog_item',
+  'upsert_party',
+  'create_quick_command',
+  'create_business',
+  'configure_business',
+  'run_scheduled_tasks',
+  // Dynamic Plugin Harness & Concurrent Background Worker tools
+  'install_plugin',
+  'run_plugin',
+  'list_plugins',
+  'dispatch_background_jobs',
+  'scan_risks_and_opportunities',
 ])
 
 /** Arabic label shown in thinking steps for each tool. */
@@ -116,6 +132,20 @@ export const TOOL_STEP_LABEL: Record<string, string> = {
   calculate: 'الحاسبة',
   schedule_task: 'مهمة مجدولة',
   set_persona: 'ضبط النبرة',
+  analyze_profitability: 'تحليل الربحية والهوامش',
+  forecast_stock: 'توقع نفاد المخزون',
+  get_proactive_insights: 'نبض الشغل والتنبيهات',
+  upsert_catalog_item: 'إضافة/تحديث صنف',
+  upsert_party: 'إضافة/تحديث عميل أو مورد',
+  create_quick_command: 'إضافة أمر سريع',
+  create_business: 'إنشاء منشأة جديدة',
+  configure_business: 'تعديل إعدادات المنشأة',
+  run_scheduled_tasks: 'تشغيل المهام المجدولة',
+  install_plugin: 'بناء وتثبيت بلاجن ذكي',
+  run_plugin: 'تشغيل بلاجن',
+  list_plugins: 'عرض البلاجنز المتاحة',
+  dispatch_background_jobs: 'تشغيل مهام خلفية متوازية',
+  scan_risks_and_opportunities: 'فحص المخاطر والفرص الاستباقي',
 }
 
 /**

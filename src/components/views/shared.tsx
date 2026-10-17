@@ -91,10 +91,13 @@ export const READ_TOOL_AR: Record<string, string> = {
   get_daily_summary: 'ملخص اليوم',
   get_cash_position: 'وضع الخزنة',
   list_low_stock: 'المخزون الناقص',
-  list_expiring: 'الأصناف قربتخلص',
+  list_expiring: 'الأصناف قربت تخلص',
   list_receivables: 'مديونيات العملاء',
   list_payables: 'مستحقات الموردين',
   get_activity_history: 'آخر الحركات',
+  analyze_profitability: 'تحليل الربحية والهوامش',
+  forecast_stock: 'تنبؤ المخزون ومعدل السحب',
+  get_proactive_insights: 'رادار التنبيهات والفرص',
 }
 
 export const RECURRENCE_AR: Record<string, string> = {

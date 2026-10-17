@@ -1,15 +1,19 @@
 import type { Metadata, Viewport } from "next";
+import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "@/components/ui/toaster";
 import { ThemeProvider } from "next-themes";
-import { ChunkRecovery } from '@/components/app/ChunkRecovery'
 
-/**
- * Font variables are defined in globals.css as self-hosted system stacks.
- * We deliberately avoid next/font/google: it needs network access at build
- * time (fails in air-gapped installs), sends a third-party request from the
- * user's browser, and its Latin subsets do nothing for Arabic text.
- */
+const geistSans = Geist({
+  variable: "--font-geist-sans",
+  subsets: ["latin"],
+});
+
+const geistMono = Geist_Mono({
+  variable: "--font-geist-mono",
+  subsets: ["latin"],
+});
+
 export const metadata: Metadata = {
   title: "وكيل — مساعد شغلك اليومي",
   description: "مساعد ذكي لصحاب المحلات والجيمات والصيدليات والعطارات — سجّل بع صرف بثقة، وكل حاجة موثقة ومتحققة.",
@@ -25,6 +29,59 @@ export const viewport: Viewport = {
   maximumScale: 5,
 };
 
+const FETCH_EXTENSION_GUARD_SCRIPT = `
+(function() {
+  try {
+    var patchTarget = function(target) {
+      if (!target) return;
+      var desc = Object.getOwnPropertyDescriptor(target, 'fetch');
+      if (!desc || !desc.configurable) return;
+      if (desc.get && !desc.set) {
+        var origGet = desc.get;
+        var overrideFetch = null;
+        Object.defineProperty(target, 'fetch', {
+          configurable: true,
+          enumerable: desc.enumerable !== false,
+          get: function() {
+            return overrideFetch || origGet.call(this);
+          },
+          set: function(fn) {
+            if (typeof fn === 'function') overrideFetch = fn;
+          }
+        });
+      } else if (desc.writable === false && 'value' in desc) {
+        Object.defineProperty(target, 'fetch', {
+          configurable: true,
+          enumerable: desc.enumerable !== false,
+          writable: true,
+          value: desc.value
+        });
+      }
+    };
+    patchTarget(window);
+    if (typeof Window !== 'undefined' && Window.prototype) {
+      patchTarget(Window.prototype);
+    }
+  } catch (_) {}
+
+  window.addEventListener('error', function(ev) {
+    try {
+      var msg = String((ev && ev.message) || '');
+      var file = String((ev && ev.filename) || '');
+      if (
+        msg.indexOf('Cannot set property fetch') !== -1 ||
+        file.indexOf('chrome-extension://') !== -1 ||
+        file.indexOf('moz-extension://') !== -1
+      ) {
+        ev.stopImmediatePropagation();
+        ev.preventDefault();
+        return false;
+      }
+    } catch (_) {}
+  }, true);
+})();
+`;
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -32,17 +89,17 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="ar" dir="rtl" suppressHydrationWarning>
-      {/* suppressHydrationWarning on <body> too: browser extensions
-          (bis_status/__processed_* are injected by Brave/Bing/AV extensions)
-          rewrite the body attributes and React 19 reports a mismatch the app
-          cannot fix. It is console noise, not a bug in our markup. */}
+      <head suppressHydrationWarning>
+        <script
+          id="wakil-fetch-extension-guard"
+          dangerouslySetInnerHTML={{ __html: FETCH_EXTENSION_GUARD_SCRIPT }}
+        />
+      </head>
       <body
-        className="antialiased bg-background text-foreground"
         suppressHydrationWarning
+        className={`${geistSans.variable} ${geistMono.variable} antialiased bg-background text-foreground`}
       >
         <ThemeProvider attribute="class" defaultTheme="light" enableSystem={true}>
-          {/* self-heal for stale chunks after a deploy (see the component) */}
-          <ChunkRecovery />
           {children}
           <Toaster />
         </ThemeProvider>
@@ -50,3 +107,4 @@ export default function RootLayout({
     </html>
   );
 }
+

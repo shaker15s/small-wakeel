@@ -141,7 +141,7 @@ export async function GET(req: Request) {
     if (invalid) return invalid
 
     const rows = await db.customTool.findMany({
-      where: { businessId, active: true },
+      where: { businessId, active: true, kind: { in: ['web_source', 'webhook'] } },
       orderBy: { name: 'asc' },
     })
     return NextResponse.json(rows.map(serialize))
@@ -178,7 +178,9 @@ export async function POST(req: Request) {
     if (!normalized.ok) return badRequest(normalized.error)
 
     // Cap: 8 ACTIVE tools per business (paused ones don't count)
-    const activeCount = await db.customTool.count({ where: { businessId: body.businessId, active: true } })
+    const activeCount = await db.customTool.count({
+      where: { businessId: body.businessId, active: true, kind: { in: ['web_source', 'webhook'] } },
+    })
     if (activeCount >= MAX_ACTIVE_TOOLS) {
       return badRequest(`وصلت للحد الأقصى ٨ أدوات — امسح واحدة أو وقّفها الأول`)
     }

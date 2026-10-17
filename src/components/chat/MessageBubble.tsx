@@ -122,9 +122,9 @@ export function MessageBubble({
     return (
       <div className="settle-in flex w-full justify-end">
         <motion.div
-          initial={optimistic ? { opacity: 0, y: 6, scale: 0.98 } : false}
+          initial={optimistic ? { opacity: 0, y: 24, scale: 0.92 } : false}
           animate={{ opacity: 1, y: 0, scale: 1 }}
-          transition={{ type: 'spring', stiffness: 480, damping: 30 }}
+          transition={{ type: 'spring', stiffness: 440, damping: 24 }}
           className="max-w-[85%] whitespace-pre-wrap break-words rounded-[1.25rem] rounded-tl-md bg-[var(--wakil-amber-soft)] px-4 py-2.5 text-[15px] leading-7 text-accent-foreground shadow-sm"
         >
           {withNums(turn.text)}
@@ -137,14 +137,27 @@ export function MessageBubble({
   const { card, cards, actions, thinking, modelLabel, plan } = turn
   const streaming = turn.streaming === true
   const hasText = turn.text.length > 0
-  const avatarState: AgentState = error
-    ? 'error'
-    : streaming
-      ? hasText
-        ? 'writing'
-        : 'thinking'
-      : 'idle'
   const step = latestStep(thinking)
+
+  // Dynamically derive the rich AgentState from the active thinking step & streaming state
+  const avatarState: AgentState = (() => {
+    if (error) return 'error'
+    if (!streaming) return 'idle'
+    if (hasText) return 'replying'
+    if (step) {
+      const lbl = `${step.label} ${step.detail}`
+      if (/أداة|بلاجن|نظام|قدرة|ينفذ|تفعيل/.test(lbl) || step.icon === 'execute') {
+        return 'analyzing_tools'
+      }
+      if (/أرقام|حساب|ربح|خزنة|تكلفة|يتحقق/.test(lbl) || step.icon === 'verify') {
+        return 'calculating'
+      }
+      if (/بحث|ويب|سجل|سوق/.test(lbl) || step.icon === 'search' || step.icon === 'research') {
+        return 'searching'
+      }
+    }
+    return 'thinking'
+  })()
   const canCopy = !streaming && !error && hasText
 
   // ---- R15: deep-research metadata + self-verification (land on done) ------
@@ -180,11 +193,11 @@ export function MessageBubble({
 
   const revealProps = (delay: number) => {
     const transition: Transition = reveal
-      ? { duration: 0.22, ease: 'easeOut', delay }
+      ? { type: 'spring', stiffness: 380, damping: 26, delay }
       : { duration: 0 }
     return {
-      initial: reveal ? { opacity: 0, y: 10 } : false,
-      animate: { opacity: 1, y: 0 },
+      initial: reveal ? { opacity: 0, y: 16, scale: 0.97 } : false,
+      animate: { opacity: 1, y: 0, scale: 1 },
       transition,
     }
   }

@@ -1,5 +1,5 @@
-// وكيل — FRAUD RADAR (رادار الأمانة) — owner-only honesty insights computed
-// from REAL operations + audit + usage. Four detectors:
+// وكيل — FRAUD & BUSINESS PULSE RADAR (رادار الأمانة واليقظة) — owner-only insights
+// computed from REAL operations + audit + usage + inventory velocity. Six detectors:
 //   1. Reversals of SUCCEEDED sales created ≥5 minutes after the original,
 //      especially still-AWAITING ones («عملية معكوسة بعد ما الزبون مشي»).
 //   2. Repeated price queries (search_catalog/get_item_stock UsageEvents) for
@@ -7,7 +7,8 @@
 //      («استعلام متكرر من غير بيع»).
 //   3. FAILED_SAFE / OUTCOME_UNKNOWN counts per day (info).
 //   4. Draft-then-cancel patterns (CANCELLED ops over the last 7 days).
-// Empty [] is a perfectly good result for clean data.
+//   5. Margin erosion / below-cost sales («بيع بأقل من التكلفة أو هامش ضعيف»).
+//   6. High-velocity imminent stockout («سحب سريع يهدد بنفاد وشيك»).
 
 import { db } from '@/lib/db'
 import type { RadarInsightDTO } from '@/lib/types'
@@ -132,6 +133,74 @@ export async function buildRadar(businessId: string): Promise<RadarInsightDTO[]>
       title: 'مسودات بتتلغي كتير',
       detail: `${cancelled.length} مسودة اتعملت واتلغت خلال أسبوع — لو ده نمط متكرر من نفس الموظف يبقى فيه لخبطة في الإدخال أو حد بيجرب من غير قصد.`,
       evidence: cancelled.slice(0, 3).map((c) => ({ label: `${c.ref} — ${c.summary.slice(0, 40)}`, ref: c.ref, view: 'journal' as const })),
+    })
+  }
+
+  // ---- Detector 5: Margin erosion / below-cost sales in the last 7 days ----
+  const [items, recentSales] = await Promise.all([
+    db.item.findMany({ where: { businessId } }),
+    db.operation.findMany({
+      where: { businessId, type: 'sale', createdAt: { gte: weekAgo } },
+      orderBy: { createdAt: 'desc' },
+      take: 30,
+    }),
+  ])
+  const itemById = new Map(items.map((it) => [it.id, it]))
+  for (const sale of recentSales) {
+    try {
+      const p = JSON.parse(sale.payload) as Record<string, unknown>
+      if (!p.priceOverride) continue
+      const it = itemById.get(String(p.itemId ?? ''))
+      const unitPrice = Number(p.unitPrice ?? 0)
+      if (it && unitPrice > 0 && unitPrice < it.costPrice) {
+        out.push({
+          id: `radar-margin-${sale.id.slice(0, 8)}`,
+          level: 'warning',
+          title: 'بيع بأقل من سعر التكلفة',
+          detail: `العملية ${sale.ref} اتسجلت بسعر مخصص (${egpPlain(unitPrice)} ج للوحدة) أقل من تكلفة «${it.name}» المسجلة (${egpPlain(it.costPrice)} ج).`,
+          evidence: [{ label: `${sale.ref} — ${it.name}`, ref: sale.ref, view: 'journal' }],
+        })
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // ---- Detector 6: Imminent stockout on fast-moving items ----
+  const soldQty = new Map<string, number>()
+  for (const sale of recentSales) {
+    if (sale.status !== 'SUCCEEDED') continue
+    try {
+      const p = JSON.parse(sale.payload) as Record<string, unknown>
+      if (Array.isArray(p.lines)) {
+        for (const l of p.lines as Record<string, unknown>[]) {
+          const id = String(l.itemId ?? '')
+          const q = Number(l.qty ?? 0)
+          if (id && q > 0) soldQty.set(id, (soldQty.get(id) ?? 0) + q)
+        }
+      } else {
+        const id = String(p.itemId ?? '')
+        const q = Number(p.qty ?? 0)
+        if (id && q > 0) soldQty.set(id, (soldQty.get(id) ?? 0) + q)
+      }
+    } catch {
+      // ignore
+    }
+  }
+  const fastRunningOut = items.filter((it) => {
+    const sold7 = soldQty.get(it.id) ?? 0
+    if (sold7 <= 0) return false
+    const daily = sold7 / 7
+    const daysLeft = it.stockQty / daily
+    return daysLeft <= 3 && it.stockQty > 0
+  })
+  if (fastRunningOut.length > 0) {
+    out.push({
+      id: 'radar-fast-stockout',
+      level: 'warning',
+      title: 'سحب سريع يهدد بنفاد وشيك خلال ٧٢ ساعة',
+      detail: `الأصناف (${fastRunningOut.slice(0, 3).map((i) => i.name).join('، ')}) بتتسحب بسرعة ورصيدها الحالي يكفي أقل من ٣ أيام بناءً على مبيعات الأسبوع.`,
+      evidence: fastRunningOut.slice(0, 3).map((i) => ({ label: `مخزون ${i.name}`, view: 'inventory' as const })),
     })
   }
 

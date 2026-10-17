@@ -11,7 +11,7 @@
 
 'use client'
 
-import { useEffect, useMemo, useRef, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import {
@@ -23,7 +23,6 @@ import {
   LayoutGrid,
   MessageCircle,
   Moon,
-  Search,
   Settings,
   Sun,
   Users,
@@ -32,6 +31,7 @@ import { useTheme } from 'next-themes'
 import { api } from '@/lib/api'
 import { QUERY_KEYS, useWakil, VIEW_LABELS, type ViewKey } from '@/lib/store'
 import { getVertical } from '@/lib/verticals'
+import type { BusinessLite } from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import { useToast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
@@ -48,7 +48,11 @@ import { Onboarding } from './Onboarding'
 import { AgentAvatar } from '@/components/chat/AgentAvatar'
 import { BusinessMenu } from './BusinessMenu'
 import { NotificationBell } from './NotificationBell'
-import { openCommandPalette } from './CommandPalette'
+import { CommandPalette } from './CommandPalette'
+import { BusinessBuilderModal } from './BusinessBuilderModal'
+import { PluginAndTaskStudioModal } from './PluginAndTaskStudioModal'
+import { sfx } from '@/lib/sound-effects'
+import { Camera, Command, Cpu, PlusCircle, Volume2, VolumeX } from 'lucide-react'
 
 const NAV_ITEMS: { key: ViewKey; icon: typeof MessageCircle }[] = [
   { key: 'chat', icon: MessageCircle },
@@ -65,7 +69,22 @@ const NAV_ITEMS: { key: ViewKey; icon: typeof MessageCircle }[] = [
 const MOBILE_NAV: ViewKey[] = ['chat', 'today', 'inventory', 'journal', 'settings']
 
 export function AppShell() {
-  const { businessId, userId, view, setView, setSession, hydrate, onboardingDone, finishOnboarding } = useWakil()
+  const {
+    businessId,
+    userId,
+    view,
+    setView,
+    setSession,
+    hydrate,
+    onboardingDone,
+    finishOnboarding,
+    reopenOnboarding,
+    soundEnabled,
+    toggleSound,
+    setCommandPaletteOpen,
+    setBusinessBuilderOpen,
+    setPluginStudioOpen,
+  } = useWakil()
   const { theme, setTheme } = useTheme()
   const { toast } = useToast()
   // SSR-safe mounted flag without setState-in-effect
@@ -136,8 +155,8 @@ export function AppShell() {
 
   if (!mounted || !bootstrap) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-background">
-        <div className="flex flex-col items-center gap-3">
+      <div suppressHydrationWarning className="flex min-h-screen items-center justify-center bg-background">
+        <div suppressHydrationWarning className="flex flex-col items-center gap-3">
           <AgentAvatar state="thinking" size="lg" />
           <p className="shimmer-text text-sm font-medium">وكيل بيجهز…</p>
         </div>
@@ -165,6 +184,9 @@ export function AppShell() {
   if (isChat) {
     return (
       <div className="flex h-dvh flex-col overflow-hidden bg-background">
+        <CommandPalette business={activeBusiness} businesses={bootstrap.businesses} userId={activeUser.id} />
+        <BusinessBuilderModal />
+        <PluginAndTaskStudioModal business={activeBusiness} userId={activeUser.id} />
         <main className="min-h-0 w-full flex-1 overflow-hidden">
           <ChatView
             business={activeBusiness}
@@ -204,6 +226,9 @@ export function AppShell() {
   // ======================= APP VIEWS (classic chrome) =======================
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-background">
+      <CommandPalette business={activeBusiness} businesses={bootstrap.businesses} userId={activeUser.id} />
+      <BusinessBuilderModal />
+      <PluginAndTaskStudioModal business={activeBusiness} userId={activeUser.id} />
       {/* ===== header ===== */}
       <header className="relative z-40 shrink-0 border-b border-border/70 bg-card/80 backdrop-blur-md">
         <div className="mx-auto flex h-14 w-full max-w-none items-center gap-2 px-3 sm:px-4">
@@ -220,17 +245,56 @@ export function AppShell() {
 
           <div className="flex-1" />
 
-          {/* بحث سريع — نفس البحث بيشتغل من أي شاشة (⌘K كمان) */}
+          {/* Plugin Harness & Concurrent Background Tasks trigger */}
           <Button
             variant="outline"
-            onClick={openCommandPalette}
-            className="h-9 gap-2 rounded-full px-3 text-xs text-muted-foreground"
-            aria-label="بحث سريع في كل حاجة"
-            title="بحث سريع (⌘K)"
+            size="sm"
+            onClick={() => setPluginStudioOpen(true, 'plugins')}
+            className="press h-9 gap-1.5 rounded-lg px-2.5 text-xs font-semibold text-primary border-primary/25 bg-primary/5 hover:bg-primary/10"
+            title="منصة البلاجنز الذكية والمهام الخلفية المتوازية"
           >
-            <Search className="size-3.5" aria-hidden />
-            <span className="hidden sm:inline">بحث سريع</span>
-            <span className="num hidden rounded bg-muted px-1.5 py-0.5 text-[10px] md:inline">⌘K</span>
+            <Cpu className="size-3.5 text-primary" />
+            <span className="hidden lg:inline">البلاجنز والمهام المتوازية</span>
+          </Button>
+
+          {/* Superpower Command Palette trigger */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setCommandPaletteOpen(true)}
+            className="press h-9 gap-1.5 rounded-lg px-3 text-xs font-medium text-muted-foreground hover:text-foreground"
+            title="لوحة أوامر وكيل السريعة (Ctrl+K)"
+          >
+            <Command className="size-3.5 text-primary" />
+            <span className="hidden md:inline">لوحة الأوامر</span>
+            <kbd className="hidden sm:inline-block rounded bg-secondary px-1.5 py-0.5 font-mono text-[10px]">⌘K</kbd>
+          </Button>
+
+          {/* Live Multimodal Onboarding Studio trigger */}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              sfx.playPop(580, 0.03)
+              reopenOnboarding()
+            }}
+            className="press h-9 gap-1.5 rounded-lg px-2.5 text-xs font-semibold text-wakil-amber hover:bg-wakil-amber/10"
+            title="جلسة التأسيس الحية (كاميرا مباشر + كشكول + صوت)"
+          >
+            <Camera className="size-3.5" />
+            <span className="hidden md:inline">جلسة التأسيس الحية</span>
+          </Button>
+
+          {/* Dynamic Business Builder trigger */}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setBusinessBuilderOpen(true)}
+            className="press h-9 gap-1 rounded-lg px-2.5 text-xs font-semibold text-primary hover:bg-primary/10"
+            title="إنشاء نشاط تجاري جديد"
+          >
+            <PlusCircle className="size-3.5" />
+            <span className="hidden sm:inline">نشاط جديد</span>
           </Button>
 
           {/* ذاكرة وكيل — mobile shortcut (the bottom bar stays 5 tabs) */}
@@ -250,6 +314,25 @@ export function AppShell() {
 
           {/* notifications — shared bell (portal popover) */}
           <NotificationBell alerts={alerts} onNavigate={setView} className="size-10" />
+
+          {/* sound effects mute/unmute toggle */}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-10 rounded-full transition-transform active:scale-90"
+            aria-label={soundEnabled ? 'كتم المؤثرات الصوتية' : 'تفعيل المؤثرات الصوتية'}
+            title={soundEnabled ? 'كتم المؤثرات الصوتية' : 'تفعيل المؤثرات الصوتية'}
+            onClick={() => {
+              toggleSound()
+              sfx.setEnabled(!soundEnabled)
+            }}
+          >
+            {soundEnabled ? (
+              <Volume2 className="size-4.5 text-wakil-amber" />
+            ) : (
+              <VolumeX className="size-4.5 text-muted-foreground" />
+            )}
+          </Button>
 
           {/* dark mode */}
           <Button
@@ -274,7 +357,7 @@ export function AppShell() {
         {/* desktop nav — active pill slides between views */}
         <nav
           aria-label="التنقل الرئيسي"
-          className="scroll-warm mx-auto hidden w-full max-w-none gap-1 overflow-x-auto px-3 pb-2 sm:flex sm:px-4 lg:hidden"
+          className="scroll-warm mx-auto hidden w-full max-w-none gap-1 overflow-x-auto px-3 pb-2 sm:flex sm:px-4"
         >
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon
@@ -306,53 +389,9 @@ export function AppShell() {
         </nav>
       </header>
 
-      {/* ===== workspace: desktop rail + the scrolling screen ===== */}
-      <div className="flex min-h-0 w-full flex-1 overflow-hidden">
-        {/* Desktop rail — a laptop screen has width; a row of tabs wastes the
-            left edge and hides the product's structure. Hidden below lg, where
-            the header tabs + the bottom bar already do this job. */}
-        <aside
-          aria-label="التنقل الجانبي"
-          className="hidden w-56 shrink-0 flex-col border-e border-border/70 bg-gradient-to-b from-card/70 via-card/40 to-background lg:flex xl:w-60"
-        >
-          <nav className="flex flex-col gap-0.5 p-2.5 pt-3">
-            {NAV_ITEMS.map((item) => {
-              const Icon = item.icon
-              const active = view === item.key
-              return (
-                <button
-                  key={item.key}
-                  onClick={() => setView(item.key)}
-                  aria-current={active ? 'page' : undefined}
-                  className={`press focus-warm group relative flex h-11 items-center gap-3 rounded-lg px-3 text-sm font-medium transition-colors ${
-                    active
-                      ? 'bg-primary/10 text-primary'
-                      : 'text-muted-foreground hover:bg-accent/70 hover:text-accent-foreground'
-                  }`}
-                >
-                  {active && (
-                    <motion.span
-                      layoutId="rail-active"
-                      transition={{ type: 'spring', stiffness: 420, damping: 36 }}
-                      className="absolute inset-y-1.5 start-0 w-1 rounded-full bg-primary"
-                      aria-hidden
-                    />
-                  )}
-                  <Icon className={`size-4.5 shrink-0 ${active ? 'text-primary' : ''}`} aria-hidden />
-                  <span className="truncate">{VIEW_LABELS[item.key]}</span>
-                </button>
-              )
-            })}
-          </nav>
-          <div className="mt-auto space-y-2 p-4">
-            <p className="text-[11px] leading-relaxed text-muted-foreground">
-              وكيل — مساعد شغلك اليومي. كل عملية بتتحقق قبل ما تتسجل.
-            </p>
-          </div>
-        </aside>
-
-        <main className="min-h-0 w-full flex-1 overflow-hidden">
-          <div className="scroll-warm h-full overflow-y-auto overflow-x-clip px-3 pb-24 pt-4 sm:px-0 sm:pb-10">
+      {/* ===== main — other views scroll inside ===== */}
+      <main className="mx-auto min-h-0 w-full max-w-none flex-1 overflow-hidden">
+        <div className="scroll-warm h-full overflow-y-auto overflow-x-clip px-3 pb-24 pt-4 sm:px-0 sm:pb-10">
           {view === 'today' && <TodayView businessId={activeBusiness.id} userId={activeUser.id} onNavigate={setView} />}
           {view === 'inventory' && <InventoryView businessId={activeBusiness.id} userId={activeUser.id} onNavigate={setView} />}
           {view === 'journal' && <JournalView businessId={activeBusiness.id} userId={activeUser.id} onNavigate={setView} />}
@@ -361,12 +400,11 @@ export function AppShell() {
           {view === 'reports' && <ReportsView businessId={activeBusiness.id} userId={activeUser.id} businessName={activeBusiness.name} />}
           {view === 'memory' && <MemoryView businessId={activeBusiness.id} userId={activeUser.id} onNavigate={setView} />}
           {view === 'settings' && <SettingsView businessId={activeBusiness.id} userId={activeUser.id} onNavigate={setView} />}
-            <p className="hidden pt-8 text-center text-[11px] text-muted-foreground sm:block lg:hidden">
-              وكيل — مساعد شغلك اليومي · كل عملية بتتحقق قبل ما تتسجل
-            </p>
-          </div>
-        </main>
-      </div>
+          <p className="hidden pt-8 text-center text-[11px] text-muted-foreground sm:block">
+            وكيل — مساعد شغلك اليومي · كل عملية بتتحقق قبل ما تتسجل
+          </p>
+        </div>
+      </main>
 
       {/* ===== footer (always pinned bottom via h-dvh flex) ===== */}
       <footer className="glass-strong shrink-0 border-t border-border/60 pb-[max(0.25rem,env(safe-area-inset-bottom))] sm:hidden">
