@@ -6,6 +6,7 @@
 //
 //   bun scripts/accept-ahmed.ts                 # supermarket owner (default)
 //   bun scripts/accept-ahmed.ts --url http://localhost:3000
+//   bun scripts/accept-ahmed.ts --keep          # keep the customer it created
 //
 // Every assertion is checked against what the API returned — never against logs.
 export {}
@@ -94,6 +95,38 @@ if (draft?.opId) {
 const back = await turn(`${partyName} عليه كام؟`)
 check(`4) السجل اتغيّر — «${partyName} عليه كام؟» بيرجّع ٤٥٠`, digits(back.reply).includes('450'), back.reply)
 check('4b) وبيفتكر تاريخ المديونية في الكارت', JSON.stringify(back.cards).includes('أكتوبر') || JSON.stringify(back.cards).includes('افتتاحي'), JSON.stringify(back.cards).slice(0, 240))
+
+// ---- 5) put the demo back the way it was -------------------------------
+// The acceptance run proves the ledger CAN change; leaving «مصطفى الجزار 8598»
+// behind every run is how a demo ends up with six fake debtors and an inflated
+// receivables number. Cleanup is part of the test. `--keep` opts out.
+if (!args.includes('--keep')) {
+  process.env.WAKIL_SCHEDULER ||= 'off'
+  try {
+    const { db } = await import('../src/lib/db')
+    // The agent rightfully normalises Arabic spelling (مصطفى → مصطفي), so an
+    // exact string match would miss the row it just created and leak it.
+    const norm = (x: string) => x.replace(/[ىی]/g, 'ي').replace(/\s+/g, ' ').trim()
+    const customer = (await db.customer.findMany({ where: { businessId: BIZ } })).find(
+      (c) => norm(c.name) === norm(partyName),
+    )
+    if (customer) {
+      const ops = await db.operation.findMany({
+        where: { businessId: BIZ, type: 'customer_add' },
+        select: { id: true, ref: true, payload: true },
+      })
+      const mine = ops.filter((o) => norm(o.payload).includes(norm(partyName)))
+      const refs = mine.map((o) => o.ref).filter((r): r is string => !!r)
+      if (refs.length > 0) await db.auditEvent.deleteMany({ where: { ref: { in: refs } } })
+      if (mine.length > 0) await db.operation.deleteMany({ where: { id: { in: mine.map((o) => o.id) } } })
+      await db.customer.delete({ where: { id: customer.id } })
+      console.log(`🧹 «${partyName}» اتمسح بعد الاختبار (الليدجر رجع زي ما كان)`)
+    }
+  } catch (e) {
+    // Cleanup must never turn a passing acceptance run into a failing one.
+    console.log(`⚠️ التنضيف مااتعملش: ${e instanceof Error ? e.message : String(e)}`)
+  }
+}
 
 console.log(`${'─'.repeat(70)}\nالنتيجة: ${pass} نجح · ${fail} فشل\n`)
 process.exit(fail === 0 ? 0 : 1)
