@@ -436,7 +436,7 @@ export function SectionCard({
  * screen on a 27" monitor and still breathes on a phone, and no screen can drift
  * out of alignment with the others.
  */
-export const PAGE = 'mx-auto w-full max-w-[1800px] space-y-4 px-3 pb-10 pt-2 sm:space-y-5 sm:px-6 xl:px-10'
+export const PAGE = 'mx-auto w-full max-w-[1800px] space-y-4 px-3 pb-10 pt-2 sm:space-y-5 sm:px-6 xl:space-y-6 xl:px-10'
 export const PAGE_PLAIN = 'mx-auto w-full max-w-[1800px] px-3 pb-10 pt-2 sm:px-6 xl:px-10'
 
 export function ViewHeader({
