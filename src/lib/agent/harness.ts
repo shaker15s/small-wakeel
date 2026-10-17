@@ -504,7 +504,10 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
   }
   if (/(مديون|اللي ليا|تحصيلات|مين عليها|عليها فلوس|عليهم فلوس|العملاء)/.test(s)) return { intent: 'read', tool: 'list_receivables', fields: {} }
   if (/(اللي علينا|للمورد|الموردين|مستحق)/.test(s)) return { intent: 'read', tool: 'list_payables', fields: {} }
-  if (/(ملخص|كويس اليوم|حال اليوم|عملت ايه النهارده)/.test(s)) return { intent: 'read', tool: 'get_daily_summary', fields: {} }
+  // «النهارده عملت ايه؟» is the same question in a different word order — the
+  // owner's first sentence of the day, and it used to fall through to chat.
+  if (/(ملخص|كويس اليوم|حال اليوم|عملت\s*ايه|ايه\s*اللي\s*عملته|اخبار\s*اليوم)/.test(s))
+    return { intent: 'read', tool: 'get_daily_summary', fields: {} }
   // ---- R28 superpowers: money & future questions (deterministic, offline-safe)
   // «بربح كام؟ / الهامش؟ / إيه اللي مش مربح؟»
   if (/(بربح|بكسب|مكسب|ربح|هامش|مربح|بيكسب)/.test(s) && !/(بعت|بيع|شرا|اشتري)/.test(s)) {
@@ -3336,7 +3339,45 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     const r = ruleBasedIntent(text, business.type)
     return r.intent === 'read' && r.tool === 'get_period_totals' ? r : null
   })()
-  const brainTurn = arithmeticRule ? null : await runBrainTurn()
+  /**
+   * R35 — a question is a question.
+   *
+   * Live R31: «عندي كام في الخزنة؟» and «مين اللي عضويته قربت تخلص؟» sometimes
+   * reached the model, which picked a WRITE tool and drafted an operation the
+   * owner never asked for. Writes are the expensive, irreversible direction, so
+   * a text that is (a) question-shaped, (b) carries no digits to record, and
+   * (c) has a deterministic READ answer is answered by that read — the model
+   * never gets to choose a write.
+   */
+  const readQuestionRule = (() => {
+    const r = ruleBasedIntent(text, business.type)
+    if (r.intent !== 'read' || !r.tool) return null
+    // Only LIST/SUMMARY reads are safe to force. A name lookup («عمر الشناوي
+    // عضويته باقي قد إيه؟» → get_item_stock «الشناوي عضويته») depends on clean
+    // name extraction; there the model's read is better than the ladder's.
+    const SAFE = new Set([
+      'get_daily_summary',
+      'get_cash_position',
+      'list_low_stock',
+      'list_expiring',
+      'list_receivables',
+      'list_payables',
+      'forecast_stockout',
+      'get_profit_margin',
+      'expense_breakdown',
+      'compare_periods',
+      'get_period_totals',
+    ])
+    if (!SAFE.has(r.tool)) return null
+    const hasDigits = /[0-9٠-٩۰-۹]/.test(text)
+    const t = normalizeAr(text).trim()
+    const questionShaped =
+      /[؟?]\s*$/.test(text) ||
+      /^(مين|من|ايه|إيه|كام|فين|امتى|إمتى|ازاي|إزاي|ليه|هل|بكام|قدايه|قد\s*ايه|عندي|عندى|معايا|فاضل|باقي)\b/.test(t)
+    return !hasDigits && questionShaped ? r : null
+  })()
+  const preRule = arithmeticRule ?? readQuestionRule
+  const brainTurn = preRule ? null : await runBrainTurn()
   if (brainTurn) return brainTurn
 
   // ---- PASS 1: Understand (LLM with deterministic multi-split + rule fallback) ----
@@ -3364,9 +3405,9 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   // A high-confidence arithmetic question is ONE intent by definition — the
   // model's multi-intent guess («اشتريت كام» + «الموردين») must not add a
   // second card nobody asked for.
-  if (arithmeticRule) {
+  if (preRule) {
     llmRaws = []
-    llmSingle = arithmeticRule
+    llmSingle = preRule
   }
   const detSubs = splitSubIntents(text, business.type)
 
@@ -3405,9 +3446,9 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     // sitting right there. Exception: opinion/advice questions stay chat — they
     // are conversations, not lookups.
     const looksConversational = /(رايك|رأيك|تنصحني|نصيحه|نصائح|اعمل ايه|ايه رايك|شايف ايه|استشاره|بتفكر في ايه)/.test(normalizeAr(text))
-    if (arithmeticRule) {
-      // the ladder's arithmetic read is the LAST word for this sentence shape
-      llmSingle = arithmeticRule
+    if (preRule) {
+      // the ladder's read is the LAST word for a question-shaped sentence
+      llmSingle = preRule
     } else if (ruleIsWrite && llmSingle?.intent !== 'write') {
       llmSingle = rule
     } else if (ruleIsRead && llmSingle?.intent === 'chat' && !looksConversational) {

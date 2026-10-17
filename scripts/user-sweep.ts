@@ -42,9 +42,11 @@ interface Scenario {
 
 const DAY: Scenario[] = [
   // ══ سوبر ماركت النور — خالد (صاحب محل): يوم شغل عادي ═══════════════════════
-  { business: 'supermarket', text: 'الخزنة فيها كام؟', want: 'cards', expect: /خزنة|رصيد/i, note: 'قراءة الخزنة' },
-  { business: 'supermarket', text: 'ايه اللي ناقص عندي؟', want: 'cards', expect: /ناقص|نواقص/i, note: 'النواقص' },
-  { business: 'supermarket', text: 'ملخص النهارده ايه؟', want: 'cards', expect: /مبيعات|تحصيل|مصروف/i, note: 'ملخص اليوم' },
+  { business: 'supermarket', text: 'الخزنة فيها كام؟', want: 'cards', expect: /خزنة|رصيد/i, forbid: /مسودة|WKL-/i, note: 'قراءة الخزنة — سؤال ممنوع يتحول لمسودة' },
+  { business: 'supermarket', text: 'ايه اللي ناقص عندي؟', want: 'cards', expect: /ناقص|نواقص/i, forbid: /مسودة|WKL-/i, note: 'النواقص — سؤال ممنوع يتحول لمسودة' },
+  { business: 'supermarket', text: 'ملخص النهارده ايه؟', want: 'cards', expect: /مبيعات|تحصيل|مصروف/i, forbid: /مسودة|WKL-/i, note: 'ملخص اليوم' },
+  { business: 'supermarket', text: 'النهارده عملت ايه؟', want: 'cards', expect: /مبيعات|تحصيل|مصروف|يوم/i, forbid: /مسودة|WKL-/i, note: 'بداية اليوم بصيغة تانية (R35)' },
+  { business: 'supermarket', text: 'مين عليه فلوس؟', want: 'cards', expect: /عليه|مستحق|مديون|مفيش/i, forbid: /مسودة|WKL-/i, note: 'سؤال مديونيات بلا أرقام — مش مسودة' },
   { business: 'supermarket', text: 'بعت ٣ كيلو جبنة رومي بـ٤٥٠ للكيلو لأم حسن', want: 'draft', expect: /جبنة|رومي/i, note: 'بيع بآجل لعميلة' },
   { business: 'supermarket', text: 'بعت كرتونة لبن جهينة لأحمد ودفع ١٠٠ بس', want: 'draft', expect: /لبن|باقي|آجل/i, note: 'بيع بدفعة جزئية' },
   { business: 'supermarket', text: 'حصلت ١٠٠ من أم حسن', want: 'draft', expect: /تحصيل|أم حسن/i, note: 'تحصيل من عميلة' },
@@ -90,7 +92,8 @@ const DAY: Scenario[] = [
   { business: 'gym', text: 'عمر الشناوي عضويته باقي قد إيه؟', want: 'cards', expect: /عمر|اشتراك|فاضل/i, note: 'حالة عضو' },
   { business: 'gym', text: 'اشتراك عمر الشناوي شهر', want: 'draft', expect: /عمر|اشتراك/i, note: 'تجديد اشتراك' },
   { business: 'gym', text: 'سجل حضور عمر الشناوي النهارده', want: 'draft', expect: /حضور|عمر/i, note: 'تسجيل حضور' },
-  { business: 'gym', text: 'كريم عادل عليه كام؟', want: 'cards', expect: /كريم/i, note: 'مديونية عضو' },
+  { business: 'gym', text: 'كريم عادل عليه كام؟', want: 'cards', expect: /كريم/i, forbid: /مسودة|WKL-/i, note: 'مديونية عضو' },
+  { business: 'gym', text: 'مين اللي عضويته قربت تخلص؟', want: 'cards', expect: /عضوي|اشتراك|مفيش/i, forbid: /مسودة|WKL-/i, note: 'قربت تخلص — سؤال مش تجديد' },
 ]
 
 interface CardBrief {
