@@ -161,9 +161,18 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
 
   // carry the provider name so two providers exposing the same model label
   // (e.g. مزوّد تجريبي + مزوّد الاختبار → وكيل خفيف ×2) stay distinguishable
+  // نفس الموديل متعرّض من أكتر من مزوّد (مزوّد تجريبي + مزوّد الاختبار بيشاوروا
+  // على نفس الـremoteId) — القايمة كانت بتعرضه مرتين وتخلي الاختيار ملتبس.
+  // القرار: الموديل يظهر مرة واحدة (أول مزوّد مفعّل)، واسم المزوّد يفضل ظاهر.
+  const seenRemote = new Set<string>()
   const enabledExternal = (providersData?.providers ?? [])
     .flatMap((p) => p.models.map((m) => ({ ...m, providerName: p.name })))
     .filter((m) => m.enabled)
+    .filter((m) => {
+      if (seenRemote.has(m.remoteId)) return false
+      seenRemote.add(m.remoteId)
+      return true
+    })
 
   // ---- notifications (same query key as AppShell → shared cache, no extra fetch) ----
   const { data: overview } = useQuery({

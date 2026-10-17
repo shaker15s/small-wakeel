@@ -13,6 +13,7 @@ const BASE_RISK: Record<OpType, Risk> = {
   collection: 'R2',
   payment: 'R2',
   stock_adjustment: 'R3',
+  price_change: 'R2',
   membership: 'R2',
   attendance: 'R1',
   // Creating a party with an OPENING BALANCE changes receivables/payables — it
@@ -44,6 +45,7 @@ const DRAFT_ALLOWED: Record<string, string[]> = {
   collection: ['owner', 'cashier', 'supervisor', 'reception'],
   payment: ['owner', 'supervisor'],
   stock_adjustment: ['owner', 'supervisor'],
+  price_change: ['owner', 'supervisor'],
   membership: ['owner', 'supervisor', 'reception'],
   attendance: ['owner', 'supervisor', 'reception'],
   // front-desk roles add members/walk-in customers all day long

@@ -156,6 +156,7 @@ export const TYPE_AR: Record<string, string> = {
   attendance: 'حضور',
   customer_add: 'عميل جديد',
   supplier_add: 'مورد جديد',
+  price_change: 'تغيير سعر',
   reversal: 'عكس عملية',
 }
 export const STATUS_AR: Record<string, string> = {
@@ -854,14 +855,39 @@ export async function runReadTool(
 
     case 'search_catalog':
     case 'get_item_stock': {
-      const query = String(args.query ?? args.name ?? '')
+      const query = String(args.query ?? args.name ?? '').trim()
       const items = await db.item.findMany({ where: { businessId }, orderBy: { name: 'asc' } })
-      const matched = query
-        ? items.filter((it) => {
-            const haystack = `${it.name} ${it.aliases}`.toLowerCase()
-            return haystack.includes(query.toLowerCase()) || query.includes(it.name.toLowerCase())
-          })
+      // «بكام الزيت؟» must find «زيت عافية 800 مل». A raw `includes` missed it:
+      // the owner says the material (زيت) with the definite article, the catalog
+      // stores it inside a brand + size name. Match token-by-token after Arabic
+      // normalization, drop «ال», and rank by how much of the query matched.
+      const stripAl = (w: string) => (w.length > 3 && w.startsWith('ال') ? w.slice(2) : w)
+      const tokens = (x: string) =>
+        normalizeAr(x)
+          .split(/[^0-9a-z\u0600-\u06ff]+/)
+          .map(stripAl)
+          .filter((w) => w.length >= 2)
+      const q = normalizeAr(query)
+      const qTokens = query ? tokens(query) : []
+      const scored = query
+        ? items
+            .map((it) => {
+              const hay = normalizeAr(`${it.name} ${it.aliases}`)
+              const hayTokens = tokens(`${it.name} ${it.aliases}`)
+              if (hay.includes(q) || q.includes(normalizeAr(it.name))) return { it, score: 1000 }
+              let score = 0
+              for (const t of qTokens) {
+                const hit = hayTokens.some((h) => h.includes(t) || t.includes(h))
+                if (hit) score += t.length
+              }
+              return { it, score }
+            })
+            .filter((x) => x.score > 0)
+            .sort((a, b) => b.score - a.score || a.it.name.localeCompare(b.it.name))
+            .slice(0, 12)
+            .map((x) => x.it)
         : items.slice(0, 8)
+      const matched = scored
       return [
         {
           kind: 'table',

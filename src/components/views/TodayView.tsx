@@ -250,8 +250,11 @@ export default function TodayView({ businessId, userId, onNavigate }: ViewProps)
           />
           <KpiCard
             index={2}
-            label="عمليات اليوم"
-            value={arNum(data.today.opsCount)}
+            // «عمليات اليوم» كان بيعدّ المحاولات الملغية كمان (٤١ «عملية» في
+            // يوم مفيهوش ولا عملية مكتملة). الرقم اللي يهم صاحب الشغل هو
+            // الشغل اللي خلص فعلاً — والملغي بيبان في السطر اللي تحت.
+            label="عمليات مكتملة"
+            value={arNum(data.today.doneCount)}
             icon={Activity}
             tone="navy"
           />
@@ -276,7 +279,10 @@ export default function TodayView({ businessId, userId, onNavigate }: ViewProps)
           {pendingOps.length > 0 ? (
             <>النهاردة لسه مفيش عمليات مكتملة — عندك {arNum(pendingOps.length)} مسودة مستنية قرارك.</>
           ) : data.recentOps[0] && isTodayCairo(data.recentOps[0].createdAt) ? (
-            <>النهاردة لسه مفيش عمليات مكتملة — آخر محاولة كانت {arAgo(data.recentOps[0].createdAt)}.</>
+            <>
+              النهاردة لسه مفيش عمليات مكتملة — آخر محاولة كانت {arAgo(data.recentOps[0].createdAt)}
+              {/^(CANCELLED|FAILED_SAFE|OUTCOME_UNKNOWN)$/.test(data.recentOps[0].status) ? ' وماوصلتش للحسابات' : ''}.
+            </>
           ) : (
             <>النهاردة لسه مفيش حركة — آخر حركة كانت {arAgo(data.recentOps[0]?.createdAt ?? '')}.</>
           )}

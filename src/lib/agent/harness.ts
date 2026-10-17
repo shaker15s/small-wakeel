@@ -451,6 +451,18 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
   if (/(مخزون|استوك)/.test(s) && /(عدل|ظبط|خلي|زود|نقص|صحح|سوي|يبقى|تسويه|اضبط)/.test(s)) {
     return { intent: 'write', opType: 'stock_adjustment', fields: {} }
   }
+  // ---- R39: a catalog PRICE CHANGE is a WRITE («غيّر سعر الكيس لـ٤٠») — it must
+  // sit BEFORE the price-query rule, or the catalog lookup answers instead.
+  {
+    const pc = parsePriceChange(text)
+    if (pc) {
+      return {
+        intent: 'write',
+        opType: 'price_change',
+        fields: { itemName: pc.name, newPrice: pc.pounds, priceMode: pc.mode, priceSign: pc.sign },
+      }
+    }
+  }
   if (/(وضع|رصيد|حاله) الخزنه|الخزنه|كاش/.test(s)) return { intent: 'read', tool: 'get_cash_position', fields: {} }
   // ---- R36: the weekly ledger questions, answered deterministically -------
   // They must sit BEFORE the generic «مخزون/ناقص» rule: «المخزون ده مكلّفني
@@ -570,6 +582,7 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
       .replace(/^.*?(?:سعر|بكام)\s*/, '')
       .replace(/[؟?].*$/, '')
       .replace(/\s*(?:سعر|بكام|ايه|هو)\s*/g, ' ')
+      .replace(/\s*(?:كام|دلوقتي|بقي|بعد اذنك|لو سمحت|من فضلك)\s*$/g, '')
       .replace(/^\s*(?:في|من)\s*/, '')
       .trim()
     if (q.length >= 2) return { intent: 'read', tool: 'search_catalog', fields: { query: q.slice(0, 40) } }
@@ -661,7 +674,7 @@ interface RawIntentJson {
 const VALID_OP_TYPES: ReadonlySet<string> = new Set([
   'sale', 'purchase', 'expense', 'collection', 'payment', 'stock_adjustment', 'membership', 'attendance', 'reversal',
   // R29: the owner grows the ledger by talking
-  'customer_add', 'supplier_add',
+  'customer_add', 'supplier_add', 'price_change',
 ])
 
 /** Parse the LLM JSON contract: single intent OR the "intents" array (multi). */
@@ -1204,6 +1217,48 @@ function parsePartyAdd(rawNorm: string): { name: string; balance?: number; phone
     ...(since ? { since: since.toISOString() } : {}),
     kind: /مورد/.test(norm) ? 'supplier' : 'customer',
   }
+}
+
+/**
+ * R39 — «غيّر سعر الكيس لـ٤٠» / «خلي سعر البيضة ٥» / «زود سعر الكمون ١٠».
+ *
+ * The price-query rule («بكام المسك؟») must never swallow a price CHANGE: the
+ * owner said a number with a change verb, which is a write that needs approval.
+ * Two shapes are understood:
+ *   • absolute — «خلي/غيّر/عدل سعر X = ٤٠» (the number IS the new price)
+ *   • delta    — «زود/رفع/نزل/خفض سعر X ٥» (the number is added/subtracted)
+ * Anything else (no number, past tense «غيرت», a question word) is not a
+ * command and falls through to the read path untouched.
+ */
+function parsePriceChange(raw: string): { pounds: number; mode: 'absolute' | 'delta'; sign: 1 | -1; name: string } | null {
+  const t = toWesternDigits(raw).replace(/[؟?].*$/, '').replace(/\s+/g, ' ').trim()
+  const norm = normalizeAr(t)
+  // A command must be imperative at the head of the sentence — «غيرت سعر
+  // الكمون امبارح» is a statement about the past, not an instruction.
+  const imperative = /^(?:لو سمحت |من فضلك |ممكن |عايز |عاوز |عايزك |عاوزك )?(?:غير|غيرلي|غير لي|اغير|اعدل|عدل|ظبط|اظبط|اضبط|خلي|اخلي|خليه|خليها|حدد|وصل|نزل|انزل|رفع|ارفع|زود|ازود|خفض|اخفض|قلل|اقلل) (?:لي )?(?:سعر|السعر|سعره|سعرها)/.test(norm)
+  const setForm = /(?:^| )سعر .{1,60} (?:يبقي|يبقا|بقى) \d/.test(norm)
+  if (!imperative && !setForm) return null
+  if (/(?<!^)(غيرت|عدلت|ظبطت|نزلت|رفعت|زودت|خفضت|حددت)/.test(norm)) return null
+  if (/(كام|بكام|رايك|ليه|ازاي|امتي|هو ايه|معناها)/.test(norm)) return null
+  const nums = [...norm.matchAll(/(\d+(?:\.\d+)?)/g)]
+  if (nums.length === 0) return null
+  // Prefer the number that follows a "to" cue; else the last number said.
+  const toCue = norm.match(/(?:^| )(?:ل|ب|=|يبقي|يبقا|بقى|بسعر) ?(\d+(?:\.\d+)?)/)
+  const pounds = Number(toCue ? toCue[1] : nums[nums.length - 1][1])
+  if (!(pounds > 0)) return null
+  const relative = /(?:^| )(?:زود|ازود|رفع|ارفع|نزل|انزل|خفض|اخفض|قلل|اقلل) /.test(norm)
+  const mode: 'absolute' | 'delta' = relative && !toCue ? 'delta' : 'absolute'
+  const sign: 1 | -1 = /(?:^| )(?:نزل|انزل|خفض|اخفض|قلل|اقلل) /.test(norm) ? -1 : 1
+  const stop = new Set(['ل', 'ب', '=', 'يبقي', 'يبقا', 'بقى', 'السعر', 'سعر', 'سعره', 'سعرها', 'بسعر', 'جنيه', 'جنية', 'جنيهات', 'ج', 'ج.م', 'قروش', 'قرش', 'دلوقتي', 'النهارده', 'كمان', 'لو', 'سمحت', 'من', 'فضلك', 'علي', 'الي', 'يكون', 'يبقي', 'بقي', 'خالص', 'بس'])
+  const name = norm
+    .replace(/(?:غير|غيرلي|اغير|اعدل|عدل|ظبط|اظبط|اضبط|خلي|اخلي|خليه|خليها|حدد|وصل|نزل|انزل|رفع|ارفع|زود|ازود|خفض|اخفض|قلل|اقلل|لو سمحت|من فضلك|ممكن|عايز|عاوز|عايزك|عاوزك)/g, ' ')
+    .replace(/(?:سعر|السعر|سعره|سعرها|بسعر)/g, ' ')
+    .replace(/\S*\d\S*/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length >= 2 && !stop.has(w))
+    .join(' ')
+    .trim()
+  return { pounds, mode, sign, name }
 }
 
 function matchReverseSellAmount(normWestern: string): number | null {
@@ -1778,6 +1833,42 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
       return { ok: true, opType: type, payload, summary, card }
     }
 
+    case 'price_change': {
+      const rawItemName = String(f.itemName ?? f.name ?? '')
+      const item = matchEntity(rawItemName || text, items)?.entity ?? null
+      if (!item) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'الصنف', failMessage: 'سعر أنهي صنف؟' }
+      // Deterministic parse fills what the model missed (and wins when the
+      // model only echoed a bare number).
+      const parsed = parsePriceChange(text)
+      const pounds =
+        typeof f.newPrice === 'number' && f.newPrice > 0
+          ? f.newPrice
+          : typeof f.price === 'number' && f.price > 0
+            ? f.price
+            : parsed?.pounds ?? null
+      if (pounds == null || !(pounds > 0)) {
+        return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'السعر الجديد', failMessage: `سعر ${item.name} دلوقتي ${egp(item.sellPrice)} — يبقى كام؟` }
+      }
+      const mode = String(f.priceMode ?? parsed?.mode ?? 'absolute')
+      const sign = Number(f.priceSign ?? parsed?.sign ?? 1) < 0 ? -1 : 1
+      const newPrice = mode === 'delta' ? item.sellPrice + sign * Math.round(pounds * 100) : Math.round(pounds * 100)
+      if (newPrice <= 0) {
+        return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'السعر الجديد', failMessage: `الحساب ده هيخلي سعر ${item.name} بالسالب — السعر دلوقتي ${egp(item.sellPrice)}` }
+      }
+      const delta = newPrice - item.sellPrice
+      const pct = item.sellPrice > 0 ? Math.round((delta / item.sellPrice) * 1000) / 10 : null
+      const payload = { itemId: item.id, itemName: item.name, newPrice, field: 'sellPrice' }
+      const risk = computeRisk(type)
+      const summary = `سعر ${item.name}: ${egp(item.sellPrice)} ← ${egp(newPrice)}`
+      const card = fieldsToCard('', type, risk, summary, [
+        { label: 'الصنف', value: item.name },
+        { label: 'السعر الحالي', value: egp(item.sellPrice) },
+        { label: 'السعر الجديد', value: egp(newPrice) },
+        ...(pct != null ? [{ label: 'التغيير', value: `${delta >= 0 ? '+' : ''}${egp(delta)}${pct !== 0 ? ` (${pct >= 0 ? '+' : ''}${pct}%)` : ''}` }] : []),
+      ], [{ label: 'هامش الصنف', value: `${egp(newPrice - item.costPrice)} للوحدة بعد التغيير`, tone: newPrice - item.costPrice >= 0 ? 'good' : 'bad' }], RISK_META[risk].hint)
+      return { ok: true, opType: type, payload, summary, card }
+    }
+
     // ---- R29: the owner GROWS the ledger by talking («ضيف أحمد كمان») ----
     case 'customer_add':
     case 'supplier_add': {
@@ -2117,6 +2208,19 @@ const BRAIN_WRITE_TOOLS: Record<
   add_supplier: {
     opType: 'supplier_add',
     fields: (a) => ({ name: brainArgStr(a, 'name', 'supplierName', 'supplier', 'vendor'), phone: brainArgStr(a, 'phone', 'mobile'), balance: brainArgNum(a, 'balance', 'amount', 'debt') }),
+  },
+  // R39: the model may draft a catalog price change as a tool too.
+  set_price: {
+    opType: 'price_change',
+    fields: (a) => ({ itemName: brainArgStr(a, 'item', 'itemName', 'name'), newPrice: brainArgNum(a, 'price', 'newPrice', 'amount', 'value') }),
+  },
+  update_price: {
+    opType: 'price_change',
+    fields: (a) => ({ itemName: brainArgStr(a, 'item', 'itemName', 'name'), newPrice: brainArgNum(a, 'price', 'newPrice', 'amount', 'value') }),
+  },
+  record_price_change: {
+    opType: 'price_change',
+    fields: (a) => ({ itemName: brainArgStr(a, 'item', 'itemName', 'name'), newPrice: brainArgNum(a, 'price', 'newPrice', 'amount', 'value') }),
   },
   reverse_operation: { opType: 'reversal', fields: (a) => ({ ref: brainArgStr(a, 'ref', 'reference', 'opRef', 'id') }) },
 }
@@ -3407,7 +3511,19 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       /^(مين|من|ايه|إيه|كام|فين|امتى|إمتى|ازاي|إزاي|ليه|هل|بكام|قدايه|قد\s*ايه|عندي|عندى|معايا|فاضل|باقي)\b/.test(t)
     return !hasDigits && questionShaped ? r : null
   })()
-  const preRule = arithmeticRule ?? readQuestionRule
+  /**
+   * R39 — an explicit PRICE CHANGE is a write, and writes beat the brain.
+   *
+   * Live: «غيّر سعر الزيت لـ٧٠» reached the brain, which saw the word «سعر» and
+   * answered with a catalog SEARCH — the owner's instruction became a lookup.
+   * A deterministic price command is unambiguous, so it skips both the brain
+   * and the model and goes straight to the approval draft.
+   */
+  const priceWriteRule = (() => {
+    const r = ruleBasedIntent(text, business.type)
+    return r.intent === 'write' && r.opType === 'price_change' ? r : null
+  })()
+  const preRule = priceWriteRule ?? arithmeticRule ?? readQuestionRule
   const brainTurn = preRule ? null : await runBrainTurn()
   if (brainTurn) return brainTurn
 

@@ -418,6 +418,37 @@ const EXECUTORS: Record<OpType, Executor> = {
     }
   },
 
+  async price_change(businessId, ref, p) {
+    const itemId = String(p.itemId ?? '')
+    const newPrice = Math.round(Number(p.newPrice ?? 0))
+    const fieldName = String(p.field ?? 'sellPrice') === 'costPrice' ? 'costPrice' : 'sellPrice'
+    if (!itemId || newPrice <= 0) return { ok: false, checks: [], effects: [], failReason: 'محتاج الصنف والسعر الجديد' }
+    const item = await db.item.findFirst({ where: { id: itemId, businessId } })
+    if (!item) return { ok: false, checks: [], effects: [], failReason: 'الصنف مش موجود' }
+    const before = fieldName === 'costPrice' ? item.costPrice : item.sellPrice
+    if (before === newPrice) {
+      return {
+        ok: true,
+        checks: [{ label: 'السعر', expected: egp(newPrice), actual: egp(before), pass: true }],
+        effects: [{ label: `سعر ${item.name}`, value: 'مش متغيّر — كان كده بالفعل', tone: 'neutral' }],
+      }
+    }
+    await db.item.update({ where: { id: item.id }, data: { [fieldName]: newPrice } })
+    const after = fieldName === 'costPrice' ? (await db.item.findUniqueOrThrow({ where: { id: item.id } })).costPrice : (await db.item.findUniqueOrThrow({ where: { id: item.id } })).sellPrice
+    const checks = [{ label: 'السعر الجديد اتسجل', expected: egp(newPrice), actual: egp(after), pass: after === newPrice }]
+    return {
+      ok: checks.every((c) => c.pass),
+      checks,
+      effects: [
+        {
+          label: `${fieldName === 'costPrice' ? 'تكلفة' : 'سعر بيع'} ${item.name}`,
+          value: `${egp(before)} ← ${egp(after)}`,
+          tone: after > before ? 'good' : 'bad',
+        },
+      ],
+    }
+  },
+
   async membership(businessId, ref, p) {
     const customerId = p.customerId ? String(p.customerId) : null
     const name = String(p.customerName ?? '')
@@ -623,6 +654,13 @@ const EXECUTORS: Record<OpType, Executor> = {
         await db.cashEntry.create({ data: { businessId, direction: 'in', amount: Number(op.amount ?? 0), reason: `عكس سداد ${originalRef}`, ref } })
         break
       }
+      case 'price_change':
+        return {
+          ok: false,
+          checks: [],
+          effects: [],
+          failReason: 'تغيير السعر مش بيتعكس تلقائيًا — غيّره لسعره القديم من الشات لو محتاج',
+        }
       case 'customer_add':
       case 'supplier_add': {
         // Undo = delete the party, but only while nothing else references it.

@@ -51,6 +51,7 @@ export const TYPE_AR: Record<OpType, string> = {
   attendance: 'حضور',
   customer_add: 'عميل جديد',
   supplier_add: 'مورد جديد',
+  price_change: 'تغيير سعر',
   reversal: 'عكس عملية',
 }
 

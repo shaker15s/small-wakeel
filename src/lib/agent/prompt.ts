@@ -93,7 +93,7 @@ function writeToolsFor(businessType: string): string[] {
   const gym = businessType === 'gym'
   const tools = gym
     ? ['record_attendance', 'record_collection', 'record_expense', 'register_customer', 'register_member']
-    : ['adjust_stock', 'record_collection', 'record_expense', 'record_payment', 'record_purchase', 'record_sale', 'register_customer']
+    : ['adjust_stock', 'record_collection', 'record_expense', 'record_payment', 'record_purchase', 'record_sale', 'register_customer', 'set_price']
   return tools.sort()
 }
 
@@ -174,7 +174,7 @@ ${isGym ? '' : 'حساسة (R3): adjust_stock · reverse_operation'}${params.use
 {
   "intent": "write" | "read" | "chat",
   "tool": "اسم الأداة لو read أو write (اختياري لو chat)",
-  "opType": "sale|purchase|expense|collection|payment|stock_adjustment|membership|attendance|reversal — للكتابة",
+  "opType": "sale|purchase|expense|collection|payment|stock_adjustment|membership|attendance|price_change|reversal — للكتابة",
   "fields": {
     "itemName": "اسم الصنف زي ما المستخدم قاله (لو فيه)",
     "qty": 10,
@@ -187,6 +187,7 @@ ${isGym ? '' : 'حساسة (R3): adjust_stock · reverse_operation'}${params.use
     "plan": "اسم الخطة (للجيم)",
     "months": 1,
     "reason": "السبب (للتسوية/العكس)",
+    "price": 0,
     "ref": "رقم العملية (للعكس/الاستعلام)"
   },
   "question": "لو ناقص حاجة أساسية: سؤال واحد قصير يطلبها",

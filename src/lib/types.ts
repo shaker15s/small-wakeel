@@ -24,6 +24,8 @@ export type OpType =
   /** R29: master data the owner can create by talking — «ضيف أحمد وعليه ٥٠٠» */
   | 'customer_add'
   | 'supplier_add'
+  /** R39: «غيّر سعر الكيس لـ٤٠» — a catalog price change with approval */
+  | 'price_change'
   | 'reversal'
 
 export interface BusinessLite {
