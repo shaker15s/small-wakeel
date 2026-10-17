@@ -272,6 +272,11 @@ async function runTurn(businessId: string, userId: string, s: Scenario, conversa
     problems.push(`رد مصفّح على طلب واضح: «${trimmed.slice(0, 60)}»`)
   }
   if (s.forbid && s.forbid.test(trimmed)) problems.push(`الرد فيه حاجة ممنوعة: ${s.forbid}`)
+  // Question words are not names. This passed every gate for a whole round
+  // («ملقيتش عضو بالاسم «مين اللي»») because no scenario asserted on it.
+  if (/بالاسم «?(?:مين|ايه|إيه|اللي|كام|فين|من)\b/.test(trimmed)) {
+    problems.push(`كلمة سؤال اتفهمت كاسم: «${trimmed.slice(0, 60)}»`)
+  }
   if (s.expect) {
     const pool = `${trimmed} ${cards.map((c) => `${c.ref ?? ''} ${c.title}`).join(' ')}`
     if (!s.expect.test(pool)) problems.push(`المتوقع مش موجود: ${s.expect}`)

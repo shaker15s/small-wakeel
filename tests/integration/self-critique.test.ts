@@ -79,7 +79,10 @@ function saleText(
   opts: { price?: number; party?: string } = {},
 ) {
   const u = UNIT_AR[item.unit] ?? 'قطعة'
-  const price = opts.price ?? item.sellPrice
+  // `sellPrice` is piastres; the sentence is what the owner SAYS, so it carries
+  // pounds. (The old helper wrote «بـ14500 جنيه» — a real price of 14,500 EGP,
+  // which the audit rightly called an anomaly once unit prices were honoured.)
+  const price = (opts.price ?? item.sellPrice) / 100
   return `بعت ${qty} ${u} ${item.name} بـ${price} جنيه لل${u}${opts.party ? ` ${opts.party}` : ''}`
 }
 
@@ -149,7 +152,7 @@ describe('turn.selfCritique', () => {
       where: { businessId: business.id, name: { contains: 'جرام' }, stockQty: { gt: 20 } },
     })
     if (!item) return // seed without a size-in-name item: nothing to guard
-    const { cards } = await turn(`بعت 5 قطعة ${item.name} بـ${item.sellPrice} جنيه للقطعة`)
+    const { cards } = await turn(`بعت 5 قطعة ${item.name} بـ${item.sellPrice / 100} جنيه للقطعة`)
     expect(cards.length).toBeGreaterThan(0)
     const summary = String(cards[0].title ?? '') + JSON.stringify(cards[0].fields ?? [])
     // 5 pieces sold, never 400 (the printed package size)

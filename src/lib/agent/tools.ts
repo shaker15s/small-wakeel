@@ -68,6 +68,44 @@ export function isQuestionWord(name: string): boolean {
   return words.length > 0 && words.every((w) => QUESTION_WORDS.test(w))
 }
 
+/** العضويات اللي قربت تخلص — shared by list_expiring and a question-shaped
+ *  get_member_status («مين اللي عضويته قربت تخلص؟» is a LIST question, not a
+ *  lookup for a member literally called «مين اللي»). */
+async function gymExpiringCards(businessId: string): Promise<ResultCardDTO[]> {
+  const members = await db.customer.findMany({
+    where: { businessId, expiresAt: { not: null } },
+    orderBy: { expiresAt: 'asc' },
+  })
+  const soon = members
+    .map((m) => ({ m, days: Math.ceil(((m.expiresAt as Date).getTime() - Date.now()) / 86400000) }))
+    .filter((r) => r.days <= 30)
+  const expired = soon.filter((r) => r.days < 0)
+  return [
+    {
+      kind: 'table',
+      title: 'العضويات اللي قربت تخلص (30 يوم)',
+      columns: [
+        { key: 'name', label: 'العضو' },
+        { key: 'plan', label: 'الاشتراك' },
+        { key: 'expiry', label: 'بينتهي' },
+        { key: 'days', label: 'فاضل' },
+        { key: 'balance', label: 'عليه' },
+      ],
+      rows: soon.slice(0, 12).map(({ m, days }) => ({
+        name: m.name,
+        plan: m.plan ?? '—',
+        expiry: arDate(m.expiresAt as Date),
+        days: days < 0 ? `متأخر ${fmtQty(Math.abs(days))} يوم` : `${fmtQty(days)} يوم`,
+        balance: m.balance > 0 ? egp(m.balance) : '—',
+      })),
+      footer: [
+        { label: 'إجمالي', value: `${fmtQty(soon.length)} عضوية` },
+        { label: 'منتهية بالفعل', value: `${fmtQty(expired.length)}` },
+      ],
+    },
+  ]
+}
+
 function itemRow(it: Item): Record<string, string> {
   return {
     name: it.name,
@@ -246,40 +284,7 @@ export async function runReadTool(
       // wrong-tool class the owner notices immediately.
       const business = await db.business.findUnique({ where: { id: businessId }, select: { type: true } })
       const isGym = business?.type === 'gym'
-      if (isGym) {
-        const members = await db.customer.findMany({
-          where: { businessId, expiresAt: { not: null } },
-          orderBy: { expiresAt: 'asc' },
-        })
-        const soon = members
-          .map((m) => ({ m, days: Math.ceil(((m.expiresAt as Date).getTime() - Date.now()) / 86400000) }))
-          .filter((r) => r.days <= 30)
-        const expired = soon.filter((r) => r.days < 0)
-        return [
-          {
-            kind: 'table',
-            title: 'العضويات اللي قربت تخلص (30 يوم)',
-            columns: [
-              { key: 'name', label: 'العضو' },
-              { key: 'plan', label: 'الاشتراك' },
-              { key: 'expiry', label: 'بينتهي' },
-              { key: 'days', label: 'فاضل' },
-              { key: 'balance', label: 'عليه' },
-            ],
-            rows: soon.slice(0, 12).map(({ m, days }) => ({
-              name: m.name,
-              plan: m.plan ?? '—',
-              expiry: arDate(m.expiresAt as Date),
-              days: days < 0 ? `متأخر ${fmtQty(Math.abs(days))} يوم` : `${fmtQty(days)} يوم`,
-              balance: m.balance > 0 ? egp(m.balance) : '—',
-            })),
-            footer: [
-              { label: 'إجمالي', value: `${fmtQty(soon.length)} عضوية` },
-              { label: 'منتهية بالفعل', value: `${fmtQty(expired.length)}` },
-            ],
-          },
-        ]
-      }
+      if (isGym) return gymExpiringCards(businessId)
       const items = await db.item.findMany({
         where: { businessId, expiresAt: { not: null } },
         orderBy: { expiresAt: 'asc' },
@@ -402,7 +407,9 @@ export async function runReadTool(
       // («مين اللي عضويته قربت تخلص؟») is not a member name: it must fall to the
       // list, never to «ملقيتش عضو بالاسم «مين اللي»» (live R29).
       const flat = (x: string) => normalizeAr(x).replace(/\s+/g, ' ').trim()
-      const asked = isQuestionWord(name)
+      const asked = !name || isQuestionWord(name)
+      // A question word is the owner asking for a LIST. Answer the list.
+      if (asked) return gymExpiringCards(businessId)
       const strong = members.filter((m) => {
         if (!name || asked || !flat(m.name).includes(flat(name))) return false
         return flat(name).split(' ').filter(Boolean).length >= 2 || flat(name).length >= 6

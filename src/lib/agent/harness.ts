@@ -355,6 +355,22 @@ function buildIdentityReply(params: {
   return templates[Math.floor(Math.random() * templates.length)]
 }
 
+/**
+ * «بـ٤٥٠» / «ب ٩٠» / «بـ ٢٠٠ جنيه» → 450 / 90 / 200 EGP.
+ * The marker is a standalone «بـ» or «ب » followed by digits — «بعت» starts with
+ * ب+ع, so a verb can never look like a price.
+ */
+function extractStatedPrice(norm: string): number | null {
+  // normalizeAr strips the tatweel, so «بـ٢٠٠» arrives as «ب٢٠٠» — the digit
+  // must be allowed to follow ب directly (a verb like «بعت» never does).
+  const m =
+    norm.match(/(?:^|\s)ب\s*([٠-٩0-9]+(?:[.,][٠-٩0-9]+)?)/) ??
+    norm.match(/([٠-٩0-9]+(?:[.,][٠-٩0-9]+)?)\s*(?:جنيه|جنية|جنيهات|ج\.م)/)
+  if (!m) return null
+  const n = Number(toWesternDigits(m[1]).replace(',', '.'))
+  return Number.isFinite(n) && n > 0 ? n : null
+}
+
 // ---------------------------------------------------------------------------
 // Rule-based intent fallback (keeps the agent alive even with zero LLM)
 // ---------------------------------------------------------------------------
@@ -513,10 +529,19 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
     const mBefore = s.match(/(^|\s)([^\s،,؟?]+(?:\s+[^\s،,؟?]+)?)\s+(?:عضويته|اشتراكه|عضويته\s*باقي|عضويه|اشتراك)(\s|$)/)
     const mMember = s.match(/(?:عضويه|اشتراك)\s+([^ ،,؟?]+)/)
     const candidate = mBefore?.[2]?.trim() || mMember?.[1]
-    const name = candidate && !/^(اللي|التي|بتاع|دي|ده|الاشتراكات|باقي|قد|كام|فاضل|قربت|خلص|حاله|وضع)$/.test(candidate) ? candidate : ''
-    const isQuestion = /(باقي|قد ايه|متبقي|فاضل|تنتهي|خلص|حاله|وضع|اوضه)/.test(s)
+    const QUESTION = /^(مين|من|ايه|إيه|اللي|التي|بتاع|بتاعت|دي|ده|دول|هما|كل|أي|اي|كام|فاضل|قد|باقي|قربت|خلص|حاله|وضع)$/
+    const candidateWords = (candidate ?? '').split(/\s+/).filter(Boolean)
+    const isName = !!candidate && !QUESTION.test(candidate) && !candidateWords.every((w) => QUESTION.test(w))
+    const name = isName ? (candidate as string) : ''
+    const isQuestion = /(باقي|قد ايه|متبقي|فاضل|بتنتهي|تنتهي|هتنتهي|قربت|خلص|حاله|وضع|اوضه)/.test(s)
     if (name && (isQuestion || /عضويه/.test(s))) {
       return { intent: 'read', tool: 'get_member_status', fields: { name } }
+    }
+    // «مين اللي عضويته قربت تخلص؟» / «الاشتراكات اللي هتنتهي» — a LIST question.
+    // Without this the sentence fell through to the renewal WRITE and confused
+    // the owner (and, before the tool guard, to «ملقيتش عضو بالاسم «مين اللي»»).
+    if (!name && isQuestion && /(عضوي|اشتراك|عضويات)/.test(s)) {
+      return { intent: 'read', tool: 'list_expiring', fields: {} }
     }
   }
   // Word-boundary forms only: «اشتراك عمر شهرية» matches, but a QUESTION like
@@ -529,8 +554,17 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
   if (/(مصروف|صرفت)/.test(s)) return { intent: 'write', opType: 'expense', fields: { label: 'مصروف' } }
   // Sale FIRST so a partial payment («بع لبن لأحمد بس دفع ٢٠ بس») never looks
   // like a collection. «بع» is the Egyptian imperative — standalone word.
-  if (/(^| )(بعت|بيع|بع|خرج|سلفت)( |$)/.test(s)) return { intent: 'write', opType: 'sale', fields: {} }
-  if (/(^| )(اشتريت|شرا|جبت|دخلت)( |$)/.test(s)) return { intent: 'write', opType: 'purchase', fields: {} }
+  // The price the owner SAID is part of the intent, even when no model runs
+  // (offline ladder / provider down). «بعت كيلو جبنة بـ٢٠٠» must draft ٢٠٠,
+  // not silently charge the catalog's ١٤٥.
+  if (/(^| )(بعت|بيع|بع|خرج|سلفت)( |$)/.test(s)) {
+    const amount = extractStatedPrice(s)
+    return { intent: 'write', opType: 'sale', fields: amount != null ? { amount } : {} }
+  }
+  if (/(^| )(اشتريت|شرا|جبت|دخلت)( |$)/.test(s)) {
+    const amount = extractStatedPrice(s)
+    return { intent: 'write', opType: 'purchase', fields: amount != null ? { amount } : {} }
+  }
   // Collection: «تحصيل ١٠٠ من أحمد» / «حصلت ١٠٠ من أحمد» / «أحمد دفع ١٠٠»
   // NOTE: «خلص» must be word-initial — «تخلص صلاحيته» (expiry) must NEVER
   // fire a collection (caught by the expiring rule above instead).
@@ -1381,7 +1415,30 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
       const llmQty = typeof f.qty === 'number' && f.qty > 0 ? f.qty : null
       // reverse-sell candidate: an LLM qty equal to the money is the echo — drop it
       const qtySource = reverseAmountEgp != null && llmQty === reverseAmountEgp ? null : llmQty
-      const qty = qtySource ?? mentioned?.qty ?? textQ.qty ?? 1
+      // The owner's own number BEFORE the item name is the safest quantity
+      // source: prices («بـ٩٠») and paid clauses («دفع ١٠٠») come after the item,
+      // and a weak model happily answers qty=1 for «بعت ٢ لبن» (live R30).
+      // Partial names matter: the owner says «لبن كرتونة» while the catalog says
+      // «لبن كرتونة (جهينة)» — the boundary is the FIRST distinctive item word.
+      const itemTokens = normalizeAr(item.name)
+        .split(/\s+/)
+        .filter((w) => w.length >= 3 && !/^[()]+$/.test(w))
+      const firstItemAt = itemTokens
+        .map((t) => norm.indexOf(t))
+        .filter((i) => i > 0)
+        .sort((a, b) => a - b)[0]
+      const headQty = firstItemAt != null && firstItemAt > 1 ? parseQuantity(norm.slice(0, firstItemAt), null).qty : null
+      // Money numbers are not quantities. The live R30 bug: «بعت كرتونة لبن
+      // لأحمد ودفع ١٠٠ بس» became a sale of ١٠٠ boxes because the model echoed
+      // the paid amount into qty. Any qty candidate that equals a number sitting
+      // next to بـ/جنيه/دفع/سعر is rejected.
+      const moneyNums = new Set(
+        (toWesternDigits(norm).match(/(?:ب|بـ|جنيه|ج\.م|دفع|دفعت|مدفوع|سعر|بسعر)\s*([0-9]+(?:\.[0-9]+)?)/g) ?? [])
+          .map((m) => Number(m.replace(/[^0-9.]/g, '')))
+          .filter((n) => Number.isFinite(n)),
+      )
+      const cleanQty = (n: number | null | undefined) => (n != null && n > 0 && !moneyNums.has(n) ? n : null)
+      const qty = headQty ?? cleanQty(mentioned?.qty) ?? cleanQty(qtySource) ?? cleanQty(textQ.qty) ?? 1
       if (qty <= 0) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'الكمية', failMessage: 'الكمية قد إيه بالظبط؟' }
       // Unit: LLM → mention → text word → the item's OWN canonical unit (الافتراضي)
       const rawUnit = unitToCode(f.unit as string) ?? mentioned?.unit ?? unitToCode(textQ.unit) ?? item.unit
@@ -1410,13 +1467,25 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
       // fields.amount (EGP). His stated price wins over the catalog default
       // for a single-line sale (a real cashier knows his own price); the
       // catalog stays the fallback when he didn't say one.
-      const statedEgp =
+      // …but ONLY when he actually said a price. Live R30: «بعت ٢ لبن كرتونة
+      // لأم حسن» (no price at all) produced «بـ٢ ج.م» because the model mapped
+      // the QUANTITY into fields.amount and the override trusted it. A number
+      // with no price marker is a quantity/paid amount, never a unit price.
+      const priceCue = /(?:^|\s)ب(?:ـ)?\s*[\d٠-٩]|(?:جنيه|جنية|ج\.م|قروش|قرش)|بسعر|سعر الوحدة|الواحدة ب/.test(norm)
+      const rawAmount =
         typeof f.amount === 'number' && f.amount > 0 ? f.amount : typeof f.amount === 'string' && Number(f.amount) > 0 ? Number(f.amount) : null
+      const statedEgp = priceCue ? rawAmount : null
       let priceOverride = false
       if (type === 'sale' && statedEgp != null) {
         const statedPiastres = Math.round(statedEgp * 100)
         if (statedPiastres > 0) {
-          total = statedPiastres
+          // «بـ٤٥٠ للكيلو» is a UNIT price, not the deal total: 2 kg = ٩٠٠.
+          // Reading it as a total halved the ticket (live R30).
+          const perUnit =
+            /(للكيلو|للكيلوجرام|للعلبه|لعلبه|للكرتونه|للكرتونة|للوحده|للوحدة|للجرام|للقطعه|للقطعة|للشريط|للتر|للحبه|للحبة|للعبوه|للعبوة|الواحده ب|الوحدة ب)/.test(
+              norm,
+            )
+          total = perUnit && qtyN > 0 ? Math.round(statedPiastres * qtyN) : statedPiastres
           priceOverride = true
         }
       }
@@ -2752,10 +2821,16 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             // draft owns it; later drafts live in the journal + reply text
             anyDraft = true
             draftOpId = draft.id
+            const escalated =
+              reflection.risk === 'R3' && resolved.card.risk !== 'R3'
+                ? `R3 — ${reflection.findings.find((f) => f.severity === 'danger')?.message ?? 'العملية دي محتاجة سبب'}`.trim()
+                : undefined
             draftCard = {
               ...resolved.card,
               ref: draft.ref,
               opId: draft.id,
+              risk: (reflection.risk === 'R3' ? 'R3' : resolved.card.risk) as typeof resolved.card.risk,
+              dangerNote: escalated ?? resolved.card.dangerNote,
               audit: reflection.findings,
               confidence: reflection.confidence,
             }
@@ -3050,6 +3125,15 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     // the deterministic engine has the exact numbers, so when a turn ends with
     // ZERO tool calls and the rule ladder knows what this request IS, we hand the
     // turn to the proven PASS-1 pipeline instead of shipping prose that lies.
+    // A QUESTION that the model tried to answer with a WRITE it could not even
+    // fill («الاشتراكات اللي هتنتهي» → «اشتراك جديد لمين؟») is the wrong-tool
+    // class the owner hears immediately. The rule ladder knows this sentence is
+    // a READ; hand the turn to it instead of shipping the model's apology.
+    if (!anyDraft && usedTools.length === 0 && brainFailures.length > 0) {
+      const rule = ruleBasedIntent(text, business.type)
+      if (rule.intent === 'read' && rule.tool) return null
+    }
+
     if (!executedAnyTool && usedTools.length === 0 && !anyDraft) {
       const rule = ruleBasedIntent(text, business.type)
       const decisiveRead = rule.intent === 'read' && !!rule.tool
@@ -3508,10 +3592,19 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           idempotencyKey: idem,
         })
         opId = draft.id
+        // The card is what the OWNER sees. If «تأمل» escalated the draft to R3,
+        // the card must say so — otherwise he approves a sensitive operation
+        // with no reason prompt while the DB thinks it is R3 (live R30).
+        const escalation =
+          reflection.risk === 'R3' && resolved.card.risk !== 'R3'
+            ? `R3 — ${reflection.findings.find((f) => f.severity === 'danger')?.message ?? 'العملية دي محتاجة سبب'}`.trim()
+            : undefined
         card = {
           ...resolved.card,
           ref: draft.ref,
           opId: draft.id,
+          risk: (reflection.risk === 'R3' ? 'R3' : resolved.card.risk) as typeof resolved.card.risk,
+          dangerNote: escalation ?? resolved.card.dangerNote,
           audit: reflection.findings,
           confidence: reflection.confidence,
         }
