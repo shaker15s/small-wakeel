@@ -10,7 +10,7 @@ import { PrismaLibSQL } from '@prisma/adapter-libsql'
 import { applyMigrations } from './lib/migrations'
 const dir = mkdtempSync(join(tmpdir(), 'wakil-financial-crash-')), path = join(dir, 'fixture.db')
 copyFileSync(join(process.cwd(), 'db/custom.db'), path)
-applyMigrations(path)
+await applyMigrations(path)
 const db = new PrismaClient({ adapter: new PrismaLibSQL({ url: `file:${path}` }) })
 const env = { ...process.env, NODE_ENV: 'production', DATABASE_URL: `file:${path}`, WAKIL_SAAS_ENABLED: '0', WAKIL_SCHEDULER: 'off' }
 async function worker(opId: string, userId: string, phase: string, inspect?: () => Promise<void>) {

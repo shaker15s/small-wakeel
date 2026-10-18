@@ -1,4 +1,4 @@
-import { nextCairoRun } from './cairo-time'
+import { isKnownRecurrence, nextCairoRun } from './cairo-time'
 // وكيل — due-task runner.
 //
 // One implementation shared by:
@@ -70,8 +70,11 @@ async function postAgentMessage(conversationId: string, data: { text: string; ca
   })
 }
 
-/** Next occurrence of a recurring task (exported for unit tests). */
-export function nextRun(from: Date, recurrence: string): Date {
+/**
+ * Next occurrence of a recurring task (exported for unit tests).
+ * Returns null for unknown recurrences — callers must treat that as one-shot.
+ */
+export function nextRun(from: Date, recurrence: string): Date | null {
   return nextCairoRun(from, recurrence)
 }
 
@@ -103,22 +106,33 @@ export async function runDueTasks(limit = 10): Promise<TaskRunSummary> {
       // branch used to hard-code «done», so «فكرني كل يوم…» fired exactly once —
       // a silently broken promise. A daily/weekly/monthly task now moves to its
       // next slot and stays `pending`.
-      const finish = (result: string) =>
-        task.recurrence
-          ? db.scheduledTask.update({
+      // R40: recurrence is trusted ONLY when it is a known keyword. Legacy/garbage
+      // values ('none', '', …) are one-shot: the task fires once and is marked
+      // done. A nextRun of null (unknown recurrence / invalid wall time) also
+      // degrades to one-shot — a reminder must never silently re-fire forever.
+      const finish = (result: string) => {
+        // Property access can't carry a predicate's narrowing, so bind it first.
+        const rec = task.recurrence
+        if (isKnownRecurrence(rec)) {
+          const next = nextRun(task.scheduledFor, rec)
+          if (next && next > new Date()) {
+            return db.scheduledTask.update({
               where: { id: task.id },
               data: {
-                scheduledFor: nextRun(task.scheduledFor, task.recurrence),
+                scheduledFor: next,
                 executedAt: new Date(),
                 status: 'pending',
                 claimedAt: null,
                 result: result.slice(0, 4000),
               },
             })
-          : db.scheduledTask.update({
-              where: { id: task.id },
-              data: { status: 'done', executedAt: new Date(), claimedAt: null, result: result.slice(0, 4000) },
-            })
+          }
+        }
+        return db.scheduledTask.update({
+          where: { id: task.id },
+          data: { status: 'done', executedAt: new Date(), claimedAt: null, result: result.slice(0, 4000) },
+        })
+      }
 
       if (task.tool === 'remind') {
         const conv = await deliverConversation(task.businessId, task.userId, task.conversationId)

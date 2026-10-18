@@ -84,7 +84,11 @@ const DAY: Scenario[] = [
   { business: 'attar', text: 'بعت ٥٠ جرام عنبر بـ٣٤٠٠ جنيه', want: 'draft', expect: /عنبر/i, note: 'بيع بالوزن' },
   { business: 'attar', text: 'ايه النواقص؟', want: 'cards', expect: /ناقص|نواقص/i, note: 'النواقص' },
   { business: 'attar', text: 'الحاج رجب عليه كام؟', want: 'cards', expect: /رجب/i, note: 'مديونية عميل' },
-  { business: 'attar', text: 'كيلو الكمون بكام؟', want: 'cards', expect: /كمون/i, note: 'سعر صنف' },
+  // R40: the scenario used «الكمون» — an item that does NOT exist in the attar
+  // catalog — so the turn tested the not-found path, not the price path.
+  // زعفران is a real attar item: this must answer a PRICE from the catalog.
+  { business: 'attar', text: 'الزعفران بكام؟', want: 'cards', expect: /زعفران/i, note: 'سعر صنف' },
+  { business: 'attar', text: 'كيلو الكمون بكام؟', want: 'cards', expect: /كمون/i, note: 'صنف مش موجود في الكتالوج → يعترف بصراحة مش يخترع سعر' },
 
   // ══ جيم أبطال — كابتن حسام ═══════════════════════════════════════════════
   { business: 'gym', text: 'الخزنة فيها كام؟', want: 'cards', note: 'قراءة الخزنة' },
@@ -297,8 +301,18 @@ function ar(n: number): string {
   return new Intl.NumberFormat('ar-EG').format(n)
 }
 
-const businesses = await db.business.findMany({ include: { users: true } })
-const byType = new Map(businesses.map((b) => [b.type, b]))
+// R40: business selection must be DETERMINISTIC. The old `findMany` + first-of-type
+// order depended on DB row order, and a run once hit a session-created duplicate
+// (same name, empty catalog) — every catalog-grounded turn failed with «مش لاقي
+// الصنف» while the real seeded business sat right next to it. Rule: richest
+// catalog first (the seeded demo business always wins over session duplicates),
+// oldest creation as the tiebreak.
+const businesses = await db.business.findMany({ include: { users: true, _count: { select: { items: true } } } })
+const byType = new Map<string, (typeof businesses)[number]>()
+for (const b of businesses) {
+  const cur = byType.get(b.type)
+  if (!cur || b._count.items > cur._count.items || (b._count.items === cur._count.items && b.createdAt < cur.createdAt)) byType.set(b.type, b)
+}
 
 const runStartedAt = new Date()
 console.log(`\n🧪 وكيل — مسح يوم شغل حقيقي (${BASE})\n${'─'.repeat(86)}`)
@@ -341,17 +355,24 @@ for (const s of DAY) {
 // cleanup reported «١/١»). Everything created after `runStartedAt` is this run's.
 const leftovers = await db.operation.findMany({
   where: { status: 'AWAITING_APPROVAL', createdAt: { gte: runStartedAt } },
-  select: { id: true, userId: true },
+  select: { id: true, userId: true, businessId: true },
 })
-const draftOps = leftovers.map((o) => ({ opId: o.id, userId: o.userId }))
+const draftOps = leftovers.map((o) => ({ opId: o.id, userId: o.userId, businessId: o.businessId }))
 if (draftOps.length > 0 && process.env.WAKIL_SWEEP_CLEAN !== '0') {
   let cleaned = 0
-  for (const { opId, userId } of draftOps) {
+  for (const { opId, userId, businessId } of draftOps) {
     try {
+      // R40: the confirm route authenticates via the actor — the sweep had no
+      // browser headers, so every reject came back 403 and drafts piled up.
+      // The route accepts businessId/userId in the body for external callers.
       const res = await fetch(`${BASE}/api/operations/${opId}/confirm`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ action: 'reject', userId, reason: 'مسودة تجربة (sweep)' }),
+        headers: {
+          'content-type': 'application/json',
+          'x-wakil-business': businessId,
+          'x-wakil-user': userId,
+        },
+        body: JSON.stringify({ action: 'reject', userId, businessId, reason: 'مسودة تجربة (sweep)' }),
       })
       if (res.ok) cleaned++
     } catch {

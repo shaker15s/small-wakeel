@@ -12,7 +12,7 @@ const sourcePath = join(dir, 'source.db')
 const backupPath = join(dir, 'snapshot.db')
 const restoredPath = join(dir, 'restored.db')
 copyFileSync(join(process.cwd(), 'db/custom.db'), sourcePath)
-applyMigrations(sourcePath)
+await applyMigrations(sourcePath)
 const source = createClient({ url: `file:${sourcePath}` })
 let restored: Client | undefined
 async function manifest(sql: Client) {

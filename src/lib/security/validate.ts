@@ -59,6 +59,9 @@ export const confirmOpSchema = z.object({
     message: 'action لازم يكون approve أو reject أو cancel',
   }),
   userId: idSchema,
+  // R40-1: API consumers (no actor headers) may pass the tenant pair in the
+  // body — same isolation rules apply (membership is checked, never trusted).
+  businessId: idSchema.optional(),
   reason: textSchema(500, 'السبب طويل أوي').optional(),
 })
 

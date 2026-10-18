@@ -17,7 +17,7 @@ const root = process.cwd()
 const dir = mkdtempSync(join(tmpdir(), 'wakil-production-smoke-'))
 const target = join(dir, 'custom.db')
 copyFileSync(join(root, 'db/custom.db'), target)
-applyMigrations(target)
+await applyMigrations(target)
 const sql = createClient({ url: `file:${target}` })
 const users = (await sql.execute("SELECT id, businessId, role FROM User ORDER BY CASE role WHEN 'owner' THEN 0 ELSE 1 END")).rows
 const owner = users.find((u) => u.role === 'owner')!

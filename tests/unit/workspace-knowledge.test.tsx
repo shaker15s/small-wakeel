@@ -52,8 +52,9 @@ test('chat schedules require explicit day/hour and resolve actual Cairo UTC offs
   expect(resolveCairoSchedule('2026-01-01 09:00', now)).toBeNull()
 })
 test('recurring reports preserve Cairo wall-clock across DST and clamp month-end', () => {
-  expect(nextCairoRun(new Date('2026-10-29T06:00:00Z'), 'daily').toISOString()).toBe('2026-10-30T07:00:00.000Z')
-  expect(nextCairoRun(new Date('2026-01-31T07:00:00Z'), 'monthly').toISOString()).toBe('2026-02-28T07:00:00.000Z')
+  // Known recurrences always resolve; `!` asserts the non-null contract.
+  expect(nextCairoRun(new Date('2026-10-29T06:00:00Z'), 'daily')!.toISOString()).toBe('2026-10-30T07:00:00.000Z')
+  expect(nextCairoRun(new Date('2026-01-31T07:00:00Z'), 'monthly')!.toISOString()).toBe('2026-02-28T07:00:00.000Z')
 })
 test('strict live acceptance scopes isolate receipts and never persist the raw prompt', async () => {
   const messages = [{ role: 'system' as const, content: 'private system marker' }, { role: 'user' as const, content: 'private question' }]

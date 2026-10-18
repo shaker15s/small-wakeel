@@ -40,8 +40,19 @@ export function resolveCairoSchedule(label: string, now = new Date()): Date | nu
   const result = cairoWallTime(day, Number(clock[1]), Number(clock[2]))
   return result && result > now ? result : null
 }
-export function nextCairoRun(from: Date, recurrence: string): Date {
-  if (!['daily', 'weekly', 'monthly'].includes(recurrence)) return new Date(from)
+export function isKnownRecurrence(recurrence: string | null | undefined): recurrence is 'daily' | 'weekly' | 'monthly' {
+  return recurrence === 'daily' || recurrence === 'weekly' || recurrence === 'monthly'
+}
+
+/**
+ * Next occurrence of a recurring task. Returns null when the recurrence is
+ * unknown/absent — the CALLER must treat that as «one-shot» (mark done), never
+ * as «same time again». (Live R40 bug: a legacy task stored recurrence='none';
+ * this used to return `from` verbatim, so the task re-fired every 60s forever
+ * and flooded the owner's conversation with the same reminder.)
+ */
+export function nextCairoRun(from: Date, recurrence: string): Date | null {
+  if (!isKnownRecurrence(recurrence)) return null
   const [year, month, day, hour, minute, second] = wallParts(from)
   const next = new Date(Date.UTC(year, month - 1, day, 12))
   if (recurrence === 'monthly') {
