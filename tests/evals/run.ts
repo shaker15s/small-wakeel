@@ -98,7 +98,7 @@ async function main() {
   const dbFile = join(tmpDir, 'custom.db')
   copyFileSync(join(process.cwd(), 'db', 'custom.db'), dbFile)
 
-  applyMigrations(dbFile)
+  await applyMigrations(dbFile)
   process.env.DATABASE_URL = `file:${dbFile}`
   // Deterministic ladder only: no network, no retries, no model latency.
   process.env.WAKIL_OFFLINE = '1'

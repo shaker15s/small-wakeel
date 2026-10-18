@@ -340,6 +340,38 @@ function isIdentityQuestion(norm: string): boolean {
   return IDENTITY_QUESTION_RES.some((re) => re.test(norm))
 }
 
+/**
+ * R40: pure-greeting detection for the deterministic pass.
+ * Strict on purpose — anything carrying a digit, a work verb, or extra content
+ * is NOT a greeting (it must reach the normal pipeline):
+ *   • «السلام عليكم» / «وعليكم السلام» / «السلام عليكم ورحمة الله»
+ *   • «أهلا» / «مرحبا» / «صباح الخير» / «مساء الخير» / «حالك إيه»
+ *   • question words or amounts in the same message disqualify it.
+ */
+const GREETING_RES: RegExp[] = [
+  /^(?:و)?(?:ال)?سلام(?:\s+عليكم)?(?:\s+(?:ورحمة\s+الله(?:\s+وبركاته)?))?[\s؟?!.،,]*$/,
+  /^(?:أهلا|اهلا|أهلاً|مرحبا|مرحباً|هلا|اهلًا)[\s؟?!.،,]*$/,
+  /^(?:صباح\s+الخير|مساء\s+الخير|صباح\s+نور|مساء\s+نور)[\s؟?!.،,]*$/,
+  /^(?:حالك\s+ايه|كيف\s+حالك|اخبارك|كيفيك)[\s؟?!.،,]*$/,
+]
+function isGreeting(norm: string): boolean {
+  if (norm.length > 60) return false
+  // A greeting never carries numbers or work content.
+  if (/\d/.test(norm) || /[٠-٩]/.test(norm)) return false
+  return GREETING_RES.some((re) => re.test(norm))
+}
+
+/** Warm, work-steering Egyptian reply (3 variants — no robotic repetition). */
+function greetingReply(userName: string): string {
+  const first = userName.split(/\s+/)[0] ?? 'يا صاحبي'
+  const templates = [
+    `وعليكم السلام يا ${first}! 👋 أنا قاعد على الشغل — سجّل أي بيع أو شراء، اسأل عن أي رصيد أو مديونية، وقولي لو في حاجة تفتكرني بيها.`,
+    `أهلاً يا ${first}! ☕ أنا هنا وجاهز: قولي «بعت…» أو «صرفت…» أو «فلان عليه كام؟» وأنا أعمل الباقي وأتحقق من الأرقام.`,
+    `حياك الله يا ${first}! 🏪 النهارده معاك على طول — أي رقم أو عملية أو سؤال عن السجل، قول وأنا أجهزه.`,
+  ]
+  return templates[Math.floor(Math.random() * templates.length)]
+}
+
 /** Persona self-introduction, grounded 100% in real DB data. 3 variants so
  * repeat asks don't feel robotic. */
 function buildIdentityReply(params: {
@@ -582,7 +614,14 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
   // «الجبنة الرومي عندي كام كيلو؟» / «رصيد اللبن كام؟» → THAT item's stock.
   // Live R29: this fell through to free chat and the owner got «قولّي تحب نعمل
   // إيه» for the most ordinary question in the shop.
-  if (/(عندي|معايا|فاضل|باقي|رصيد)\s+(كام|قد ايه|قدايه)/.test(s) || /كام\s+(كيلو|علبه|كرتونه|قطعه|شريط|جرام)/.test(s)) {
+  // R40: a membership sentence («عضويته باقي قد إيه؟») also contains «باقي قد
+  // إيه» — without this guard it was read as item stock and the member's name
+  // (with its possessive suffix) became the search query. Membership belongs
+  // to the get_member_status rule below.
+  if (
+    !/(عضوي|اشتراك)/.test(s) &&
+    (/(عندي|معايا|فاضل|باقي|رصيد)\s+(كام|قد ايه|قدايه)/.test(s) || /كام\s+(كيلو|علبه|كرتونه|قطعه|شريط|جرام)/.test(s))
+  ) {
     const mItem = s
       .replace(/\?|؟/g, ' ')
       .match(/(?:^|\s)(?:رصيد|مخزون)\s+([^\s،,]+(?:\s+[^\s،,]+)?)/) ??
@@ -592,14 +631,27 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
   }
   // Price query («ايه سعر عود كمبودي؟» / «بكام المسك؟») → catalog search (R0 read)
   if (/(سعر|بكام)/.test(s) && !/(بعت|بيع|بع |خرج|سلف|دفع|سجل)/.test(s)) {
-    const q = s
+    // The item may come AFTER the price word («بكام المسك؟») or BEFORE it
+    // («كيلو الكمون بكام؟») — owners say both. R40: the before-order was
+    // stripped to nothing by the first replace and fell through to the model.
+    const after = s
       .replace(/^.*?(?:سعر|بكام)\s*/, '')
       .replace(/[؟?].*$/, '')
       .replace(/\s*(?:سعر|بكام|ايه|هو)\s*/g, ' ')
       .replace(/\s*(?:كام|دلوقتي|بقي|بعد اذنك|لو سمحت|من فضلك)\s*$/g, '')
       .replace(/^\s*(?:في|من)\s*/, '')
       .trim()
-    if (q.length >= 2) return { intent: 'read', tool: 'search_catalog', fields: { query: q.slice(0, 40) } }
+    const before = after
+      ? after
+      : s
+          .replace(/(?:سعر|بكام).*$/, ' ')
+          .replace(/[؟?]/g, ' ')
+          .replace(/\s*(?:ايه|هو|كام)\s*/g, ' ')
+          // normalizeAr already split «الكمون» → «ال كمون»; drop the lone article.
+          .replace(/(^|\s)ال(?=\s|$)/g, ' ')
+          .trim()
+    const q = (before ?? after).slice(0, 40)
+    if (q.length >= 2) return { intent: 'read', tool: 'search_catalog', fields: { query: q } }
   }
   // Attendance (gym): noun «حضور» + Egyptian verb forms («كريم حضر»,
   // «لعب حصة PT», «خلص تدريب») — a member WORKED OUT today.
@@ -611,7 +663,10 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
     // «عمر الشناوي عضويته باقي قد إيه؟» — Egyptian owners put the NAME first and
     // the noun after it («عضويته»), which the old «عضوية X» pattern read as the
     // member «باقي». Both orders are tried, name-first wins when it is a name.
-    const mBefore = s.match(/(^|\s)([^\s،,؟?]+(?:\s+[^\s،,؟?]+)?)\s+(?:عضويته|اشتراكه|عضويته\s*باقي|عضويه|اشتراك)(\s|$)/)
+    // Up to 3 words: normalizeAr splits «الشنوي» → «ال شنوي», so «عمر ال شنوي»
+    // is three tokens — a 2-word capture would answer «ال شنوي» (still resolved,
+    // but the full name is cleaner in the reply).
+    const mBefore = s.match(/(^|\s)([^\s،,؟?]+(?:\s+[^\s،,؟?]+){0,2})\s+(?:عضويته|اشتراكه|عضويته\s*باقي|عضويه|اشتراك)(\s|$)/)
     const mMember = s.match(/(?:عضويه|اشتراك)\s+([^ ،,؟?]+)/)
     const candidate = mBefore?.[2]?.trim() || mMember?.[1]
     const QUESTION = /^(مين|من|ايه|إيه|اللي|التي|بتاع|بتاعت|دي|ده|دول|هما|كل|أي|اي|كام|فاضل|قد|باقي|قربت|خلص|حاله|وضع)$/
@@ -647,6 +702,9 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
     return { intent: 'write', opType: 'sale', fields: amount != null ? { amount } : {} }
   }
   if (/(^| )(اشتريت|شرا|جبت|دخلت)( |$)/.test(s)) {
+    // R40: «جبت ٥ كرتون زيت بـ٢٥٠» — the stated price IS the total cost.
+    // Without the amount, the draft silently used catalog × qty (٥×٥٦=٢٨)
+    // and the owner's own number was lost.
     const amount = extractStatedPrice(s)
     return { intent: 'write', opType: 'purchase', fields: amount != null ? { amount } : {} }
   }
@@ -657,7 +715,10 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
     return { intent: 'write', opType: 'collection', fields: {} }
   }
   if (/^(حصلت|قبضت|استلمت|خدت)/.test(s)) return { intent: 'write', opType: 'collection', fields: {} }
-  if (/^(\S+)\s+(دفع|سدد|خلص|حصل)/.test(s)) return { intent: 'write', opType: 'collection', fields: {} }
+  // R40: «أحمد دفع ١٠ بس» — the name is the first word; pass it explicitly so
+  // customer resolution never depends on guessing it out of the full sentence.
+  const mPaid = s.match(/^(\S+)\s+(دفع|سدد|خلص|حصل)/)
+  if (mPaid) return { intent: 'write', opType: 'collection', fields: { customerName: mPaid[1] } }
   return { intent: 'chat', fields: {} }
 }
 
@@ -2643,6 +2704,23 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   pushThinking()
 
   const norm = normalizeAr(text)
+
+  // ---- PASS 0z: Greeting → instant, deterministic, zero LLM (R40) ----
+  // «السلام عليكم» used to fall through to the model (free chat) — with no
+  // live model it came back as the «النت تقيل» network message, and with a
+  // weak model it could get small-talk instead of work. A greeting is a
+  // greeting: warm, brief, and steered straight back to the job.
+  if (isGreeting(norm)) {
+    const replyText = greetingReply(user.name)
+    done(IDX.understand, 'تحية — برد فور من غير موديل')
+    done(IDX.reply)
+    await streamDeterministic(replyText, emit, 600)
+    const actions: ChatActionDTO[] = [
+      { id: 'act-today', label: 'لوحة اليوم', view: 'today', icon: 'today', tone: 'primary' },
+    ]
+    emit({ event: 'actions', actions })
+    return { replyText, card: null, cards: null, thinking: steps, modelLabel, actions }
+  }
 
   // ---- PASS 0a: Identity question → instant, deterministic, zero LLM ----
   if (isIdentityQuestion(norm)) {

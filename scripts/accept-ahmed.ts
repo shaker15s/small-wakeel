@@ -22,10 +22,23 @@ const USER = process.env.WAKIL_ACCEPT_USER ?? 'cmvav3psh000korbmqwag4fcz'
 type Card = { kind?: string; ref?: string; opId?: string; fields?: { label: string; value: string }[]; title?: string }
 type Turn = { status: number; reply: string; cards: Card[]; error?: string }
 
+/**
+ * Actor headers — the browser client (`src/lib/api.ts` apiHeaders) sends these
+ * on EVERY call; the guard's actor scope requires both ids. R40-1: the script
+ * was missing them, so the approval step (3) failed with «businessId مطلوب»
+ * even though the UI path works. Mirrored here so the acceptance journey
+ * exercises the same contract the real client does.
+ */
+const actorHeaders = {
+  'content-type': 'application/json',
+  'x-wakil-business': BIZ,
+  'x-wakil-user': USER,
+}
+
 async function turn(text: string): Promise<Turn> {
   const res = await fetch(`${BASE}/api/chat`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: actorHeaders,
     body: JSON.stringify({ businessId: BIZ, userId: USER, text }),
   })
   if (res.status !== 200) return { status: res.status, reply: '', cards: [], error: `HTTP ${res.status}` }
@@ -82,8 +95,10 @@ check('2d) تاريخ المديونية محفوظ (من أيام ١٠ أكتو
 if (draft?.opId) {
   const conf = await fetch(`${BASE}/api/operations/${draft.opId}/confirm`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ action: 'approve', userId: USER }),
+    headers: actorHeaders,
+    // R40-1: businessId in the body is the API contract for external callers
+    // (no actor headers); the browser path uses the headers above.
+    body: JSON.stringify({ action: 'approve', userId: USER, businessId: BIZ }),
   })
   const body = (await conf.json()) as { operation?: { status?: string; result?: { ok?: boolean } } }
   check('3) الاعتماد نفّذ العملية فعلًا', conf.status === 200 && body.operation?.status === 'SUCCEEDED', JSON.stringify(body).slice(0, 240))

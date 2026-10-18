@@ -36,12 +36,16 @@ Four verticals ship in the seed data — **سوبر ماركت، عطارة، ص
 
 ```bash
 bun install --frozen-lockfile # Bun 1.3.11; Node 22
-cp .env.example .env       # DATABASE_URL=file:./db/custom.db
+# Optional: cp .env.example .env   # DATABASE_URL=file:./db/custom.db
 bun run db:generate        # Prisma client (works offline — see scripts/prisma-generate.sh)
-DATABASE_URL="file:$PWD/db/custom.db" bun run db:migrate # explicit versioned additive migration
-# Optional: bun run db:seed (DESTRUCTIVE; synthetic showcase only)
 bun run dev                # http://localhost:3000
 ```
+
+The committed `db/custom.db` is kept schema-synchronized (CI gate: `db:sync --check`), and
+`bun dev` **auto-migrates local `file:` databases at startup** (idempotent `_WakilMigration`
+ledger; dev-only, `WAKIL_AUTO_MIGRATE=0` opts out) — so a fresh clone serves with
+`bun install && bun dev` alone. Production deployments still run the explicit
+`DATABASE_URL="file:$PWD/db/custom.db" bun run db:migrate` step in the runbook.
 
 For deterministic local testing set `WAKIL_OFFLINE=1`. BYO providers require public HTTPS; the old localhost mock provider is not a supported connector and is no longer offered by Compose.
 

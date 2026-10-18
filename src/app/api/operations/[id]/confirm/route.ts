@@ -19,7 +19,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
     // Authenticate before looking up the operation; unknown and foreign IDs
     // have the same scoped 404, with no operation-existence oracle.
-    const gate = await guard(req, { userId: body.userId })
+    // R40-1: the browser client sends actor headers; external API callers may
+    // pass businessId in the body instead. Under production identity the guard
+    // still binds everything to the authenticated user (no spoofing either way).
+    const gate = await guard(req, { businessId: body.businessId, userId: body.userId })
     if (!gate.ok) return gate.res
     const { user, business } = gate.actor
     const op = await db.operation.findFirst({ where: { id, businessId: business.id } })

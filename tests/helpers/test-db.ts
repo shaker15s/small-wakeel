@@ -14,6 +14,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 let dir: string | null = null
+// R40-1: migrations are async (libsql driver). Preload is a sync context, so
+// the migration STARTS here and every `testDb()` AWAITs it before the first
+// query — no test can ever hit a half-migrated copy.
+let migrationPromise: Promise<void> | null = null
 
 export function ensureTestDatabase(): string {
   if (dir) return join(dir, 'custom.db')
@@ -25,7 +29,13 @@ export function ensureTestDatabase(): string {
     throw new Error('اختبارات وكيل لازم تشتغل على نسخة مؤقتة من الداتابيز — مش على الداتابيز الحقيقية')
   }
   copyFileSync(join(process.cwd(), 'db', 'custom.db'), target)
-  applyMigrations(target)
+  migrationPromise = applyMigrations(target).then(
+    () => undefined,
+    (e) => {
+      console.error('[test-db] migration FAILED — no test may run against a drifted copy:', e)
+      throw e
+    },
+  )
   process.env.DATABASE_URL = `file:${target}`
   // one cleanup for the whole run
   process.on('exit', () => {
@@ -41,6 +51,7 @@ export function ensureTestDatabase(): string {
 /** The Prisma handle bound to the shared temp copy of the seeded database. */
 export async function testDb() {
   ensureTestDatabase()
+  if (migrationPromise) await migrationPromise
   const mod = await import('../../src/lib/db')
   return mod.db as import('@prisma/client').PrismaClient
 }
