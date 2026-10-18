@@ -36,7 +36,7 @@ const ENDPOINTS: { method: string; path: string; what: string }[] = [
 ]
 
 export async function GET(req: Request) {
-  const gate = await guard(req, { scope: 'open' })
+  const gate = await guard(req, { scope: 'admin' })
   if (!gate.ok) return gate.res
   const businesses = await db.business.count().catch(() => -1)
   return NextResponse.json({

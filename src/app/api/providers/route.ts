@@ -1,3 +1,5 @@
+import { providerFetch, providerUrl } from '@/lib/security/provider-network'
+import { encryptProviderKey } from '@/lib/security/provider-secrets'
 // GET /api/providers — list providers + models (no apiKey)
 // POST /api/providers — add BYO OpenAI-compatible provider: validates the
 // base URL by fetching {baseUrl}/models BEFORE saving, then saves provider +
@@ -15,8 +17,10 @@ interface RemoteModel {
   owned_by?: string
 }
 
-export async function GET() {
+export async function GET(req: Request) {
   try {
+    const gate = await guard(req, { scope: 'admin' })
+    if (!gate.ok) return gate.res
     const providers = await db.modelProvider.findMany({
       include: {
         models: {
@@ -62,7 +66,7 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
-    const gate = await guard(req, { scope: 'open' })
+    const gate = await guard(req, { scope: 'admin' })
     if (!gate.ok) return gate.res
     const parsed = await parseBody(req, providerCreateSchema)
     if (!parsed.ok) return badRequest(parsed.message)
@@ -72,12 +76,12 @@ export async function POST(req: Request) {
     if (!body.apiKey?.trim()) return badRequest('مفتاح الـ API مطلوب')
 
     const baseUrl = body.baseUrl.trim().replace(/\/$/, '')
-    if (!/^https?:\/\//.test(baseUrl)) return badRequest('الرابط لازم يبدأ بـ http:// أو https://')
+    try { providerUrl(baseUrl) } catch { return badRequest('رابط المزوّد لازم يكون HTTPS عام من غير بيانات دخول أو query') }
 
     // Validate by fetching the model list BEFORE saving anything
     let models: RemoteModel[] = []
     try {
-      const res = await fetch(`${baseUrl}/models`, {
+      const res = await providerFetch(`${baseUrl}/models`, {
         headers: { authorization: `Bearer ${body.apiKey.trim()}` },
         signal: AbortSignal.timeout(8000),
       })
@@ -103,7 +107,7 @@ export async function POST(req: Request) {
       data: {
         name: body.name.trim(),
         baseUrl,
-        apiKey: body.apiKey.trim(),
+        apiKey: encryptProviderKey(body.apiKey.trim()),
         models: {
           create: models.slice(0, 30).map((m) => ({
             remoteId: m.id,

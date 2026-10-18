@@ -1,3 +1,4 @@
+import { requirePermission } from '@/lib/security/permissions'
 // وكيل — DYNAMIC AI-POWERED PLUGIN HARNESS (معمارية البلاجنز الذكية الديناميكية)
 //
 // Inspired by DeepSeek Harness & Claude Tool Plugins:
@@ -35,6 +36,17 @@ import { startOfCairoDay } from '@/app/api/_lib/dates'
 import { normalizeAr } from './arabic'
 import { getGeminiClient } from './llm'
 
+
+const SUPPORTED_PLUGIN_MODULES = new Set(['inventory_audit', 'sales_analytics', 'margin_audit', 'receivables_aging', 'supplier_payables', 'expiry_shield'])
+function validatePluginPipeline(pipeline: PluginStepSpec[]): void {
+  if (!Array.isArray(pipeline) || !pipeline.length || pipeline.length > 6 || pipeline.some((step) => !SUPPORTED_PLUGIN_MODULES.has(step.module))) throw new Error('unsupported_capability: الإضافة لازم تكون من وحدات التحليل المتاحة؛ مفيش كود حر أو استعلام وهمي')
+  for (const step of pipeline) {
+    for (const [key, max] of [['daysWindow', 365], ['limit', 100], ['minMarginPct', 99]] as const) {
+      const value = step.params?.[key]
+      if (value != null && (!Number.isFinite(value) || value < 0 || value > max)) throw new Error('إعداد تحليل خارج الحدود المسموحة')
+    }
+  }
+}
 // ---------------------------------------------------------------------------
 // Built-in Starter Plugin Catalog (available to install in 1 click or via chat)
 // ---------------------------------------------------------------------------
@@ -197,7 +209,7 @@ interface StoredPluginConfig {
   category?: PluginCategory
   icon?: AgentPluginDTO['icon']
   version?: string
-  author?: 'ai-synthesized' | 'wakil-core'
+  author?: AgentPluginDTO['author']
   triggers?: string[]
   capabilities?: string[]
   pipeline?: PluginStepSpec[]
@@ -292,7 +304,7 @@ export async function getActivePlugins(businessId: string): Promise<AgentPluginD
 export function pluginsPromptSection(plugins: AgentPluginDTO[]): string {
   const active = plugins.filter((p) => p.installed && p.active)
   if (active.length === 0) {
-    return `\n## قدرات وإضافات النظام الذكية (Dynamic Capabilities / Plugins)\n- يمكنك في أي لحظة بناء وتفعيل أي ميزة أو أداة متابعة جديدة يطلبها صاحب العمل تلقائياً عبر أداة install_plugin({prompt, name?}) (مثل متابعة الأصناف الراكدة، تحليل المبيعات، مراقبة الهوامش، متابعة الديون، أو أي قدرة مخصصة).`
+    return `\n## قدرات وإضافات النظام الذكية (Dynamic Capabilities / Plugins)\n- يمكن تثبيت تجميع وحدات التحليل المعتمدة عبر install_plugin({prompt, name?}) بعد طلب تثبيت صريح والتحقق من tools.manage؛ لا تثبيت تلقائي من سؤال قراءة ولا كود حر (مثل متابعة الأصناف الراكدة، تحليل المبيعات، مراقبة الهوامش، متابعة الديون، أو أي قدرة مخصصة).`
   }
   const lines = active
     .map((p) => `- ميزة «${p.name}» (معرّف الأداة: "${p.slug}"): ${p.description} — تُشغّل عند طلب: ${p.triggers.slice(0, 4).join('، ')}`)
@@ -327,7 +339,7 @@ export interface PluginInterface {
   readonly category: PluginCategory
   readonly icon: AgentPluginDTO['icon']
   readonly version: string
-  readonly author: 'ai-synthesized' | 'wakil-core'
+  readonly author: AgentPluginDTO['author']
   readonly triggers: string[]
   readonly capabilities: string[]
   readonly pipeline: PluginStepSpec[]
@@ -350,7 +362,7 @@ export class BasePlugin implements PluginInterface {
   readonly category: PluginCategory
   readonly icon: AgentPluginDTO['icon']
   readonly version: string
-  readonly author: 'ai-synthesized' | 'wakil-core'
+  readonly author: AgentPluginDTO['author']
   readonly triggers: string[]
   readonly capabilities: string[]
   readonly pipeline: PluginStepSpec[]
@@ -401,6 +413,8 @@ export class BasePlugin implements PluginInterface {
   }
 
   async execute(ctx: PluginExecutionContext): Promise<PluginExecutionResult> {
+    if (this.slug.startsWith('app_cli_')) throw new Error('not_connected: موصل خارجي غير موثّق')
+    validatePluginPipeline(this.pipeline)
     const dto = this.toDTO({ active: true, installed: true })
     const stepResults = await Promise.all(
       this.pipeline.map((step) => runPluginStep(ctx.businessId, step, dto)),
@@ -472,8 +486,9 @@ export class PluginRegistry {
 
   async syncFromDatabase(businessId: string): Promise<AgentPluginDTO[]> {
     const dtos = await getBusinessPlugins(businessId)
+    this.tenantPlugins.delete(businessId) // no stale enabled plugins after toggle/delete
     for (const dto of dtos) {
-      if (dto.installed) {
+      if (dto.installed && dto.active) {
         this.register(businessId, new BasePlugin(dto))
       }
     }
@@ -485,8 +500,9 @@ export class PluginRegistry {
     pluginOrSlug: AgentPluginDTO | string,
     args?: Record<string, unknown>,
   ): Promise<PluginExecutionResult> {
-    await this.syncFromDatabase(businessId)
+    const available = await this.syncFromDatabase(businessId)
     const slug = typeof pluginOrSlug === 'string' ? pluginOrSlug : pluginOrSlug.slug
+    if (available.some((p) => p.slug === slug && p.installed && !p.active)) throw new Error('الإضافة متوقفة')
     const registered = this.get(businessId, slug)
     if (registered) {
       return registered.execute({ businessId, args })
@@ -512,6 +528,7 @@ export async function synthesizePluginWithAI(params: {
   prompt: string
   preferredName?: string
 }): Promise<AgentPluginDTO> {
+  await requirePermission(params.businessId, params.userId, 'tools.manage')
   const { businessId, userId, prompt, preferredName } = params
   const norm = normalizeAr(prompt)
 
@@ -557,7 +574,7 @@ ${preferredName ? `الاسم المفضل: "${preferredName}"` : ''}
 - receivables_aging (تحليل مديونيات العملاء وخطة التحصيل)
 - supplier_payables (تحليل مستحقات الموردين والتدفق النقدي)
 - expiry_shield (مراقبة الصلاحيات والتشغيلات)
-- custom_query (استعلام تحليلي مخصص على البيانات)`,
+لو الطلب خارج الوحدات دي ارجع modules فارغة؛ لا تدعي بناء تكامل أو حجز أو دفع أو تعديل كود.`,
           config: {
             responseMimeType: 'application/json',
             responseSchema: {
@@ -632,7 +649,6 @@ ${preferredName ? `الاسم المفضل: "${preferredName}"` : ''}
             'receivables_aging',
             'supplier_payables',
             'expiry_shield',
-            'custom_query',
           ])
           const validCategories: ReadonlySet<string> = new Set(['inventory', 'sales', 'finance', 'customers', 'operations'])
           const validIcons: ReadonlySet<string> = new Set(['spark', 'boxes', 'users', 'wallet', 'chart', 'book', 'today', 'alert'])
@@ -649,9 +665,7 @@ ${preferredName ? `الاسم المفضل: "${preferredName}"` : ''}
               },
             }))
 
-          if (pipeline.length === 0) {
-            pipeline.push({ module: 'sales_analytics', label: 'تحليل الأداء والمؤشرات', params: { daysWindow: 30, limit: 10 } })
-          }
+          validatePluginPipeline(pipeline)
 
           const cleanSlug =
             'plugin_' +
@@ -707,7 +721,7 @@ ${preferredName ? `الاسم المفضل: "${preferredName}"` : ''}
   })
 }
 
-/** Deterministic Arabic domain compiler — guarantees instant plugin creation even without an API key. */
+/** Deterministic composition of supported analysis modules, NOT simulated AI/code generation. */
 function compilePluginDeterministically(
   prompt: string,
   preferredName?: string,
@@ -759,13 +773,7 @@ function compilePluginDeterministically(
     capabilities.push('موازنة مستحقات الموردين مع السيولة النقدية المتاحة')
   }
 
-  if (pipeline.length === 0) {
-    pipeline.push(
-      { module: 'sales_analytics', label: 'تحليل المبيعات والأداء التشغيلي', params: { daysWindow: 30, limit: 8 } },
-      { module: 'inventory_audit', label: 'فحص الأرصدة والمخزون', params: { limit: 8 } },
-    )
-    capabilities.push('تحليل شامل للأداء والمبيعات والأرصدة لحظياً')
-  }
+  validatePluginPipeline(pipeline) // Unsupported requests must not masquerade as inventory reports.
 
   const extractedName =
     preferredName?.trim() ||
@@ -809,7 +817,7 @@ function compilePluginDeterministically(
     category,
     icon,
     version: '1.0.0',
-    author: 'ai-synthesized',
+    author: 'wakil-deterministic-compiler',
     triggers: [extractedName, `تقرير ${extractedName}`, `متابعة ${extractedName}`],
     capabilities,
     pipeline,
@@ -827,121 +835,107 @@ export async function installOrUpdatePlugin(params: {
   userId: string
   spec: Omit<AgentPluginDTO, 'id' | 'active' | 'installed' | 'usageCount' | 'lastUsedAt'>
 }): Promise<AgentPluginDTO> {
+  await requirePermission(params.businessId, params.userId, 'tools.manage')
   const { businessId, userId, spec } = params
 
-  // 1. Register dynamically in the runtime PluginRegistry
+  validatePluginPipeline(spec.pipeline)
+
+  const installed = await db.$transaction(async (tx) => {
+    await requirePermission(businessId, userId, 'tools.manage', tx)
+    // Persist plugin and its real actor-owned shortcut atomically.
+    const existingRows = await tx.customTool.findMany({
+      where: { businessId, kind: 'plugin' },
+    })
+    const existing = existingRows.find((r) => {
+      const cfg = parsePluginConfig(r.config, r.name)
+      return cfg.slug === spec.slug || normalizeAr(r.name) === normalizeAr(spec.name)
+    })
+
+    const configJson = JSON.stringify({
+      slug: spec.slug,
+      description: spec.description,
+      category: spec.category,
+      icon: spec.icon,
+      version: spec.version,
+      author: spec.author,
+      triggers: spec.triggers,
+      capabilities: spec.capabilities,
+      pipeline: spec.pipeline,
+      proactiveRules: spec.proactiveRules,
+      quickPrompt: spec.quickPrompt,
+    } satisfies StoredPluginConfig)
+
+    const row = existing
+      ? await tx.customTool.update({
+          where: { id: existing.id },
+          data: {
+            name: spec.name,
+            config: configJson,
+            active: true,
+          },
+        })
+      : await tx.customTool.create({
+          data: {
+            businessId,
+            userId,
+            name: spec.name,
+            kind: 'plugin',
+            config: configJson,
+            active: true,
+          },
+        })
+
+    // 3. Ensure a 1-click QuickCommand chip exists so the owner sees it right under the chat composer
+    const existingCmd = await tx.quickCommand.findFirst({
+      where: { businessId, userId, label: spec.name.slice(0, 36) },
+    })
+    if (!existingCmd) {
+      await tx.quickCommand
+        .create({
+          data: {
+            businessId,
+            userId,
+            label: spec.name.slice(0, 36),
+            prompt: spec.quickPrompt,
+            icon: spec.icon,
+            sortOrder: 1,
+          },
+        })
+    }
+
+    await tx.auditEvent.create({ data: { businessId, actor: userId, action: 'plugin.installed', detail: JSON.stringify({ slug: spec.slug, modules: spec.pipeline.map((p) => p.module) }) } })
+    return {
+      ...spec,
+      id: row.id,
+      active: row.active,
+      installed: true,
+      usageCount: row.usageCount,
+      lastUsedAt: row.lastUsedAt ? row.lastUsedAt.toISOString() : null,
+    }
+  })
   pluginRegistry.register(businessId, new BasePlugin(spec))
-
-  // 2. Persist in CustomTool table
-  const existingRows = await db.customTool.findMany({
-    where: { businessId, kind: 'plugin' },
-  })
-  const existing = existingRows.find((r) => {
-    const cfg = parsePluginConfig(r.config, r.name)
-    return cfg.slug === spec.slug || normalizeAr(r.name) === normalizeAr(spec.name)
-  })
-
-  const configJson = JSON.stringify({
-    slug: spec.slug,
-    description: spec.description,
-    category: spec.category,
-    icon: spec.icon,
-    version: spec.version,
-    author: spec.author,
-    triggers: spec.triggers,
-    capabilities: spec.capabilities,
-    pipeline: spec.pipeline,
-    proactiveRules: spec.proactiveRules,
-    quickPrompt: spec.quickPrompt,
-  } satisfies StoredPluginConfig)
-
-  const row = existing
-    ? await db.customTool.update({
-        where: { id: existing.id },
-        data: {
-          name: spec.name,
-          config: configJson,
-          active: true,
-        },
-      })
-    : await db.customTool.create({
-        data: {
-          businessId,
-          userId,
-          name: spec.name,
-          kind: 'plugin',
-          config: configJson,
-          active: true,
-        },
-      })
-
-  // 3. Ensure a 1-click QuickCommand chip exists so the owner sees it right under the chat composer
-  const existingCmd = await db.quickCommand.findFirst({
-    where: { businessId, label: spec.name.slice(0, 36) },
-  })
-  if (!existingCmd) {
-    await db.quickCommand
-      .create({
-        data: {
-          businessId,
-          userId,
-          label: spec.name.slice(0, 36),
-          prompt: spec.quickPrompt,
-          icon: spec.icon,
-          sortOrder: 1,
-        },
-      })
-      .catch(() => {})
-  }
-
-  // 4. Record in AgentMemory so the Agent permanently remembers this capability across turns
-  const memText = `مفعّل في النظام ميزة «${spec.name}»: ${spec.description}`.slice(0, 195)
-  const existingMem = await db.agentMemory.findFirst({
-    where: { businessId, userId, category: 'capabilities', text: memText },
-  })
-  if (!existingMem) {
-    await db.agentMemory
-      .create({
-        data: {
-          businessId,
-          userId,
-          kind: 'fact',
-          category: 'capabilities',
-          text: memText,
-          confidence: 95,
-          active: true,
-        },
-      })
-      .catch(() => {})
-  }
-
-  return {
-    ...spec,
-    id: row.id,
-    active: row.active,
-    installed: true,
-    usageCount: row.usageCount,
-    lastUsedAt: row.lastUsedAt ? row.lastUsedAt.toISOString() : null,
-  }
+  return installed
 }
 
-export async function togglePluginActive(pluginId: string, active: boolean): Promise<AgentPluginDTO | null> {
-  const row = await db.customTool.findUnique({ where: { id: pluginId } })
+export async function togglePluginActive(pluginId: string, active: boolean, businessId: string, userId: string): Promise<AgentPluginDTO | null> {
+  await requirePermission(businessId, userId, 'tools.manage')
+  const row = await db.customTool.findFirst({ where: { id: pluginId, businessId } })
   if (!row || row.kind !== 'plugin') return null
   await db.customTool.update({
-    where: { id: pluginId },
+    where: { id: pluginId, businessId },
     data: { active },
   })
   const all = await getBusinessPlugins(row.businessId)
   return all.find((p) => p.id === pluginId) ?? null
 }
 
-export async function deletePlugin(pluginId: string): Promise<boolean> {
-  const row = await db.customTool.findUnique({ where: { id: pluginId } })
+export async function deletePlugin(pluginId: string, businessId: string, userId: string): Promise<boolean> {
+  await requirePermission(businessId, userId, 'tools.manage')
+  const row = await db.customTool.findFirst({ where: { id: pluginId, businessId } })
   if (!row || row.kind !== 'plugin') return false
   const cfg = parsePluginConfig(row.config, row.name)
   if (cfg.slug) pluginRegistry.unregister(row.businessId, cfg.slug)
-  await db.customTool.delete({ where: { id: pluginId } })
+  await db.customTool.delete({ where: { id: pluginId, businessId } })
   await db.quickCommand.deleteMany({ where: { businessId: row.businessId, label: row.name } }).catch(() => {})
   return true
 }
@@ -985,13 +979,10 @@ export async function executePlugin(params: {
     plugin =
       all.find((p) => p.slug === pluginOrSlug || p.id === pluginOrSlug) ??
       all.find((p) => normalizeAr(p.name).includes(qNorm) || p.triggers.some((t) => normalizeAr(t).includes(qNorm)))
-    // If the plugin is in the starter catalog but not yet installed, auto-install it!
-    if (plugin && !plugin.installed) {
-      const owner = await db.user.findFirst({ where: { businessId }, orderBy: { createdAt: 'asc' } })
-      if (owner) {
-        plugin = await installOrUpdatePlugin({ businessId, userId: owner.id, spec: plugin })
-      }
-    }
+    // A read must never impersonate the first/owner user to install a tool.
+    // Uninstalled starter capabilities run transiently; installation is an
+    // explicit, capability-checked mutation through installOrUpdatePlugin.
+
   } else {
     plugin = pluginOrSlug
   }
@@ -999,6 +990,13 @@ export async function executePlugin(params: {
   if (!plugin) {
     throw new Error('الميزة المطلوبة غير موجودة')
   }
+  if (plugin.installed && !plugin.active) throw new Error('الإضافة متوقفة')
+
+  // Block legacy persisted bridges before any pipeline step can read the ledger.
+  if (plugin.slug.startsWith('app_cli_')) {
+    throw new Error('not_connected: لا يوجد موصل خارجي موثّق؛ لم تتم مزامنة بيانات')
+  }
+  validatePluginPipeline(plugin.pipeline)
 
   // Increment usage count if persisted in CustomTool
   if (plugin.installed && !plugin.id.startsWith('catalog:')) {
@@ -1422,43 +1420,7 @@ async function runPluginStep(
       break
     }
 
-    case 'custom_query':
-    default: {
-      if (plugin.slug.startsWith('app_cli_')) {
-        try {
-          const { executeBridgedTool } = await import('./cli-anything/bridge')
-          const appName = plugin.name.replace(/^تحكم\s+/, '').replace(/\s+\(CLI-Anything\)$/, '').trim()
-          const bridgedRes = await executeBridgedTool({
-            businessId,
-            appName,
-            command: step.params?.targetEntity === 'operations' ? 'sync_invoices' : 'export_inventory',
-            args: step.params,
-          })
-          if (bridgedRes.cards && bridgedRes.cards.length > 0) {
-            cards.push(...bridgedRes.cards)
-            break
-          }
-        } catch (err) {
-          console.warn('[plugin-harness] executeBridgedTool failed, using fallback:', err)
-        }
-      }
-      const items = await db.item.findMany({ where: { businessId }, take: 10 })
-      cards.push({
-        kind: 'table',
-        title: `${plugin.name} — ${step.label}`,
-        columns: [
-          { key: 'name', label: 'الصنف' },
-          { key: 'stock', label: 'الرصيد' },
-          { key: 'sell', label: 'سعر البيع' },
-        ],
-        rows: items.map((it) => ({
-          name: it.name,
-          stock: fmtQty(it.stockQty, arUnit(it.unit)),
-          sell: egp(it.sellPrice),
-        })),
-      })
-      break
-    }
+    default: throw new Error('unsupported_capability: وحدة تحليل غير متاحة')
   }
 
   return { cards, alerts }

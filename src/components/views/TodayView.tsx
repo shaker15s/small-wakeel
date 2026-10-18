@@ -2,6 +2,8 @@
 
 // وكيل — شاشة «اليوم»: لمحة سريعة عن الخزنة والمبيعات والتنبيهات والاعتمادات.
 
+import CashbookToday from './CashbookToday'
+import MorningBriefCard from './MorningBriefCard'
 import { useCallback, useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
 import {
@@ -19,7 +21,6 @@ import {
   ShieldAlert,
   ShieldCheck,
   ShoppingCart,
-  Sparkles,
   TriangleAlert,
   Wallet,
   X,
@@ -30,7 +31,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { api } from '@/lib/api'
 import { arAgo, arDate, egp, isTodayCairo, qty as fmtQty } from '@/lib/format'
 import { arUnit } from '@/lib/verticals'
-import { QUERY_KEYS, useWakil } from '@/lib/store'
+import { QUERY_KEYS } from '@/lib/store'
 import type { ViewKey } from '@/lib/store'
 import type { RadarInsightDTO } from '@/lib/types'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -68,93 +69,7 @@ const ALERT_STYLE = {
   },
 } as const
 
-/**
- * «ابدأ يومك» — the agent's opening move.
- *
- * The owner said «مش مساعد كفايه»: the app waited to be asked. This card is the
- * first thing on اليوم — three actions computed from the ledger (no model call,
- * so it is instant and free), ranked by the money at stake. Each button sends
- * the exact sentence that fixes the item, so «recommendation» and «doing» are
- * one tap apart.
- */
-function MorningBriefCard({ businessId, userId, onNavigate }: ViewProps) {
-  const queuePrompt = useWakil((s) => s.queuePrompt)
-  const { data, isError } = useQuery({
-    queryKey: QUERY_KEYS.morningBrief(businessId, userId),
-    queryFn: () => api.morningBrief(businessId, userId),
-    refetchInterval: 60_000,
-  })
-  // the KPI block already apologies for a dead API — never stack two errors
-  if (isError) return null
-  // fixed-height skeleton: the brief must not push the KPIs down after load
-  if (!data) return <Skeleton className="h-[5.5rem] w-full rounded-xl" />
-
-  const run = (item: (typeof data.items)[number]) => {
-    if (item.cta.prompt) queuePrompt(item.cta.prompt)
-    onNavigate?.(safeView(item.cta.view) ?? 'chat')
-  }
-
-  if (data.items.length === 0) {
-    return (
-      <div className="flex items-center gap-3 rounded-xl border bg-card px-4 py-3 text-sm shadow-sm">
-        <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-emerald-500/10 text-emerald-600">
-          <CheckCircle2 className="size-4" aria-hidden />
-        </span>
-        <p className="min-w-0 text-muted-foreground">{data.headline}</p>
-      </div>
-    )
-  }
-
-  return (
-    <section
-      className="card-enter card-sheen overflow-hidden rounded-xl border bg-card shadow-sm"
-      aria-label="ابدأ يومك"
-    >
-      <span
-        aria-hidden
-        className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-l from-transparent via-wakil-amber/60 to-transparent"
-      />
-      <div className="flex items-center gap-2 border-b px-4 py-3">
-        <Sparkles className="size-4 shrink-0 text-wakil-amber" aria-hidden />
-        <h2 className="text-sm font-semibold">ابدأ يومك</h2>
-        <span className="ms-auto text-xs text-muted-foreground">{data.headline}</span>
-      </div>
-      <ul className="divide-y">
-        {data.items.map((item) => {
-          const Icon = item.tone === 'money' ? Wallet : item.tone === 'time' ? CalendarClock : TriangleAlert
-          const toneClass =
-            item.tone === 'money'
-              ? 'bg-emerald-500/10 text-emerald-600'
-              : item.tone === 'time'
-                ? 'bg-wakil-amber/15 text-wakil-amber'
-                : 'bg-destructive/10 text-destructive'
-          return (
-            <li key={item.id} className="flex items-start gap-3 px-4 py-3">
-              <span className={cn('flex size-9 shrink-0 items-center justify-center rounded-full', toneClass)}>
-                <Icon className="size-4" aria-hidden />
-              </span>
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium leading-snug">{item.title}</p>
-                <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">{item.why}</p>
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                className="min-h-10 shrink-0 gap-1"
-                onClick={() => run(item)}
-              >
-                {item.cta.label}
-                <ChevronLeft className="size-3.5" aria-hidden />
-              </Button>
-            </li>
-          )
-        })}
-      </ul>
-    </section>
-  )
-}
-
-export default function TodayView({ businessId, userId, onNavigate }: ViewProps) {
+function InventoryTodayView({ businessId, userId, onNavigate }: ViewProps) {
   const { toast } = useToast()
   const queryClient = useQueryClient()
   const [busyOpId, setBusyOpId] = useState<string | null>(null)
@@ -693,4 +608,14 @@ function RadarDigest({
       </ul>
     </SectionCard>
   )
+}
+
+export default function TodayView(props: ViewProps) {
+  const { data } = useQuery({ queryKey: QUERY_KEYS.bootstrap, queryFn: api.bootstrap })
+  const business = data?.businesses.find(b => b.id === props.businessId)
+  const [switching, setSwitching] = useState(false)
+  const { toast } = useToast()
+  const client = useQueryClient()
+  if (business?.workflowMode === 'cashbook') return <CashbookToday {...props} />
+  return <>{business && ['supermarket', 'attar'].includes(business.type) && <div className="mx-4 mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-emerald-500/30 bg-emerald-500/5 p-4"><div><strong className="text-sm">بتقفل المحل بعدّ الخزنة؟</strong><p className="mt-1 text-xs text-muted-foreground">شغل دفتر الكاش والآجل، من غير تسجيل كل بيعة أو QR. مش هيغير فلوسك القديمة.</p></div><Button disabled={switching} onClick={async () => { setSwitching(true); try { await api.setWorkflow('cashbook', props.businessId, props.userId); await client.invalidateQueries({ queryKey: QUERY_KEYS.bootstrap }) } catch (e) { toast({ title: 'تعذر تغيير وضع التشغيل', description: e instanceof Error ? e.message : 'جرّب تاني' }) } finally { setSwitching(false) } }}>شغل دفتر المحل</Button></div>}<InventoryTodayView {...props} /></>
 }

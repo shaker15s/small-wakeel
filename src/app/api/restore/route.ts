@@ -77,7 +77,7 @@ export async function POST(req: Request) {
     if (!parsed.ok) return badRequest(parsed.message)
     const body = parsed.data
 
-    const gate = await guard(req, { businessId: body.businessId, userId: body.userId })
+    const gate = await guard(req, { businessId: body.businessId, userId: body.userId, permission: 'catalog.manage' })
     if (!gate.ok) return gate.res
 
     const [existingItems, existingCustomers, existingSuppliers] = await Promise.all([

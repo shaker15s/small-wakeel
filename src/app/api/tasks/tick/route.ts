@@ -10,7 +10,7 @@ export const dynamic = 'force-dynamic'
 
 export async function POST(req: NextRequest) {
   try {
-    const gate = await guard(req, { scope: 'open' })
+    const gate = await guard(req, { scope: 'admin' })
     if (!gate.ok) return gate.res
     const body = (await req.json().catch(() => ({}))) as {
       businessId?: string
@@ -38,7 +38,7 @@ export async function POST(req: NextRequest) {
             data: { status: 'done', executedAt: new Date(), result: task.title },
           })
           let conv = task.conversationId
-            ? await db.conversation.findUnique({ where: { id: task.conversationId } })
+            ? await db.conversation.findFirst({ where: { id: task.conversationId, businessId: task.businessId, userId: task.userId } })
             : await db.conversation.findFirst({ where: { businessId: task.businessId, userId: task.userId }, orderBy: { updatedAt: 'desc' } })
           if (!conv) {
             conv = await db.conversation.create({
@@ -81,7 +81,7 @@ export async function POST(req: NextRequest) {
 
         // Post into the user's conversation
         let conversation = task.conversationId
-          ? await db.conversation.findUnique({ where: { id: task.conversationId } })
+          ? await db.conversation.findFirst({ where: { id: task.conversationId, businessId: task.businessId, userId: task.userId } })
           : await db.conversation.findFirst({ where: { businessId: task.businessId, userId: task.userId }, orderBy: { updatedAt: 'desc' } })
         if (!conversation) {
           conversation = await db.conversation.create({

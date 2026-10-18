@@ -1,3 +1,5 @@
+import { providerFetch } from '@/lib/security/provider-network'
+import { decryptProviderKey } from '@/lib/security/provider-secrets'
 // POST /api/providers/probe {modelConfigId} → ProbeResultDTO
 // Three TINY requests to the provider (total <150 tokens budget):
 //   1) streaming ping (max_tokens 40) → ttftMs + tps + supportsStreaming
@@ -21,7 +23,7 @@ const estTokens = (chars: number) => Math.max(1, Math.ceil(chars / 4))
 
 export async function POST(req: Request) {
   try {
-    const gate = await guard(req, { scope: 'open' })
+    const gate = await guard(req, { scope: 'admin' })
     if (!gate.ok) return gate.res
     const body = (await req.json()) as { modelConfigId?: string }
     if (!body.modelConfigId) return badRequest('modelConfigId مطلوب')
@@ -36,7 +38,7 @@ export async function POST(req: Request) {
     const url = `${base}/chat/completions`
     const headers = {
       'content-type': 'application/json',
-      authorization: `Bearer ${config.provider.apiKey}`,
+      authorization: `Bearer ${decryptProviderKey(config.provider.apiKey)}`,
     }
     // ONE signal caps the WHOLE probe at 20s
     const signal = AbortSignal.timeout(PROBE_TIMEOUT_MS)
@@ -51,7 +53,7 @@ export async function POST(req: Request) {
     // ---- 1) streaming ping: TTFT + throughput ----
     try {
       const t0 = Date.now()
-      const res = await fetch(url, {
+      const res = await providerFetch(url, {
         method: 'POST',
         headers,
         body: JSON.stringify({ model: config.remoteId, messages: TINY_MESSAGES, stream: true, max_tokens: 40 }),
@@ -112,7 +114,7 @@ export async function POST(req: Request) {
 
     // ---- 2) non-stream completion ----
     try {
-      const res = await fetch(url, {
+      const res = await providerFetch(url, {
         method: 'POST',
         headers,
         body: JSON.stringify({ model: config.remoteId, messages: TINY_MESSAGES, stream: false, max_tokens: 30 }),
@@ -130,7 +132,7 @@ export async function POST(req: Request) {
 
     // ---- 3) tools parameter support ----
     try {
-      const res = await fetch(url, {
+      const res = await providerFetch(url, {
         method: 'POST',
         headers,
         body: JSON.stringify({

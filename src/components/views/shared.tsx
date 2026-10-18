@@ -41,6 +41,8 @@ export function safeView(view?: string | null): ViewKey | null {
 // ---------------------------------------------------------------------------
 
 export const TYPE_AR: Record<OpType, string> = {
+  debt_promise: 'تعديل وعد السداد',
+  cashbook: 'دفتر الكاش والآجل',
   sale: 'بيع',
   purchase: 'شرا',
   expense: 'مصروف',

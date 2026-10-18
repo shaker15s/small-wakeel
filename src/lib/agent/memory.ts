@@ -1,3 +1,5 @@
+import { reportedType } from '@/lib/cashbook-report'
+import { cairoIsoDay } from '@/app/api/_lib/dates'
 // وكيل — THE 5-LAYER MEMORY ENGINE.
 //
 // Layers (per the master research PDF):
@@ -544,7 +546,7 @@ export interface BusinessSnapshot {
 export async function getSnapshot(business: Business): Promise<BusinessSnapshot> {
   const today = startOfCairoDay(0)
   const [opsToday, cashEntries, items, customers, pendingCount] = await Promise.all([
-    db.operation.findMany({ where: { businessId: business.id, status: 'SUCCEEDED', createdAt: { gte: today } }, select: { type: true, payload: true } }),
+    db.operation.findMany({ where: { businessId: business.id, status: 'SUCCEEDED', createdAt: { gte: today } }, select: { type: true, payload: true, reversedByRef: true } }),
     db.cashEntry.findMany({ where: { businessId: business.id }, select: { direction: true, amount: true } }),
     db.item.findMany({ where: { businessId: business.id }, select: { name: true, stockQty: true, lowStockThreshold: true, expiresAt: true } }),
     db.customer.findMany({ where: { businessId: business.id }, select: { name: true, balance: true, expiresAt: true } }),
@@ -552,7 +554,7 @@ export async function getSnapshot(business: Business): Promise<BusinessSnapshot>
   ])
   const sumOf = (type: string) =>
     opsToday
-      .filter((o) => o.type === type)
+      .filter((o) => { try { const p = JSON.parse(o.payload); return reportedType(o.type, p) === type && (o.type !== 'cashbook' || !o.reversedByRef && p.occurredOn === cairoIsoDay(new Date())) } catch { return false } })
       .reduce((s, o) => {
         try {
           const p = JSON.parse(o.payload) as Record<string, unknown>
@@ -1056,7 +1058,7 @@ export function buildContextualMemoryPromptBlock(params: {
   const sections: string[] = []
   if (rules.length > 0) {
     sections.push(
-      `## ١. دستور وقوانين المنشأة (BUSINESS_DNA — تُنفذ حرفياً وتلقائياً)\n${rules
+      `## ١. دستور وقوانين المنشأة (BUSINESS_DNA — سياسات محفوظة لا تتجاوز صلاحيات أو موافقات السيرفر)\n${rules
         .slice(0, 8)
         .map((r) => `- [قاعدة #${r.id.slice(-5)} | ${r.category}] ${r.text}`)
         .join('\n')}`,

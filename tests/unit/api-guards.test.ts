@@ -7,6 +7,7 @@
 import { describe, expect, test } from 'bun:test'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import ts from 'typescript'
 
 const API_DIR = join(process.cwd(), 'src', 'app', 'api')
 
@@ -35,6 +36,19 @@ describe('api.guards', () => {
       expect(src).toMatch(/from '.*_lib\/guard'|from '@\/app\/api\/_lib\/guard'/)
     })
   }
+
+  test('EVERY exported HTTP handler awaits guard and returns denials', () => {
+    for (const file of routes) {
+      const ast = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true)
+      for (const node of ast.statements) {
+        if (!ts.isFunctionDeclaration(node) || !node.name || !node.body) continue
+        if (!/^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$/.test(node.name.text)) continue
+        const body = node.body.getText(ast)
+        expect(body, `${file} ${node.name.text}`).toMatch(/await guard\(/)
+        expect(body, `${file} ${node.name.text}`).toMatch(/if \(!gate\.ok\) return gate\.res/)
+      }
+    }
+  })
 
   test('no route writes to the database without a guard in the same file', () => {
     for (const file of routes) {

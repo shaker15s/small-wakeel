@@ -90,8 +90,8 @@ export function ProactivePulseBar({
       void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.overview(business.id, userId) })
       void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.chatConversation(business.id, userId, null) })
       toast({
-        title: `راجعت الشغل بالكامل في ${res.totalDurationMs}ms ✅`,
-        description: `فحصت الحسابات + حللت التقرير المالي + رصدت ${res.proactiveAlerts.length} تنبيه مخاطر وفرص`,
+        title: `راجعت البيانات المسجلة في ${res.totalDurationMs}ms`,
+        description: business.workflowMode === 'cashbook' ? 'قراءة الحسابات والمتابعات فقط؛ الربح والنفاد غير محسوبين من سجل يدوي غير مكتمل.' : `راجعت الحركات المسجلة ورصدت ${res.proactiveAlerts.length} متابعة؛ لا أسعار أو كميات اتغيرت.`,
       })
     } catch (e) {
       toast({

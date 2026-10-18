@@ -65,7 +65,7 @@ export async function POST(req: Request) {
     if (!parsed.ok) return badRequest(parsed.message)
     const { businessId, userId, csv, updateExisting, dryRun } = parsed.data
 
-    const gate = await guard(req, { businessId, userId })
+    const gate = await guard(req, { businessId, userId, permission: 'catalog.manage' })
     if (!gate.ok) return gate.res
 
     const business = await db.business.findUnique({ where: { id: businessId } })

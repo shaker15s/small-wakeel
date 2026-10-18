@@ -1,3 +1,4 @@
+import { sessionFetch } from './saas/client'
 // وكيل — typed client API + SSE chat streaming reader (frontend)
 
 import { useWakil } from './store'
@@ -30,15 +31,16 @@ import type {
 /**
  * Access token handling (see docs/SECURITY.md).
  *
- * Deployment can require a token (`WAKIL_ACCESS_TOKEN`). The client picks it up
+ * Development demo can require a shared token. The dev client picks it up
  * from the URL once (`?token=…`), remembers it, and replays it on every call —
- * so a protected instance is usable by simply opening the shared link.
+ * for local demos only. Production uses the explicit tab-scoped credential form.
  */
 const TOKEN_LS_KEY = 'wakil.token'
 
 function accessToken(): string | null {
   if (typeof window === 'undefined') return null
   try {
+    if (process.env.NODE_ENV === 'production') return window.sessionStorage.getItem(TOKEN_LS_KEY)
     const fromUrl = new URLSearchParams(window.location.search).get('token')
     if (fromUrl) {
       window.localStorage.setItem(TOKEN_LS_KEY, fromUrl)
@@ -53,33 +55,44 @@ function accessToken(): string | null {
   }
 }
 
+/** Pilot credentials are tab-scoped in production; never use a sharing URL. */
+export function setAccessToken(token: string): void {
+  window.sessionStorage.setItem(TOKEN_LS_KEY, token.trim())
+  if (process.env.NODE_ENV !== 'production') window.localStorage.setItem(TOKEN_LS_KEY, token.trim())
+  else window.localStorage.removeItem(TOKEN_LS_KEY)
+}
+
+export class ApiError extends Error {
+  constructor(message: string, public readonly status: number) { super(message); this.name = 'ApiError' }
+}
+
 /**
  * Every request carries the *actor context* the server needs to enforce tenant
  * isolation: which business and which user the browser is currently acting as,
  * plus the access token when one is configured. This is what lets
  * PATCH/DELETE-by-id routes prove ownership without every call site passing ids.
  */
-function apiHeaders(extra?: Record<string, string>): Record<string, string> {
+function apiHeaders(extra?: Record<string, string>, includeActor = true): Record<string, string> {
   const headers: Record<string, string> = { ...(extra ?? {}) }
   const state = useWakil.getState()
-  if (state.businessId) headers['x-wakil-business'] = state.businessId
-  if (state.userId) headers['x-wakil-user'] = state.userId
+  if (includeActor && state.businessId) headers['x-wakil-business'] = state.businessId
+  if (includeActor && state.userId) headers['x-wakil-user'] = state.userId
   const token = accessToken()
   if (token) headers['x-wakil-token'] = token
   return headers
 }
 
-async function get<T>(url: string): Promise<T> {
-  const res = await fetch(url, { cache: 'no-store', headers: apiHeaders() })
+async function get<T>(url: string, includeActor = true): Promise<T> {
+  const res = await sessionFetch(url, { cache: 'no-store', headers: apiHeaders(undefined, includeActor) })
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string }
-    throw new Error(body.error ?? `فشل الطلب (${res.status})`)
+    throw new ApiError(body.error ?? `فشل الطلب (${res.status})`, res.status)
   }
   return res.json() as Promise<T>
 }
 
 async function post<T>(url: string, body: unknown): Promise<T> {
-  const res = await fetch(url, {
+  const res = await sessionFetch(url, {
     method: 'POST',
     headers: apiHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify(body),
@@ -92,7 +105,7 @@ async function post<T>(url: string, body: unknown): Promise<T> {
 }
 
 async function patch<T>(url: string, body: unknown): Promise<T> {
-  const res = await fetch(url, {
+  const res = await sessionFetch(url, {
     method: 'PATCH',
     headers: apiHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify(body),
@@ -105,7 +118,7 @@ async function patch<T>(url: string, body: unknown): Promise<T> {
 }
 
 async function del(url: string): Promise<void> {
-  const res = await fetch(url, { method: 'DELETE', headers: apiHeaders() })
+  const res = await sessionFetch(url, { method: 'DELETE', headers: apiHeaders() })
   if (!res.ok) {
     const data = (await res.json().catch(() => ({}))) as { error?: string }
     throw new Error(data.error ?? `فشل الطلب (${res.status})`)
@@ -140,8 +153,32 @@ export interface SearchResultDTO {
   results: SearchHitDTO[]
 }
 
+const patchWorkspace = (businessId: string, userId: string, value: import('./workspace-options').WorkspacePatch) => patch<import('./workspace-options').WorkspacePreferences>('/api/workspace/preferences', { businessId, userId, ...value })
+
+export interface CashbookDTO {
+  pendingOps: OperationDTO[]
+  cash: number; receivable: number; payable: number; today: string
+  reminders: { id: string; subject: string }[]
+  customers: { id: string; name: string; balance: number }[]
+  suppliers: { id: string; name: string; balance: number }[]
+  entries: { id: string; kind: string; amount: number; partyName: string; dateSource: string; occurredOn: string; dueOn: string | null; cashDelta: number; operationRef: string; recordedAt: string; note: string; operation: { reversedByRef: string | null } }[]
+}
 export const api = {
-  bootstrap: () => get<BootstrapDTO>('/api/bootstrap'),
+  speechStatus: () => get<{ available: boolean; providerLabel: string | null }>('/api/speech'),
+  speechSettings: () => get<{ providerId: string; remoteId: string }>('/api/speech/settings'),
+  saveSpeechSettings: (body: { providerId: string; remoteId: string } | { disabled: true }) => post('/api/speech/settings', body),
+  transcribe: async (audio: Blob, signal?: AbortSignal) => {
+    const res = await sessionFetch('/api/speech', { method: 'POST', headers: apiHeaders({ 'content-type': audio.type, 'x-wakil-audio-consent': 'review-only' }), body: audio, signal })
+    const result = await res.json()
+    if (!res.ok) throw new ApiError(result.error ?? 'تعذر تحويل التسجيل', res.status)
+    return result as { text: string; reviewRequired: true }
+  },
+
+  cashbook: (businessId: string, userId: string) => get<CashbookDTO>(`/api/cashbook?businessId=${encodeURIComponent(businessId)}&userId=${encodeURIComponent(userId)}`),
+  setWorkflow: (mode: 'cashbook' | 'inventory', businessId: string, userId: string) => post<{ mode: string }>('/api/cashbook', { mode, businessId, userId }),
+  workspacePreferences: (businessId: string, userId: string) => get<import('./workspace-options').WorkspacePreferences>(`/api/workspace/preferences?businessId=${encodeURIComponent(businessId)}&userId=${encodeURIComponent(userId)}`),
+  updateWorkspacePreferences: (businessId: string, userId: string, patch: import('./workspace-options').WorkspacePatch) => patchWorkspace(businessId, userId, patch),
+  bootstrap: () => get<BootstrapDTO>('/api/bootstrap', false),
   createBusiness: (body: { name: string; type: string; ownerName?: string; openingCash?: number; customItems?: string[] }) =>
     post<{ business: import('./types').BusinessLite }>('/api/bootstrap', body),
   overview: (businessId: string, userId: string) =>
@@ -308,7 +345,7 @@ export async function streamChat(
   handlers: StreamHandlers,
   signal?: AbortSignal,
 ): Promise<void> {
-  const res = await fetch('/api/chat', {
+  const res = await sessionFetch('/api/chat', {
     method: 'POST',
     headers: apiHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify(body),

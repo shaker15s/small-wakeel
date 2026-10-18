@@ -29,6 +29,8 @@ async function soldToday(businessId: string, itemQuery: string): Promise<boolean
 }
 
 export async function buildRadar(businessId: string): Promise<RadarInsightDTO[]> {
+  const business = await db.business.findUniqueOrThrow({ where: { id: businessId }, select: { workflowMode: true } })
+  const manual = business.workflowMode === 'cashbook'
   const out: RadarInsightDTO[] = []
   const today = startOfCairoDay(0)
   const weekAgo = new Date(Date.now() - 7 * 86400000)
@@ -64,8 +66,8 @@ export async function buildRadar(businessId: string): Promise<RadarInsightDTO[]>
     out.push({
       id: `radar-rev-${rev.id.slice(0, 8)}`,
       level: 'danger',
-      title: 'عملية معكوسة بعد ما الزبون مشي',
-      detail: `عكس ${rev.ref} لعملية بيع ${original.ref}${saleTotal > 0 ? ` (${egpPlain(saleTotal)} ج)` : ''} بعد ${Math.round(minutesLate)} دقيقة من تنفيذها${stillPending ? ' — والعكس لسه مستني اعتماد' : ''}. دي عادة بتتحقق قبل الاعتماد.`,
+      title: 'عكس متأخر يستحق مراجعة السجل',
+      detail: `عكس ${rev.ref} لعملية بيع ${original.ref}${saleTotal > 0 ? ` (${egpPlain(saleTotal)} ج)` : ''} بعد ${Math.round(minutesLate)} دقيقة من تنفيذها${stillPending ? ' — والعكس لسه مستني اعتماد' : ''}. التوقيت لوحده مش دليل خطأ أو سوء تصرف.`,
       evidence: [
         { label: `${original.ref} — ${original.summary.slice(0, 40)}`, ref: original.ref, view: 'journal' },
         { label: `${rev.ref} — العكس`, ref: rev.ref, view: 'journal' },
@@ -87,13 +89,13 @@ export async function buildRadar(businessId: string): Promise<RadarInsightDTO[]>
     queryCounts.set(item, (queryCounts.get(item) ?? 0) + 1)
   }
   for (const [item, count] of queryCounts) {
-    if (count < 3) continue
+    if (manual || count < 3) continue
     if (await soldToday(businessId, item)) continue
     out.push({
       id: `radar-query-${normalizeAr(item).slice(0, 12).replace(/\s/g, '-')}`,
       level: 'warning',
-      title: 'استعلام متكرر من غير بيع',
-      detail: `«${item}» اتطلب ${count} مرات النهاردة ومفيش أي عملية بيع ليه — ممكن حد بيتسعّر لأطراف بره. راجع سجل العمليات.`,
+      title: 'بحث متكرر من غير بيع مسجل',
+      detail: `«${item}» اتطلب ${count} مرات النهاردة ومفيش بيع ظاهر ليه في السجل؛ راجع السياق، ده مش إثبات إن مفيش بيع فعلي أو اتهام لحد.`,
       evidence: [{ label: `استعلامات عن ${item}`, view: 'journal' }],
     })
   }
@@ -123,16 +125,17 @@ export async function buildRadar(businessId: string): Promise<RadarInsightDTO[]>
   // ---- Detector 4: draft-then-cancel pattern (last 7 days) ----
   const cancelled = await db.operation.findMany({
     where: { businessId, status: 'CANCELLED', createdAt: { gte: weekAgo } },
-    select: { ref: true, type: true, summary: true },
+    select: { ref: true, type: true, summary: true, reason: true },
     orderBy: { createdAt: 'desc' },
   })
-  if (cancelled.length >= 2) {
+  const unexplained = cancelled.filter(c => !c.reason?.startsWith('استُبدلت بمسودة '))
+  if (unexplained.length >= 2) {
     out.push({
       id: 'radar-cancel-pattern',
       level: 'info',
       title: 'مسودات بتتلغي كتير',
-      detail: `${cancelled.length} مسودة اتعملت واتلغت خلال أسبوع — لو ده نمط متكرر من نفس الموظف يبقى فيه لخبطة في الإدخال أو حد بيجرب من غير قصد.`,
-      evidence: cancelled.slice(0, 3).map((c) => ({ label: `${c.ref} — ${c.summary.slice(0, 40)}`, ref: c.ref, view: 'journal' as const })),
+      detail: `${unexplained.length} مسودة اتلغت خلال أسبوع، باستثناء المسودات المستبدلة بتصحيح موثق. الإلغاء لوحده مش دليل خطأ؛ راجع الأسباب لو محتاج.`,
+      evidence: unexplained.slice(0, 3).map((c) => ({ label: `${c.ref} — ${c.summary.slice(0, 40)}`, ref: c.ref, view: 'journal' as const })),
     })
   }
 
@@ -146,7 +149,7 @@ export async function buildRadar(businessId: string): Promise<RadarInsightDTO[]>
     }),
   ])
   const itemById = new Map(items.map((it) => [it.id, it]))
-  for (const sale of recentSales) {
+  for (const sale of manual ? [] : recentSales) {
     try {
       const p = JSON.parse(sale.payload) as Record<string, unknown>
       if (!p.priceOverride) continue
@@ -168,8 +171,8 @@ export async function buildRadar(businessId: string): Promise<RadarInsightDTO[]>
 
   // ---- Detector 6: Imminent stockout on fast-moving items ----
   const soldQty = new Map<string, number>()
-  for (const sale of recentSales) {
-    if (sale.status !== 'SUCCEEDED') continue
+  for (const sale of manual ? [] : recentSales) {
+    if (sale.status !== 'SUCCEEDED' || sale.reversedByRef) continue
     try {
       const p = JSON.parse(sale.payload) as Record<string, unknown>
       if (Array.isArray(p.lines)) {

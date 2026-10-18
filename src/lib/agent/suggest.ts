@@ -1,11 +1,11 @@
-// وكيل — DYNAMIC SUGGESTIONS ENGINE.
-// Chips under the composer are NEVER static: they are ranked from LIVE data
-// (alerts) + REAL usage history (frequent) + the owner's memories + the
-// vertical's demos + the time of day. The list MUST change as the shop works.
-
 import { db } from '@/lib/db'
 import type { SuggestionDTO } from '@/lib/types'
 import { getSnapshot } from './memory'
+import { getWorkspacePreferences } from '@/lib/workspace-preferences'
+import { WORKSPACE_GOALS } from '@/lib/workspace-options'
+import { canDraft } from '@/lib/domain/risk'
+import { canUsePermission } from '@/lib/security/permissions'
+import type { OpType } from '@/lib/types'
 
 /** Natural prompts per read tool (used by the FREQUENT source). */
 const TOOL_PROMPT_AR: Record<string, string> = {
@@ -51,25 +51,17 @@ const OP_SUGGEST_LABEL: Record<string, string> = {
   reversal: 'عكس عملية',
 }
 
-/** Demo prompt per write opType (frequent writes). */
+/** Incomplete drafts by design: never replay old names, prices or quantities. */
 const OP_PROMPT_AR: Record<string, string> = {
-  sale: 'بعت 10 جرام عود كمبودي',
-  purchase: 'اشتريت كيلو مسك من المورد',
-  expense: 'سجل مصروف كهربا 200 ج',
-  collection: 'تحصيل 100 من الحاج رجب',
-  payment: 'سدد 500 للمورد',
-  stock_adjustment: 'عدل مخزون الكركديه يبقى 30 كيلو',
-  membership: 'تجديد اشتراك عضو',
-  attendance: 'حضور عضو النهاردة',
-  reversal: 'عكس عملية',
-}
-
-/** One demo per vertical — shows what وكيل understands here. */
-const VERTICAL_DEMO: Record<string, { label: string; prompt: string }> = {
-  attar: { label: 'بيع بالجرام', prompt: 'بعت 10 جرام عود كمبودي' },
-  supermarket: { label: 'طلب بيتي', prompt: 'ابن مدام منى خد طلبات بـ85 ج' },
-  pharmacy: { label: 'بيع دواء', prompt: 'بعت شريطين أوجمنتين' },
-  gym: { label: 'حصة تدريب', prompt: 'كابتن طارق لعب حصة PT' },
+  sale: 'عايز أسجل بيع جديد؛ اسألني عن الصنف والكمية وطريقة الدفع قبل أي تسجيل.',
+  purchase: 'عايز أسجل شراء جديد؛ اسألني عن المورد والصنف والكمية والسعر.',
+  expense: 'عايز أسجل مصروف جديد؛ اسألني عن المبلغ والوصف.',
+  collection: 'عايز أسجل تحصيل جديد؛ اسألني عن العميل والمبلغ.',
+  payment: 'عايز أسجل سداد جديد؛ اسألني عن المورد والمبلغ.',
+  stock_adjustment: 'عايز أراجع تسوية مخزون؛ اسألني عن الصنف والكمية والسبب.',
+  membership: 'عايز أجدد اشتراك؛ اسألني عن العضو والخطة والدفع.',
+  attendance: 'عايز أسجل حضور؛ اسألني عن العضو.',
+  reversal: 'عايز أراجع عكس عملية؛ اسألني عن رقمها والسبب.',
 }
 
 function toolIcon(tool: string): SuggestionDTO['icon'] {
@@ -81,31 +73,24 @@ function toolIcon(tool: string): SuggestionDTO['icon'] {
   return 'spark'
 }
 
-/** Cairo hour right now (0-23). */
-function cairoHour(): number {
-  try {
-    return Number(new Intl.DateTimeFormat('en-EG', { timeZone: 'Africa/Cairo', hour: 'numeric', hour12: false }).format(new Date()))
-  } catch {
-    return new Date().getHours()
-  }
-}
-
 /** 3 → «٣» — chips are READ, so Arabic numerals. */
 const arNum = (n: number) => String(n).replace(/[0-9]/g, (d) => '٠١٢٣٤٥٦٧٨٩'[Number(d)])
 
 /**
- * Ranked suggestions (max 8): alert > frequent > memory > vertical > time.
- * Everything is computed from the LIVE database — zero static chips.
+ * Ranked actor-scoped suggestions: live alerts, actual usage, declared goals, memory.
+ * No demo prompts after setup; recurring reports are proposals, never automatic writes.
  */
 export async function buildSuggestions(businessId: string, userId: string): Promise<SuggestionDTO[]> {
   const business = await db.business.findUnique({ where: { id: businessId } })
-  if (!business) return []
+  const user = await db.user.findFirst({ where: { id: userId, businessId } })
+  if (!business || !user) return []
 
   const since14d = new Date(Date.now() - 14 * 86400000)
-  const [snapshot, memories, usage] = await Promise.all([
+  const [snapshot, memories, usage, profile] = await Promise.all([
     getSnapshot(business),
     db.agentMemory.findMany({ where: { businessId, userId, active: true }, orderBy: [{ confidence: 'desc' }, { createdAt: 'desc' }], take: 8 }),
-    db.usageEvent.findMany({ where: { businessId, userId, createdAt: { gte: since14d } }, select: { kind: true, label: true } }),
+    db.usageEvent.findMany({ where: { businessId, userId, createdAt: { gte: since14d } }, select: { kind: true, label: true, createdAt: true }, orderBy: { createdAt: 'desc' }, take: 2000 }),
+    getWorkspacePreferences(businessId, userId),
   ])
 
   const out: SuggestionDTO[] = []
@@ -147,7 +132,7 @@ export async function buildSuggestions(businessId: string, userId: string): Prom
     .slice(0, 3)
   for (const [label, n] of frequent) {
     const prompt = TOOL_PROMPT_AR[label] ?? OP_PROMPT_AR[label]
-    if (!prompt) continue
+    if (!prompt || (OP_PROMPT_AR[label] && !canDraft(user.role, label as OpType))) continue
     const nice = TOOL_SUGGEST_LABEL[label] ?? OP_SUGGEST_LABEL[label] ?? label
     push({ id: `sg-freq-${label}`, label: `${nice} — ${arNum(n)} مرة`, prompt, reason: 'frequent', reasonLabel: 'بتستخدمه كتير', icon: toolIcon(label) })
   }
@@ -158,19 +143,18 @@ export async function buildSuggestions(businessId: string, userId: string): Prom
     push({ id: `sg-mem-${topMemory.id.slice(0, 8)}`, label: topMemory.kind === 'rule' ? 'قوانينك المحفوظة' : 'اللي فاكره عنك', prompt: 'قولي اللي انت فاكره عني وعن الشغل', reason: 'memory', reasonLabel: 'خاص بشغلك', icon: 'book' })
   }
 
-  // (d) VERTICAL demo
-  const demo = VERTICAL_DEMO[business.type] ?? VERTICAL_DEMO.supermarket
-  if (demo) {
-    push({ id: 'sg-vertical-demo', label: demo.label, prompt: demo.prompt, reason: 'vertical', reasonLabel: 'جرّب ده', icon: 'spark' })
+  // Only recurring READ queries, after >=5 uses on >=3 distinct Cairo days.
+  // No financial automation and no task is created by the suggestions endpoint.
+  if (canUsePermission(user.role, 'automation.manage')) {
+    const candidate = frequent.find(([label, count]) => count >= 5 && !!TOOL_PROMPT_AR[label] && new Set(usage.filter((u) => u.label.split(':')[0] === label).map((u) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Cairo' }).format(u.createdAt))).size >= 3)
+    if (candidate) {
+      const label = candidate[0]
+      push({ id: `sg-schedule-${label}`, label: 'تحب التقرير يبقى دوري؟', prompt: `اقترح عليّ جدولة تقرير قراءة فقط: ${TOOL_PROMPT_AR[label]}. اسألني عن الموعد والتكرار بتوقيت القاهرة وموافقتي الصريحة؛ لا تنشئ مهمة دلوقتي.`, reason: 'frequent', reasonLabel: 'اقتراح فقط — محتاج موافقتك', icon: 'today' })
+    }
   }
-
-  // (e) TIME-based — Cairo morning < 11 opens the day; evening ≥ 20 closes it
-  const hour = cairoHour()
-  if (hour < 11) {
-    push({ id: 'sg-time-morning', label: 'افتح يومك', prompt: 'ملخص اليوم', reason: 'time', reasonLabel: 'صباح الخير — الوقت مناسب', icon: 'today' })
-  } else if (hour >= 20) {
-    push({ id: 'sg-time-evening', label: 'اقفل الوردية', prompt: 'اقفل الوردية — عايز ملخص اليوم', reason: 'time', reasonLabel: 'آخر اليوم', icon: 'today' })
+  for (const goal of profile.goals) {
+    if (goal === 'members' && business.type !== 'gym') continue
+    push({ id: `sg-goal-${goal}`, label: WORKSPACE_GOALS[goal].label, prompt: WORKSPACE_GOALS[goal].prompt, reason: 'custom', reasonLabel: 'من أولوياتك', icon: 'spark' })
   }
-
   return out.slice(0, 8)
 }

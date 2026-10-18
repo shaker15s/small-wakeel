@@ -1,4 +1,5 @@
 'use client'
+import { CashbookReport } from './CashbookReport'
 
 // وكيل — شاشة «الإحصائيات»: رسم بياني يومي + أفضل الأصناف وتوزيع الحركة.
 
@@ -43,7 +44,7 @@ import {
 } from './shared'
 
 const chartConfig = {
-  sales: { label: 'مبيعات', color: 'var(--wakil-navy)' },
+  sales: { label: 'مبيعات', color: 'var(--analytics-accent, var(--wakil-navy))' },
   purchases: { label: 'مشتريات', color: 'var(--wakil-amber)' },
   expenses: { label: 'مصروفات', color: 'var(--muted-foreground)' },
 } satisfies ChartConfig
@@ -84,6 +85,8 @@ export default function StatsView({ businessId }: ViewProps) {
     !isPending &&
     totals != null &&
     totals.sales + totals.purchases + totals.expenses + totals.collections + totals.payments === 0
+
+  if (data?.cashbookMode) return <CashbookReport data={data} onRangeChange={setRange} />
 
   if (isError) {
     return (

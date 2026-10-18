@@ -10,8 +10,9 @@
 //    auras, and speed/depth telemetry badges.
 // 4. Built-in Arabic Voice Dictation (ar-EG Web Speech API) with live waveform.
 
+import { SpeechRecorder } from './SpeechRecorder'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { AnimatePresence, motion } from 'framer-motion'
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import type { LucideIcon } from 'lucide-react'
 import {
   Brain,
@@ -64,7 +65,7 @@ const BUILTIN_MODELS: readonly ModelStateMeta[] = [
   {
     key: 'gemini-flash',
     label: 'سريع خاطف · Gemini 3 Flash',
-    sub: 'استجابة لحظية للشغل اليومي والبيع السريع والبحث الحي',
+    sub: 'للشغل اليومي والبيع والبحث — حسب توفر المزوّد',
     badgeAr: 'فائق السرعة',
     icon: Zap,
     accentHex: '#10b981',
@@ -83,7 +84,7 @@ const BUILTIN_MODELS: readonly ModelStateMeta[] = [
   },
   {
     key: 'builtin-deep',
-    label: 'محرك احتياطي عميق · GLM-4.6',
+    label: 'عميق · Gemini Pro',
     sub: 'استنتاج متعدد الخطوات للمهام المركبة (مزود احتياطي)',
     badgeAr: 'استنتاج مركب',
     icon: Brain,
@@ -93,7 +94,7 @@ const BUILTIN_MODELS: readonly ModelStateMeta[] = [
   },
   {
     key: 'builtin-air',
-    label: 'محرك احتياطي خفيف · GLM-4.5-Air',
+    label: 'خفيف · Gemini Flash Lite',
     sub: 'سريع واقتصادي للعمليات البسيطة (مزود احتياطي)',
     badgeAr: 'خفيف',
     icon: Zap,
@@ -136,6 +137,10 @@ export function Composer({
   onModelToast: (t: { title: string; description?: string }) => void
   onDraftingChange?: (drafting: boolean) => void
 }) {
+  const reduced = useReducedMotion()
+  const sendLock = useRef(false)
+  const lastSentText = useRef('')
+  const sendTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [value, setValue] = useState('')
   const [deepResearch, setDeepResearch] = useState(false)
   const [focused, setFocused] = useState(false)
@@ -148,6 +153,7 @@ export function Composer({
 
   // Built-in Arabic Voice Dictation state
   const [listening, setListening] = useState(false)
+  const [recorderOpen, setRecorderOpen] = useState(false)
   const recognitionRef = useRef<{ stop: () => void } | null>(null)
 
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -186,35 +192,39 @@ export function Composer({
     setMousePos({ x, y, pxX, pxY })
   }, [])
 
-  // Execute Bow-and-Arrow launch + message fly-up animation
+  // Send immediately; animation acknowledges the action, never delays it.
   const triggerBowAndArrowSend = useCallback(() => {
     const text = value.trim()
-    if (!text) return
-
-    // Phase 1: Draw bow downward (if not already drawing)
-    setBowPhase('drawing')
-    sfx.playBowDraw()
-
-    setTimeout(() => {
-      // Phase 2: Release bowstring & shoot arrow + ghost message upward
+    if (!text || sendLock.current && lastSentText.current === text) return
+    if (sendTimer.current) clearTimeout(sendTimer.current)
+    lastSentText.current = text
+    sendLock.current = true
+    const recognition = recognitionRef.current
+    recognitionRef.current = null
+    recognition?.stop()
+    setListening(false)
+    setValue('')
+    setDeepResearch(false)
+    onSend(text, { deepResearch })
+    textareaRef.current?.focus()
+    if (!reduced) {
       setBowPhase('launching')
-      sfx.playArrowLaunch()
       setLaunchedGhostText(text.slice(0, 72))
+      sfx.playArrowLaunch()
+    }
+    sendTimer.current = setTimeout(() => {
+      sendLock.current = false
+      setBowPhase('idle')
+      setLaunchedGhostText(null)
+    }, reduced ? 0 : 360)
+  }, [value, onSend, deepResearch, reduced])
 
-      onSend(text, { deepResearch })
-      setValue('')
-      setDeepResearch(false)
-      textareaRef.current?.focus()
-      sfx.playThinkingPulse()
-
-      setTimeout(() => {
-        setBowPhase('idle')
-      }, 360)
-      setTimeout(() => {
-        setLaunchedGhostText(null)
-      }, 480)
-    }, 115)
-  }, [value, onSend, deepResearch])
+  useEffect(() => () => {
+    if (sendTimer.current) clearTimeout(sendTimer.current)
+    const recognition = recognitionRef.current
+    recognitionRef.current = null
+    recognition?.stop()
+  }, [])
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -230,7 +240,9 @@ export function Composer({
       return
     }
     if (listening && recognitionRef.current) {
-      recognitionRef.current.stop()
+      const rec = recognitionRef.current
+      recognitionRef.current = null
+      rec.stop()
       setListening(false)
       return
     }
@@ -241,9 +253,10 @@ export function Composer({
       (window as unknown as { webkitSpeechRecognition?: new () => unknown }).webkitSpeechRecognition
 
     if (!SpeechRec) {
+      setRecorderOpen(true)
       onModelToast({
-        title: 'الميكروفون جاهز في المتصفحات الداعمة',
-        description: 'استخدم Chrome أو Edge للإملاء الصوتي المباشر بالعربي المصري',
+        title: 'المتصفح ده مش بيدعم الإملاء الصوتي',
+        description: 'جرّب Chrome أو Edge عبر HTTPS. التعرف على الكلام ممكن يحتاج اتصال بخدمة المتصفح.',
       })
       return
     }
@@ -254,7 +267,7 @@ export function Composer({
         continuous: boolean
         interimResults: boolean
         onresult: ((e: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null
-        onerror: (() => void) | null
+        onerror: ((event: { error?: string }) => void) | null
         onend: (() => void) | null
         start: () => void
         stop: () => void
@@ -262,25 +275,36 @@ export function Composer({
       rec.lang = 'ar-EG'
       rec.continuous = false
       rec.interimResults = true
+      const existingDraft = value.trim()
       rec.onresult = (event) => {
+        if (recognitionRef.current !== rec) return
         let transcript = ''
         for (let i = 0; i < event.results.length; i++) {
           transcript += event.results[i][0].transcript
         }
         if (transcript.trim()) {
-          setValue(transcript)
+          setValue([existingDraft, transcript].filter(Boolean).join(' '))
         }
       }
-      rec.onerror = () => setListening(false)
-      rec.onend = () => setListening(false)
+      rec.onerror = (event) => {
+        if (recognitionRef.current !== rec) return
+        recognitionRef.current = null
+        setListening(false)
+        onModelToast({ title: event.error === 'not-allowed' ? 'اسمح بالوصول للميكروفون من إعدادات المتصفح' : 'الإملاء الصوتي متوقف', description: event.error === 'network' ? 'خدمة تحويل الكلام لنص مش متاحة دلوقتي. كمّل بالكتابة؛ النص الموجود محفوظ.' : event.error === 'no-speech' ? 'ما التقطتش كلام. جرّب أقرب للميكروفون أو كمّل كتابة.' : 'راجع إذن الميكروفون؛ تقدر تكمّل الكتابة والنص موجود زي ما هو.' })
+      }
+      rec.onend = () => {
+        if (recognitionRef.current === rec) { recognitionRef.current = null; setListening(false) }
+      }
       recognitionRef.current = rec
       setListening(true)
       sfx.playPop(620, 0.03)
       rec.start()
     } catch {
+      recognitionRef.current = null
       setListening(false)
+      onModelToast({ title: 'تعذّر بدء الميكروفون', description: 'راجع إذن المتصفح أو كمّل بالكتابة.' })
     }
-  }, [listening, onVoiceClick, onModelToast])
+  }, [listening, onVoiceClick, onModelToast, value])
 
   const canSend = value.trim().length > 0
   const topSuggestions = suggestions.slice(0, 4)
@@ -310,6 +334,7 @@ export function Composer({
 
   return (
     <div className="relative flex w-full flex-col gap-2">
+      {recorderOpen && <SpeechRecorder open onClose={() => setRecorderOpen(false)} onTranscript={text => { setValue(current => [current.trim(), text].filter(Boolean).join(" ")); onModelToast({ title: "الصوت اتحول لنص — راجعه قبل الإرسال", description: "الاسم والمبلغ والتاريخ محتاجين مراجعتك. لسه مفيش رسالة اتبعتت ولا فلوس اتغيرت." }) }} />}
       {/* Flying Message Projectile Animation when Bow launches */}
       <AnimatePresence>
         {launchedGhostText && (
@@ -445,16 +470,23 @@ export function Composer({
             placeholder={
               listening
                 ? '🎙️ اتكلم دلوقتي… وكيل بيسمعك وبيكتب وراك لحظياً'
-                : 'اتكلم مع وكيل بطبيعتك… بيع، اشتري، ابحث في السوق، أو قوله يبنيلك أداة تتابع أي حاجة'
+                : 'قولّي اللي حصل… مين خد بضاعة، مين سدد، أو باقي في الخزنة كام'
             }
             aria-label="رسالة إلى وكيل"
             onFocus={() => setFocused(true)}
             onBlur={() => setFocused(false)}
-            onChange={(e) => setValue(e.target.value)}
+            onChange={(e) => { const rec = recognitionRef.current; recognitionRef.current = null; rec?.stop(); setListening(false); setValue(e.target.value) }}
             onKeyDown={onKeyDown}
             className="min-h-[44px] max-h-30 flex-1 resize-none rounded-none rounded-t-[1.6rem] border-0 bg-transparent px-4 pt-3 pb-0.5 text-[15px] leading-6 shadow-none placeholder:text-muted-foreground/70 focus-visible:border-0 focus-visible:ring-0 dark:bg-transparent"
           />
 
+          {listening && <p role="status" aria-live="polite" className="px-4 py-2 text-xs text-amber-600">بسمعك… راجع الاسم والمبلغ والتاريخ قبل الإرسال. الصوت بيكتب نص بس، مش بيعتمد فلوس.</p>}
+          <div className="flex items-center gap-1 px-2 pb-1" role="group" aria-label="سرعة وعمق الإجابة">
+            <button type="button" disabled={disabled} aria-pressed={modelKey === 'gemini-flash'} onClick={() => setModel('gemini-flash')} className="rounded-full border px-3 py-1.5 text-xs transition-colors aria-pressed:bg-accent focus-visible:ring-2 focus-visible:ring-ring">⚡ سريع</button>
+            <button type="button" disabled={disabled} aria-pressed={modelKey === 'gemini-pro' || modelKey === 'builtin-deep'} onClick={() => setModel('gemini-pro')} className="rounded-full border px-3 py-1.5 text-xs transition-colors aria-pressed:bg-accent focus-visible:ring-2 focus-visible:ring-ring">تفكير أعمق</button>
+            <button type="button" disabled={disabled || listening} onClick={() => setRecorderOpen(true)} className="ms-auto rounded-full border px-2 py-1.5 text-xs focus-visible:ring-2 focus-visible:ring-ring">تسجيل ومراجعة</button>
+            <span className="hidden text-[10px] text-muted-foreground 2xl:inline">حسب توفر الموديل • نفس قواعد الأمان</span>
+          </div>
           {/* Action Row: 3D Orbital Model Switcher (start) · Voice / Live Web Research / Bow-Arrow Send (end) */}
           <div className="flex items-center justify-between gap-1.5 px-2.5 pb-2 pt-1.5">
             <ModelPicker
@@ -477,6 +509,7 @@ export function Composer({
                     : 'text-muted-foreground hover:text-foreground',
                 )}
                 aria-label={listening ? 'إيقاف التسجيل الصوتي' : 'تحدث بالصوت مع وكيل'}
+                aria-pressed={listening}
                 title={listening ? 'إيقاف الاستماع الصوتي' : 'تحدث بالصوت (عربي مصري)'}
                 onClick={toggleVoiceDictation}
               >
@@ -551,9 +584,9 @@ export function Composer({
               {/* ===== Bow & Arrow Spring Send Button ===== */}
               <motion.button
                 type="submit"
-                disabled={!canSend && bowPhase === 'idle'}
+                disabled={!canSend || bowPhase === 'launching'}
                 onMouseDown={() => {
-                  if (canSend) {
+                  if (canSend && !reduced) {
                     setBowPhase('drawing')
                     sfx.playBowDraw()
                   }
@@ -563,7 +596,7 @@ export function Composer({
                     setBowPhase('idle')
                   }
                 }}
-                whileHover={canSend ? { scale: 1.06 } : undefined}
+                whileHover={canSend && !reduced ? { scale: 1.04 } : undefined}
                 aria-label="إرسال الرسالة"
                 title="إرسال (اسحب أو اضغط لإطلاق السهم)"
                 className={cn(

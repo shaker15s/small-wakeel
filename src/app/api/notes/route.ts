@@ -26,20 +26,20 @@ export async function GET(req: Request) {
     const sp = searchParams(req)
     const businessId = sp.get('businessId')
     if (!businessId) return badRequest('businessId مطلوب')
-    const gate = await guard(req, { businessId, scope: 'business' })
+    const gate = await guard(req, { businessId })
     if (!gate.ok) return gate.res
     const conversationId = sp.get('conversationId')
     if (!conversationId) return badRequest('conversationId مطلوب')
 
     const [business, conversation] = await Promise.all([
       db.business.findUnique({ where: { id: businessId }, select: { id: true } }),
-      db.conversation.findFirst({ where: { id: conversationId, businessId }, select: { id: true } }),
+      db.conversation.findFirst({ where: { id: conversationId, businessId, userId: gate.actor.user.id }, select: { id: true } }),
     ])
     if (!business) return notFound('النشاط التجاري غير موجود')
     if (!conversation) return notFound('المحادثة غير موجودة')
 
     const rows = await db.agentNote.findMany({
-      where: { conversationId, active: true },
+      where: { conversationId, businessId, userId: gate.actor.user.id, active: true },
       orderBy: [{ pinned: 'desc' }, { createdAt: 'desc' }],
       take: 60,
     })
@@ -75,7 +75,7 @@ export async function POST(req: Request) {
     const gate = await guard(req, { businessId: body.businessId, userId: body.userId })
     if (!gate.ok) return gate.res
     const conversation = await db.conversation.findFirst({
-      where: { id: body.conversationId, businessId: body.businessId },
+      where: { id: body.conversationId, businessId: body.businessId, userId: body.userId },
       select: { id: true },
     })
     if (!conversation) return notFound('المحادثة غير موجودة')
@@ -114,10 +114,10 @@ export async function PATCH(req: Request) {
       if (text.length > TEXT_MAX) return badRequest('نص الملاحظة أطول من ٥٠٠ حرف')
     }
 
-    const existing = await db.agentNote.findUnique({ where: { id: body.id } })
-    if (!existing) return notFound('الملاحظة مش موجودة')
-    const gate = await guard(req, { businessId: existing.businessId })
+    const gate = await guard(req)
     if (!gate.ok) return gate.res
+    const existing = await db.agentNote.findFirst({ where: { id: body.id, businessId: gate.actor.business.id, userId: gate.actor.user.id } })
+    if (!existing) return notFound('الملاحظة مش موجودة')
 
     const updated = await db.agentNote.update({
       where: { id: body.id },
@@ -140,10 +140,10 @@ export async function DELETE(req: Request) {
     const sp = searchParams(req)
     const id = sp.get('id')
     if (!id) return badRequest('id مطلوب')
-    const existing = await db.agentNote.findUnique({ where: { id } })
-    if (!existing) return notFound('الملاحظة مش موجودة')
-    const gate = await guard(req, { businessId: existing.businessId })
+    const gate = await guard(req)
     if (!gate.ok) return gate.res
+    const existing = await db.agentNote.findFirst({ where: { id: id, businessId: gate.actor.business.id, userId: gate.actor.user.id } })
+    if (!existing) return notFound('الملاحظة مش موجودة')
     await db.agentNote.update({ where: { id }, data: { active: false } })
     return NextResponse.json({ ok: true })
   } catch (e) {

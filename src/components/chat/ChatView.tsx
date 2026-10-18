@@ -60,6 +60,7 @@ import { NotesSheet } from './NotesSheet'
 import { ProactivePulseBar } from './ProactivePulseBar'
 import { TOOL_ICONS } from './QuickCommandsManager'
 import { BusinessMenu } from '@/components/app/BusinessMenu'
+import { choiceDisplayText } from '@/lib/chat-choice'
 import { NotificationBell } from '@/components/app/NotificationBell'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -140,6 +141,19 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
     setFailedId(null)
   }, [data, business.id, userId, activeConversationId])
 
+  // Measure the floating composer (suggestions, voice status, multiline text).
+  // A fixed pb-44 let it cover approval buttons as soon as fast replies arrived.
+  const composerRef = useRef<HTMLDivElement>(null)
+  const [composerHeight, setComposerHeight] = useState(280)
+  useEffect(() => {
+    const node = composerRef.current
+    if (!node || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(() => setComposerHeight(Math.ceil(node.offsetHeight)))
+    observer.observe(node)
+    setComposerHeight(Math.ceil(node.offsetHeight))
+    return () => observer.disconnect()
+  }, [])
+
   // ---- smart scroll: follow only while the user is near the bottom ----
   const scrollToBottom = useCallback((smooth = true) => {
     const el = scrollRef.current
@@ -158,7 +172,7 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
 
   useEffect(() => {
     if (nearBottomRef.current) scrollToBottom(false)
-  }, [turns, scrollToBottom])
+  }, [turns, composerHeight, scrollToBottom])
 
   // ---- providers for the model picker (rendered INSIDE the composer) ----
   const { data: providersData } = useQuery({
@@ -324,6 +338,7 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
             },
             onCard: (card) => {
               buf.card = card
+              if (card.supersedesRef) setTurns(prev => prev.map(t => t.card && t.card.ref === card.supersedesRef ? { ...t, card: { ...t.card, status: 'CANCELLED' } } : t))
               sfx.playCardReveal(0)
             },
             onCards: (cards) => {
@@ -382,10 +397,13 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
           // keep the failed bubble (retry button) — the server never persisted
           // a reply, so a refetch here would wipe the retry UI
         } else if (doneId) {
+          void queryClient.invalidateQueries({ queryKey: ['workspace-preferences', business.id, userId] })
           // chat state is already exact locally — refresh all app-wide caches
           // so any tool the Brain ran (quick commands, plugins, catalog items,
           // parties, memories, tasks, or new businesses) appears immediately!
+          void queryClient.invalidateQueries({ queryKey: ['cashbook', business.id] })
           void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.overview(business.id, userId) })
+          void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.morningBrief(business.id, userId) })
           void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.operations(business.id) })
           void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.conversations(business.id, userId) })
           void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.suggestions(business.id, userId) })
@@ -503,7 +521,9 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
             : (res.outcome?.failReason ?? 'راجع التفاصيل'),
           variant: res.outcome?.ok ? 'default' : 'destructive',
         })
+        void queryClient.invalidateQueries({ queryKey: ['cashbook', business.id] })
         void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.overview(business.id, userId) })
+          void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.morningBrief(business.id, userId) })
         void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.operations(business.id) })
         void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.items(business.id) })
       } catch (err) {
@@ -529,7 +549,9 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
           prev.map((t) => (t.card?.opId === card.opId ? { ...t, card: { ...t.card!, status: 'CANCELLED' } } : t)),
         )
         toast({ title: 'اتلغت المسودة', description: `${res.operation.ref} اتلغت بلا أي أثر` })
+        void queryClient.invalidateQueries({ queryKey: ['cashbook', business.id] })
         void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.overview(business.id, userId) })
+          void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.morningBrief(business.id, userId) })
       } catch (err) {
         toast({ title: 'مشكلة', description: err instanceof Error ? err.message : 'جرّب تاني', variant: 'destructive' })
       } finally {
@@ -586,7 +608,6 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
 
   // hero chips: dynamic when the endpoint answers, else 2 vertical fallbacks
   const heroSuggestions = !suggestionsQ.isPending && (suggestionsQ.data?.length ?? 0) > 0 ? suggestionsQ.data : null
-  const heroFallback = vertical.examples.slice(0, 2)
 
   return (
     <MotionConfig reducedMotion="user">
@@ -615,8 +636,9 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
           ref={scrollRef}
           onScroll={onScroll}
           className="scroll-warm h-full overflow-y-auto overflow-x-clip"
+          style={{ scrollPaddingBottom: composerHeight + 32 }}
         >
-          <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 pb-44 pt-16 sm:px-6">
+          <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 pt-16 sm:px-6" style={{ paddingBottom: composerHeight + 32 }}>
             <ProactivePulseBar
               business={business}
               userId={userId}
@@ -662,33 +684,22 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
                       <SuggestionPill key={s.id} s={s} index={i} onPick={() => sendSuggestion(s)} />
                     ))
                   ) : (
-                    // the suggestion engine is unreachable → silent static fallback
-                    heroFallback.map((ex, i) => (
-                      <motion.button
-                        key={ex}
-                        type="button"
-                        initial={{ opacity: 0, y: 8 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ delay: 0.15 + i * 0.05, duration: 0.22, ease: 'easeOut' }}
-                        onClick={() => void send(ex)}
-                        className="press chip-lift rounded-full border border-border bg-card/70 px-3.5 py-2 text-xs backdrop-blur-sm transition-all hover:border-wakil-amber/50 hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
-                      >
-                        {ex}
-                      </motion.button>
-                    ))
+                    <p className="max-w-sm text-xs leading-6 text-muted-foreground">{suggestionsQ.isError ? 'الاقتراحات مش متاحة دلوقتي. اكتب طلبك، أو راجع الاتصال.' : 'لسه مفيش استخدام كفاية لاختصارات شخصية. اكتب طلبك الحقيقي، أو حدد أولوياتك من الإعداد الأول.'}</p>
                   )}
                 </div>
               </motion.div>
             )}
 
-            {turns.map((t) => (
+            {turns.map((t, index) => (
               <MessageBubble
                 key={t.id}
                 turn={t}
+                userDisplayText={t.role === 'user' ? choiceDisplayText(t.text, turns[index - 1]?.role === 'assistant' ? turns[index - 1].actions : null) : undefined}
                 onApprove={approve}
                 onReject={reject}
                 busyOpId={busyOpId}
                 onNavigate={onNavigate}
+                onReply={t.id === turns.at(-1)?.id && !isLoading ? text => { void send(text) } : undefined}
                 onRetry={t.id === failedId ? retry : undefined}
                 reveal={t.id === revealId}
                 error={t.id === failedId}
@@ -705,6 +716,7 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
             opacity: composerVisible ? 1 : 0,
           }}
           transition={{ type: 'spring', stiffness: 340, damping: 34, opacity: { duration: 0.18 } }}
+          ref={composerRef}
           className="composer-scrim pointer-events-none absolute inset-x-0 bottom-0 z-20 pt-8"
           aria-hidden={!composerVisible}
         >
@@ -785,7 +797,12 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
               disabled={sending}
               queuedCount={queuedCount}
               modelKey={modelKey}
-              setModel={setModel}
+              setModel={(key) => {
+                setModel(key)
+                if (key === 'gemini-flash' || key === 'gemini-pro' || key === 'builtin-deep') {
+                  void api.updateWorkspacePreferences(business.id, userId, { responseMode: key === 'gemini-flash' ? 'fast' : 'deep' }).then((profile) => queryClient.setQueryData(['workspace-preferences', business.id, userId], profile)).catch(() => toast({ title: 'الوضع اتغير للجلسة فقط', description: 'تعذّر حفظه لحسابك؛ راجع صلاحياتك واتصالك.', variant: 'destructive' }))
+                }
+              }}
               enabledExternal={enabledExternal}
               currentLabel={currentLabel}
               onModelToast={toast}

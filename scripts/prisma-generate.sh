@@ -17,4 +17,4 @@ if ! ls node_modules/@prisma/engines/schema-engine-* >/dev/null 2>&1; then
   export PRISMA_QUERY_ENGINE_LIBRARY="${PRISMA_QUERY_ENGINE_LIBRARY:-/usr/bin/true}"
 fi
 
-exec npx prisma generate "$@"
+exec bun node_modules/prisma/build/index.js generate "$@"

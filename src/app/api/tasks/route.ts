@@ -90,7 +90,7 @@ export async function POST(req: Request) {
     }
     if (!body.businessId) return badRequest('businessId مطلوب')
     if (!body.userId) return badRequest('userId مطلوب')
-    const gate = await guard(req, { businessId: body.businessId, userId: body.userId })
+    const gate = await guard(req, { businessId: body.businessId, userId: body.userId, permission: 'automation.manage' })
     if (!gate.ok) return gate.res
     if (!body.title?.trim()) return badRequest('عنوان المهمة مطلوب')
     if (!body.tool) return badRequest('الأداة مطلوبة')
@@ -101,6 +101,10 @@ export async function POST(req: Request) {
     ])
     if (!business) return notFound('النشاط غير موجود')
     if (!user) return notFound('المستخدم غير موجود')
+
+    if (body.conversationId && !await db.conversation.findFirst({
+      where: { id: body.conversationId, businessId: business.id, userId: user.id },
+    })) return notFound('المحادثة دي مش تبع المستخدم والنشاط ده')
 
     // Only read tools may be scheduled (never a money write)
     if (!READ_TOOLS.has(body.tool)) return badRequest('مش بنجدول أدوات كتابة فلوس — أدوات القراءة بس')

@@ -1,3 +1,4 @@
+import { canUsePermission } from '@/lib/security/permissions'
 // /api/quick-commands — أدواتك السريعة (user-extensible tools).
 // GET    ?businessId → QuickCommandDTO[] (sortOrder asc).
 // POST   {businessId,userId,label,prompt,icon} — label ≤24, prompt ≤200,
@@ -164,6 +165,10 @@ export async function PATCH(req: Request) {
       return NextResponse.json(serialize(touched))
     }
 
+    if (existing.userId !== gate.actor.user.id && !canUsePermission(gate.actor.user.role, 'tools.manage')) {
+      return NextResponse.json({ error: 'الأداة دي مش تبعك' }, { status: 403 })
+    }
+
     const fieldError = validateFields(body.label, body.prompt, body.icon)
     if (fieldError) return badRequest(fieldError)
 
@@ -193,6 +198,9 @@ export async function DELETE(req: Request) {
     const gate = await guard(req, { businessId: existing.businessId })
     if (!gate.ok) return gate.res
 
+    if (existing.userId !== gate.actor.user.id && !canUsePermission(gate.actor.user.role, 'tools.manage')) {
+      return NextResponse.json({ error: 'الأداة دي مش تبعك' }, { status: 403 })
+    }
     await db.quickCommand.delete({ where: { id } })
     return NextResponse.json({ ok: true })
   } catch (e) {

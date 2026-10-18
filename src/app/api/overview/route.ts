@@ -1,3 +1,4 @@
+import { reportedType } from '@/lib/cashbook-report'
 // GET /api/overview?businessId&userId — اليوم dashboard payload:
 // cash position, today's money sums (Cairo day), pending approvals, low stock,
 // expiring (pharmacy), receivables/payables, recent ops, and data-driven alerts.
@@ -7,13 +8,13 @@ import { egp } from '@/lib/format'
 import type { AlertDTO, OverviewDTO } from '@/lib/types'
 import { badRequest, notFound, searchParams, serverError } from '../_lib/http'
 import { guard } from '../_lib/guard'
-import { daysFromTodayCairo, startOfCairoDay } from '../_lib/dates'
+import { cairoIsoDay, daysFromTodayCairo, startOfCairoDay } from '../_lib/dates'
 import { payloadTotalPiastres, serializeCustomer, serializeItem, serializeOp, serializeSupplier, userNameMap } from '../_lib/serialize'
 
 export const dynamic = 'force-dynamic'
 
 // membership = a gym's revenue; leaving it out made «مبيعات النهاردة» read ٠
-const MONEY_TYPES = ['sale', 'membership', 'purchase', 'expense', 'collection', 'payment']
+const MONEY_TYPES = ['cashbook', 'sale', 'membership', 'purchase', 'expense', 'collection', 'payment']
 const EXPIRING_WINDOW_DAYS = 30
 
 const arNum = (n: number) => new Intl.NumberFormat('ar-EG').format(n)
@@ -54,7 +55,7 @@ export async function GET(req: Request) {
           status: 'SUCCEEDED',
           type: { in: MONEY_TYPES },
         },
-        select: { type: true, payload: true },
+        select: { type: true, payload: true, reversedByRef: true },
       }),
       db.operation.count({ where: { businessId, createdAt: { gte: startOfToday } } }),
       db.operation.count({ where: { businessId, createdAt: { gte: startOfToday }, status: 'SUCCEEDED' } }),
@@ -95,7 +96,9 @@ export async function GET(req: Request) {
     }
     for (const op of todayMoneyOps) {
       const total = payloadTotalPiastres(op.payload)
-      switch (op.type) {
+      const payload = JSON.parse(op.payload) as Record<string, unknown>
+      if (op.type === 'cashbook' && (payload.occurredOn !== cairoIsoDay(new Date()) || op.reversedByRef)) continue
+      switch (reportedType(op.type, payload)) {
         case 'membership':
         case 'sale':
           today.sales += total

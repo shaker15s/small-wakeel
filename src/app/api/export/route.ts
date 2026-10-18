@@ -13,7 +13,7 @@ export async function GET(req: Request) {
     const sp = searchParams(req)
     const businessId = sp.get('businessId')
     if (!businessId) return badRequest('businessId مطلوب')
-    const gate = await guard(req, { businessId, scope: 'business' })
+    const gate = await guard(req, { businessId, scope: 'business', permission: 'data.export' })
     if (!gate.ok) return gate.res
 
     const [business, items, customers, suppliers, operations, cashEntries, auditEvents, users] =

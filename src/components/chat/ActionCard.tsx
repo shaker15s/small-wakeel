@@ -33,6 +33,8 @@ import type { ActionCardDTO } from '@/lib/types'
 // tools.ts imports the Prisma client (server-only) and would break the client
 // bundle. Keep the values in sync with tools.ts (single source: lib).
 const TYPE_AR: Record<string, string> = {
+  debt_promise: 'تعديل وعد السداد',
+  cashbook: 'دفتر الكاش والآجل',
   sale: 'بيع',
   purchase: 'شرا',
   expense: 'مصروف',
@@ -190,15 +192,15 @@ export function ActionCard({
                 <div
                   key={`${f.label}-${i}`}
                   className={cn(
-                    'flex items-baseline justify-between gap-4 py-1',
+                    'grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)] items-start gap-x-3 gap-y-1 py-2',
                     i < card.fields.length - 1 && 'border-b border-border/60',
                   )}
                 >
-                  <dt className="shrink-0 text-sm text-muted-foreground">
+                  <dt className="min-w-0 break-words text-sm text-muted-foreground">
                     {f.label}
-                    {f.hint ? <span className="ms-1 text-[11px] opacity-70">{f.hint}</span> : null}
+                    {f.hint ? <span className="mt-1 block text-[11px] leading-5 opacity-70">{f.hint}</span> : null}
                   </dt>
-                  <dd className="min-w-0 text-end text-sm font-semibold">{withNums(f.value)}</dd>
+                  <dd className="min-w-0 break-words text-end text-sm font-semibold">{/^\d{4}-\d{2}-\d{2}$/.test(f.value) ? <bdi dir="ltr" className="inline-block whitespace-nowrap">{f.value}</bdi> : withNums(f.value)}</dd>
                 </div>
               ))}
             </dl>

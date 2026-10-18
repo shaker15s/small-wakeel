@@ -134,7 +134,7 @@ export async function GET(req: Request) {
     if (!businessId) return badRequest('businessId مطلوب')
     const userId = sp.get('userId')
     if (!userId) return badRequest('userId مطلوب')
-    const gate = await guard(req, { businessId, userId })
+    const gate = await guard(req, { businessId, userId, permission: 'tools.manage' })
     if (!gate.ok) return gate.res
 
     const invalid = await validatePair(businessId, userId)
@@ -164,7 +164,7 @@ export async function POST(req: Request) {
     if (!body.businessId) return badRequest('businessId مطلوب')
     if (!body.userId) return badRequest('userId مطلوب')
 
-    const gate = await guard(req, { businessId: body.businessId, userId: body.userId })
+    const gate = await guard(req, { businessId: body.businessId, userId: body.userId, permission: 'tools.manage' })
     if (!gate.ok) return gate.res
 
     const name = String(body.name ?? '').trim().replace(/\s+/g, ' ')
@@ -212,10 +212,10 @@ export async function PATCH(req: Request) {
     }
     if (!body.id) return badRequest('id مطلوب')
 
-    const existing = await db.customTool.findUnique({ where: { id: body.id } })
-    if (!existing) return notFound('الأداة مش موجودة')
-    const gate = await guard(req, { businessId: existing.businessId })
+    const gate = await guard(req, { permission: 'tools.manage' })
     if (!gate.ok) return gate.res
+    const existing = await db.customTool.findFirst({ where: { id: body.id, businessId: gate.actor.business.id } })
+    if (!existing) return notFound('الأداة مش موجودة')
 
     const data: { active?: boolean; name?: string; kind?: string; config?: string } = {}
 
@@ -261,10 +261,10 @@ export async function DELETE(req: Request) {
     const id = sp.get('id')
     if (!id) return badRequest('id مطلوب')
 
-    const existing = await db.customTool.findUnique({ where: { id } })
-    if (!existing) return notFound('الأداة مش موجودة')
-    const gate = await guard(req, { businessId: existing.businessId })
+    const gate = await guard(req, { permission: 'tools.manage' })
     if (!gate.ok) return gate.res
+    const existing = await db.customTool.findFirst({ where: { id: id, businessId: gate.actor.business.id } })
+    if (!existing) return notFound('الأداة مش موجودة')
 
     await db.customTool.delete({ where: { id } })
     return NextResponse.json({ ok: true })

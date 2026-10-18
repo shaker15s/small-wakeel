@@ -6,6 +6,7 @@
 // money it quotes is the balance in the database, and every prompt it offers is
 // a sentence the intent engine actually understands (not a dead button).
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { egp } from '@/lib/format'
 import { testDb } from '../helpers/test-db'
 
 process.env.WAKIL_OFFLINE = '1'
@@ -39,20 +40,20 @@ describe('morning brief — البداية لازم تكون صح', () => {
     expect([...impacts].sort((a: number, b: number) => b - a)).toEqual(impacts)
   })
 
-  test('the collection prompt quotes the balance exactly (owned fixture)', async () => {
+  test('balance review preserves exact piastres and does not assert a collection (owned fixture)', async () => {
     // A fixture big enough to win the ranking, so the assertion cannot race
     // with other test files writing to the shared database copy.
     const fixture = await db.customer.create({
-      data: { businessId: business.id, name: 'زبون اختبار الميزانية', balance: 9_999_900 },
+      data: { businessId: business.id, name: 'زبون اختبار الميزانية', balance: 9_999_955 },
     })
     try {
       const brief = await buildMorningBrief(business.id)
       const collect = brief.items.find((i: { id: string }) => i.id.startsWith('collect:'))
       expect(collect).toBeDefined()
       expect(collect.id).toBe(`collect:${fixture.id}`)
-      // «حصلت ٩٩٬٩٩٩ من زبون اختبار الميزانية» — the number is the balance
-      expect(String(collect.cta.prompt)).toContain('٩٩٬٩٩٩')
-      expect(String(collect.cta.prompt)).toContain('زبون اختبار الميزانية')
+      expect(collect.title).toContain(egp(fixture.balance))
+      expect(collect.cta.prompt).not.toContain('حصلت')
+      expect(collect.cta.label).toBe('راجع الحساب')
     } finally {
       await db.customer.delete({ where: { id: fixture.id } })
     }
@@ -64,10 +65,8 @@ describe('morning brief — البداية لازم تكون صح', () => {
       if (!item.cta.prompt) continue
       const intent = ruleBasedIntentForTest(item.cta.prompt, business.type)
       expect(intent.intent).not.toBe('chat')
-      // a collection prompt must draft a collection, not merely look at data
-      if (item.id.startsWith('collect:')) {
-        expect(intent.opType).toBe('collection')
-      }
+      // A morning suggestion must never claim money has already been received.
+      if (item.id.startsWith('collect:')) expect(intent.intent).toBe('read')
     }
   })
 })

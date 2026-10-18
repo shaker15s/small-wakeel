@@ -48,7 +48,7 @@ interface Biz {
 }
 
 async function api<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`)
+  const res = await fetch(`${BASE}${path}`, { headers: process.env.WAKIL_SMOKE_TOKEN ? { authorization: `Bearer ${process.env.WAKIL_SMOKE_TOKEN}` } : {} })
   if (!res.ok) throw new Error(`${path} → HTTP ${res.status}`)
   return (await res.json()) as T
 }

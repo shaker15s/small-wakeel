@@ -9,7 +9,7 @@ export const dynamic = 'force-dynamic'
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
-    const gate = await guard(req, { scope: 'open' })
+    const gate = await guard(req, { scope: 'admin' })
     if (!gate.ok) return gate.res
     const { id } = await params
     const body = (await req.json()) as {
@@ -18,20 +18,23 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const provider = await db.modelProvider.findUnique({ where: { id }, include: { models: true } })
     if (!provider) return notFound('المزوّد غير موجود')
     if (!body.models) return badRequest('قايمة الموديلات مطلوبة')
+    const models = body.models
 
-    // Replace all model configs in a transaction-ish sequence
-    await db.modelConfig.deleteMany({ where: { providerId: id } })
-    if (body.models.length > 0) {
-      await db.modelConfig.createMany({
-        data: body.models.slice(0, 30).map((m) => ({
-          providerId: id,
-          remoteId: (m.remoteId ?? '').trim(),
-          label: (m.label ?? m.remoteId ?? '').trim(),
-          tier: m.tier === 'air' || m.tier === 'deep' ? m.tier : 'balanced',
-          enabled: m.enabled !== false,
-        })).filter((m: { remoteId: string }) => m.remoteId.length > 0),
-      })
-    }
+    // Replace atomically: concurrent readers never see a half-written registry.
+    await db.$transaction(async (tx) => {
+      await tx.modelConfig.deleteMany({ where: { providerId: id } })
+      if (models.length > 0) {
+        await tx.modelConfig.createMany({
+          data: models.slice(0, 30).map((m) => ({
+            providerId: id,
+            remoteId: (m.remoteId ?? '').trim(),
+            label: (m.label ?? m.remoteId ?? '').trim(),
+            tier: m.tier === 'air' || m.tier === 'deep' ? m.tier : 'balanced',
+            enabled: m.enabled !== false,
+          })).filter((m: { remoteId: string }) => m.remoteId.length > 0),
+        })
+      }
+    })
 
     const updated = await db.modelProvider.findUniqueOrThrow({ where: { id }, include: { models: { orderBy: { label: 'asc' } } } })
     return NextResponse.json({
@@ -49,7 +52,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
 export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
-    const gate = await guard(req, { scope: 'open' })
+    const gate = await guard(req, { scope: 'admin' })
     if (!gate.ok) return gate.res
     const { id } = await params
     const provider = await db.modelProvider.findUnique({ where: { id } })

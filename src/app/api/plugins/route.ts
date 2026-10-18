@@ -60,7 +60,7 @@ export async function POST(req: NextRequest) {
 
     if (!body.userId) return badRequest('userId مطلوب')
 
-    const gate = await guard(req, { businessId: body.businessId, userId: body.userId })
+    const gate = await guard(req, { businessId: body.businessId, userId: body.userId, permission: 'tools.manage' })
     if (!gate.ok) return gate.res
 
     let plugin
@@ -104,7 +104,7 @@ export async function POST(req: NextRequest) {
 
 export async function PATCH(req: NextRequest) {
   try {
-    const gate = await guard(req, { scope: 'business' })
+    const gate = await guard(req, { permission: 'tools.manage' })
     if (!gate.ok) return gate.res
 
     const body = (await req.json().catch(() => ({}))) as {
@@ -114,7 +114,7 @@ export async function PATCH(req: NextRequest) {
     if (!body.id || typeof body.active !== 'boolean') {
       return badRequest('id و active مطلوبين')
     }
-    const updated = await togglePluginActive(body.id, body.active)
+    const updated = await togglePluginActive(body.id, body.active, gate.actor.business.id, gate.actor.user.id)
     if (!updated) return notFound('البلاجن غير موجود')
     return NextResponse.json({ plugin: updated })
   } catch (e) {
@@ -124,12 +124,12 @@ export async function PATCH(req: NextRequest) {
 
 export async function DELETE(req: NextRequest) {
   try {
-    const gate = await guard(req, { scope: 'business' })
+    const gate = await guard(req, { permission: 'tools.manage' })
     if (!gate.ok) return gate.res
 
     const id = req.nextUrl.searchParams.get('id')
     if (!id) return badRequest('id مطلوب')
-    const ok = await deletePlugin(id)
+    const ok = await deletePlugin(id, gate.actor.business.id, gate.actor.user.id)
     if (!ok) return notFound('البلاجن غير موجود')
     return NextResponse.json({ ok: true })
   } catch (e) {

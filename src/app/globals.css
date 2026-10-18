@@ -991,3 +991,7 @@
     transform: none !important;
   }
 }
+
+/* Safe actor-scoped presentation tokens, reset on identity changes. */
+[data-workspace-density="compact"] [data-slot="table-cell"],
+[data-workspace-density="compact"] [data-slot="table-head"] { padding-block: 0.375rem; }

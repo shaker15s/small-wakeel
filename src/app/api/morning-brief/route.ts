@@ -23,7 +23,7 @@ export async function GET(req: Request) {
     const business = await db.business.findUnique({ where: { id: businessId }, select: { id: true } })
     if (!business) return notFound('النشاط التجاري غير موجود')
 
-    const brief = await buildMorningBrief(businessId)
+    const brief = await buildMorningBrief(businessId, userId)
     // the brief is a snapshot of a living ledger — never cache it
     return NextResponse.json(brief, { headers: { 'cache-control': 'no-store' } })
   } catch (e) {

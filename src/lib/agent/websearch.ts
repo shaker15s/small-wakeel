@@ -1,26 +1,6 @@
-// وكيل — web search, pluggable (R29).
-//
-// Why this module exists: `research.ts` called `z-ai-web-dev-sdk` directly, so
-// «ابحث في الويب» worked ONLY on a machine with a `.z-ai-config` file. In every
-// other environment (a fresh clone, a container, an air-gapped install) the
-// search silently died and the deep-research report quietly leaned on the
-// ledger alone — the owner asked for market prices and got his own numbers back.
-//
-// Three backends, tried in order, first success wins:
-//
-//   1. `zai`   — the built-in gateway (needs `.z-ai-config`), best quality.
-//   2. `http`  — `WAKIL_SEARCH_URL`, any endpoint that answers
-//                `GET {url}?q=…&num=N` with `{results:[{title,url,snippet}]}`
-//                (or `{hits|items|data:[…]}` — the shapes common APIs use).
-//   3. `mock`  — the local dev fixture (`mini-services/mock-provider`, :3031)
-//                so the flow is demonstrable end-to-end without credentials.
-//
-// Contract: NEVER throws. A search that fails returns `{ results: [], error }`
-// and the caller decides whether to mention it. Search results are never used to
-// invent a number — they are shown as SOURCES with a snippet, and the ledger
-// stays the source of truth for anything about the owner's own business.
-
+// Production search has no fixture backend or silent synthetic fallback.
 import { zaiAvailable } from './llm'
+import { publicFetch } from '@/lib/security/provider-network'
 
 export interface WebResult {
   title: string
@@ -28,29 +8,20 @@ export interface WebResult {
   snippet: string
   host: string
   /** which backend produced this result — surfaced in the UI/debug */ 
-  via: 'zai' | 'http' | 'mock'
+  via: 'zai' | 'http'
 }
 
 export interface WebSearchOutcome {
   results: WebResult[]
-  backend: 'zai' | 'http' | 'mock' | 'none'
+  backend: 'zai' | 'http' | 'none'
   error?: string
   ms: number
 }
 
-export function searchBackend(): 'zai' | 'http' | 'mock' | 'none' {
+export function searchBackend(): 'zai' | 'http' | 'none' {
   if (zaiAvailable()) return 'zai'
   if ((process.env.WAKIL_SEARCH_URL ?? '').trim()) return 'http'
-  if (process.env.WAKIL_NO_MOCK_SEARCH === '1') return 'none'
-  return 'mock'
-}
-
-/** The local fixture lives next to the mock provider (same port, `/search`). */
-export function mockSearchUrl(): string {
-  const base = (process.env.WAKIL_SEARCH_URL ?? '').trim()
-  if (base) return base
-  const provider = (process.env.WAKIL_MOCK_PROVIDER_URL ?? 'http://localhost:3031').replace(/\/$/, '')
-  return `${provider}/search`
+  return 'none'
 }
 
 const SEARCH_TIMEOUT_MS = 8_000
@@ -89,7 +60,7 @@ function normalise(json: unknown): { title: string; url: string; snippet: string
 
 async function httpSearch(url: string, query: string, num: number): Promise<WebResult[]> {
   const target = `${url}${url.includes('?') ? '&' : '?'}q=${encodeURIComponent(query)}&num=${num}`
-  const res = await fetch(target, {
+  const res = await publicFetch(target, {
     headers: {
       accept: 'application/json',
       ...(process.env.WAKIL_SEARCH_KEY ? { authorization: `Bearer ${process.env.WAKIL_SEARCH_KEY}` } : {}),
@@ -122,18 +93,9 @@ export async function searchWeb(query: string, num = 5): Promise<WebSearchOutcom
     const results =
       backend === 'zai'
         ? await zaiSearch(query, num)
-        : await httpSearch(backend === 'mock' ? mockSearchUrl() : (process.env.WAKIL_SEARCH_URL ?? ''), query, num)
+        : await httpSearch(process.env.WAKIL_SEARCH_URL ?? '', query, num)
     return { results: results.slice(0, num).map((r) => ({ ...r, via: backend })), backend, ms: Date.now() - started }
   } catch (err) {
-    // A zai failure may still be answered by the local fixture (dev machines).
-    if (backend === 'zai') {
-      try {
-        const results = await httpSearch(mockSearchUrl(), query, num)
-        return { results, backend: 'mock', ms: Date.now() - started }
-      } catch {
-        /* fall through to the error report */
-      }
-    }
     return { results: [], backend, error: err instanceof Error ? err.message : 'فشل البحث', ms: Date.now() - started }
   }
 }
@@ -141,5 +103,5 @@ export async function searchWeb(query: string, num = 5): Promise<WebSearchOutcom
 /** Honest one-line status for the health endpoint / settings screen. */
 export function searchStatus(): { backend: string; url: string | null } {
   const backend = searchBackend()
-  return { backend, url: backend === 'http' || backend === 'mock' ? mockSearchUrl() : null }
+  return { backend, url: backend === 'http' ? (process.env.WAKIL_SEARCH_URL ?? null) : null }
 }
