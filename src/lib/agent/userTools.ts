@@ -1,3 +1,4 @@
+import { publicFetch } from '@/lib/security/provider-network'
 // وكيل — «أدوات بتاعتك» (R16): the user-extensible tool registry the AGENT
 // actually uses. The shop owner adds his own tools (a web source scoped to a
 // site he trusts, or a read-only webhook that returns DATA), and the
@@ -114,7 +115,7 @@ export function userToolsPromptLine(tools: CustomToolRow[]): string {
 
 /** Private/loopback/link-local/metadata hostnames the agent must never fetch. */
 function isBlockedHost(hostname: string): boolean {
-  if (process.env.ALLOW_LOCAL_WEBHOOKS === '1') return false
+  if (process.env.NODE_ENV !== 'production' && process.env.ALLOW_LOCAL_WEBHOOKS === '1') return false
   const h = hostname.toLowerCase().replace(/\.$/, '')
   if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.internal')) return true
   if (h === '0.0.0.0' || h === '::' || h === '::1') return true // IPv6 any/loopback
@@ -238,7 +239,9 @@ async function runWebhook(
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), 8_000) // hard 8s cap
   try {
-    const res = await fetch(parsed.toString(), {
+    const request = process.env.NODE_ENV !== 'production' && process.env.ALLOW_LOCAL_WEBHOOKS === '1'
+      ? fetch : publicFetch
+    const res = await request(parsed.toString(), {
       method,
       ...(body ? { body } : {}),
       headers: {
@@ -246,8 +249,7 @@ async function runWebhook(
         ...(body ? { 'content-type': 'application/json' } : {}),
       },
       signal: ctrl.signal,
-      redirect: 'error', // a redirect could bounce past the SSRF guard — refuse
-      cache: 'no-store',
+      redirect: 'error', // publicFetch also enforces this at the transport layer
     })
     if (!res.ok) {
       return { ok: false, label: tool.name, summary: `الرابط رد بكود ${toArabicDigits(res.status)} — كمّلت من غيرها` }

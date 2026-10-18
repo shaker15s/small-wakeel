@@ -9,7 +9,8 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { api } from '@/lib/api'
 import { egp } from '@/lib/format'
-import { QUERY_KEYS } from '@/lib/store'
+import { Button } from '@/components/ui/button'
+import { QUERY_KEYS, useWakil } from '@/lib/store'
 import { useQuery } from '@tanstack/react-query'
 import { cn } from '@/lib/utils'
 import type { CustomerDTO, SupplierDTO } from '@/lib/types'
@@ -18,7 +19,7 @@ import { EmptyState, ErrorState, Money, ViewHeader, ViewProps, arNum, PAGE, PAGE
 
 function PersonRow({ name, phone, plan }: { name: string; phone?: string | null; plan?: string | null }) {
   return (
-    <span className="flex min-w-0 flex-col">
+    <span className="flex min-w-0 flex-1 flex-col">
       <span className="truncate text-sm font-medium">{name}</span>
       <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
         {plan && <span className="rounded bg-muted px-1.5 py-0.5">{plan}</span>}
@@ -43,7 +44,8 @@ function PersonRow({ name, phone, plan }: { name: string; phone?: string | null;
   )
 }
 
-export default function AccountsView({ businessId, userId }: ViewProps) {
+export default function AccountsView({ businessId, userId, onNavigate }: ViewProps) {
+  const ask = (text: string) => { useWakil.getState().askAgent(text); onNavigate?.('chat') }
   const { data, isPending, isError, error, refetch } = useQuery({
     queryKey: QUERY_KEYS.overview(businessId, userId),
     queryFn: () => api.overview(businessId, userId),
@@ -115,7 +117,7 @@ export default function AccountsView({ businessId, userId }: ViewProps) {
                     key={c.id}
                     className="chip-lift flex items-center justify-between gap-3 rounded-lg px-2 py-2.5 transition-colors hover:bg-muted/50"
                   >
-                    <PersonRow name={c.name} phone={c.phone} plan={c.plan} />
+                    <div className="min-w-0 flex-1"><PersonRow name={c.name} phone={c.phone} plan={c.plan} /><Button variant="link" size="sm" className="h-8 px-0 text-xs" onClick={() => ask(`حساب العميل ${c.name}`)}>كشف الحساب والوعود</Button></div>
                     <span
                       className={cn(
                         'num shrink-0 text-sm font-bold text-wakil-teal tabular-nums',
@@ -170,7 +172,7 @@ export default function AccountsView({ businessId, userId }: ViewProps) {
                     key={s.id}
                     className="chip-lift flex items-center justify-between gap-3 rounded-lg px-2 py-2.5 transition-colors hover:bg-muted/50"
                   >
-                    <PersonRow name={s.name} phone={s.phone} />
+                    <div className="min-w-0 flex-1"><PersonRow name={s.name} phone={s.phone} /><Button variant="link" size="sm" className="h-8 px-0 text-xs" onClick={() => ask(`حساب المورد ${s.name}`)}>كشف الحساب والوعود</Button></div>
                     <span className="num shrink-0 text-sm font-bold text-wakil-amber tabular-nums">
                       {egp(s.balance)}
                     </span>

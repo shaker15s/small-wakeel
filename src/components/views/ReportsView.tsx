@@ -1,4 +1,5 @@
 'use client'
+import { CashbookReport } from './CashbookReport'
 
 // وكيل — شاشة «التقارير»: تقرير فترة نظيف قابل للطباعة + تصدير البيانات.
 
@@ -48,6 +49,8 @@ export default function ReportsView({ businessId, businessName }: ReportsViewPro
 
   const totals = data?.totals
   const profit = totals != null ? totals.sales - totals.purchases - totals.expenses : 0
+
+  if (data?.cashbookMode) return <CashbookReport data={data} onRangeChange={setRange} />
 
   if (isError) {
     return (

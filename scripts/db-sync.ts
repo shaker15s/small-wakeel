@@ -118,7 +118,7 @@ function createTableSql(model: DmmfModel, indexes: { name: string; fields: strin
   }
 
   const uniqueCols = new Set(uniqueIndexes.flatMap((u) => (u.fields.length === 1 ? u.fields : [])))
-  for (const idx of indexes) {
+  for (const idx of indexes.filter((i) => i.kind === 'unique')) {
     if (idx.fields.length === 1 && uniqueCols.has(idx.fields[0])) continue
     constraints.push(`  UNIQUE (${idx.fields.map(quote).join(', ')})`)
   }

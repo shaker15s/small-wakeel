@@ -453,7 +453,7 @@ export function PluginAndTaskStudioModal() {
                                   <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground tabular-nums">
                                     <span>v{plugin.version}</span>
                                     <span aria-hidden="true">·</span>
-                                    <span>{plugin.author === 'ai-synthesized' ? 'توليد ذكاء اصطناعي' : 'نواة وكيل'}</span>
+                                    <span>{plugin.author === 'ai-synthesized' ? 'توليد ذكاء اصطناعي' : plugin.author === 'wakil-deterministic-compiler' ? 'تجميع وحدات معتمدة — بدون استدلال حي' : 'نواة وكيل'}</span>
                                     <span aria-hidden="true">·</span>
                                     <span>استُخدم {plugin.usageCount} مرة</span>
                                   </div>
@@ -478,7 +478,7 @@ export function PluginAndTaskStudioModal() {
                                           : 'تثبيت'}
                                     </span>
                                   </button>
-                                  {plugin.installed && plugin.author === 'ai-synthesized' && (
+                                  {plugin.installed && plugin.author !== 'wakil-core' && (
                                     <button
                                       type="button"
                                       onClick={() => void handleDeletePlugin(plugin)}

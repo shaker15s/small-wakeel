@@ -10,7 +10,7 @@
 // card/cards/actions render AFTER the stream completes (ChatGPT order: text
 // first, visuals below, staggered reveal).
 
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { motion, type Transition } from 'framer-motion'
 import { AlertCircle, BadgeCheck, Check, Compass, Copy, Cpu, Loader2, NotebookPen, RotateCcw, TriangleAlert } from 'lucide-react'
 
@@ -96,20 +96,24 @@ function latestStep(steps: ThinkingStep[] | null | undefined): ThinkingStep | nu
 
 export function MessageBubble({
   turn,
+  userDisplayText,
   onApprove,
   onReject,
   busyOpId,
   onNavigate,
+  onReply,
   onRetry,
   reveal = false,
   error = false,
 }: {
   turn: ChatTurnWithMeta
+  userDisplayText?: string
   onApprove?: (card: ActionCardDTO, reason?: string) => void
   onReject?: (card: ActionCardDTO) => void
   busyOpId?: string | null
   /** deep-link navigation for ChatAction buttons */
   onNavigate?: (view: ViewKey) => void
+  onReply?: (text: string) => void
   /** retry the previous user text after a failed turn */
   onRetry?: () => void
   /** true only while the just-finalized turn reveals its visuals (stagger) */
@@ -121,14 +125,14 @@ export function MessageBubble({
   if (turn.role === 'user') {
     const optimistic = turn.id.startsWith('local-')
     return (
-      <div className="settle-in flex w-full justify-end">
+      <div className="settle-in flex w-full justify-end" data-message-role="user">
         <motion.div
           initial={optimistic ? { opacity: 0, y: 24, scale: 0.92 } : false}
           animate={{ opacity: 1, y: 0, scale: 1 }}
           transition={{ type: 'spring', stiffness: 440, damping: 24 }}
           className="max-w-[85%] whitespace-pre-wrap break-words rounded-[1.25rem] rounded-tl-md bg-[var(--wakil-amber-soft)] px-4 py-2.5 text-[15px] leading-7 text-accent-foreground shadow-sm"
         >
-          {withNums(turn.text)}
+          {withNums(userDisplayText ?? turn.text)}
         </motion.div>
       </div>
     )
@@ -324,7 +328,7 @@ export function MessageBubble({
             className="flex flex-wrap items-center gap-2 rounded-xl border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive"
           >
             <AlertCircle className="size-4 shrink-0" aria-hidden="true" />
-            <span className="min-w-0 flex-1">{hasText ? 'الرد اتقطع في النص' : 'حصل خطأ في الرد'}</span>
+            <span className="min-w-0 flex-1">{hasText ? 'الرد اتقطع في النص — حالته النهائية لسه مش مؤكدة' : 'تعذّر استلام الرد — تقدر تحاول تاني'}</span>
             {onRetry ? (
               <Button
                 type="button"
@@ -383,7 +387,7 @@ export function MessageBubble({
 
         {actions && actions.length > 0 ? (
           <motion.div {...revealProps(actionsDelay)} className="w-full">
-            <ChatActions actions={actions} onNavigate={onNavigate} />
+            <ChatActions actions={actions} onNavigate={onNavigate} onReply={onReply} />
           </motion.div>
         ) : null}
       </div>
@@ -396,15 +400,21 @@ export function MessageBubble({
 // ---------------------------------------------------------------------------
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false)
+  const [copyError, setCopyError] = useState(false)
+  const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => { if (resetTimer.current) clearTimeout(resetTimer.current) }, [])
 
   const onCopy = async () => {
     if (copied) return
     try {
       await navigator.clipboard.writeText(text)
       setCopied(true)
-      window.setTimeout(() => setCopied(false), 1500)
+      setCopyError(false)
     } catch {
-      // clipboard unavailable (permissions) — silent no-op
+      setCopyError(true)
+    } finally {
+      if (resetTimer.current) clearTimeout(resetTimer.current)
+      resetTimer.current = setTimeout(() => { setCopied(false); setCopyError(false) }, 2000)
     }
   }
 
@@ -412,14 +422,16 @@ function CopyButton({ text }: { text: string }) {
     <button
       type="button"
       onClick={() => void onCopy()}
-      aria-label={copied ? 'اتنسخ' : 'انسخ الرد'}
+      aria-label={copyError ? 'تعذّر النسخ — اضغط للمحاولة تاني' : copied ? 'اتنسخ' : 'انسخ الرد'}
+      title={copyError ? 'المتصفح منع النسخ؛ جرب تاني أو حدد النص وانسخه' : 'انسخ الرد'}
       className={cn(
         'absolute end-0 top-0 z-10 hidden size-7 items-center justify-center rounded-full border border-border bg-card text-muted-foreground shadow-sm transition-all sm:flex',
         'opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:text-foreground',
         copied && 'border-emerald-300 text-emerald-600 dark:border-emerald-500/40 dark:text-emerald-400',
       )}
     >
-      {copied ? (
+      <span className="sr-only" role="status">{copyError ? 'تعذّر النسخ، جرب تاني أو انسخ النص يدويًا' : copied ? 'اتنسخ الرد' : ''}</span>
+      {copyError ? <AlertCircle className="size-3.5 text-destructive" aria-hidden="true" /> : copied ? (
         <motion.span
           key="check"
           initial={{ scale: 0.5, opacity: 0 }}

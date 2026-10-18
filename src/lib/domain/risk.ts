@@ -7,6 +7,8 @@ import type { OpType, Risk } from '../types'
 export const R3_AMOUNT_THRESHOLD = 1_000_000 // 10,000 EGP
 
 const BASE_RISK: Record<OpType, Risk> = {
+  debt_promise: 'R2',
+  cashbook: 'R2',
   sale: 'R2',
   purchase: 'R2',
   expense: 'R2',
@@ -39,6 +41,8 @@ export const RISK_META: Record<Risk, { label: string; color: string; hint: strin
 
 /** Who may DRAFT each type (agent acts on behalf of the user). */
 const DRAFT_ALLOWED: Record<string, string[]> = {
+  debt_promise: ['owner', 'supervisor', 'cashier'],
+  cashbook: ['owner', 'supervisor', 'cashier'],
   sale: ['owner', 'cashier', 'supervisor'],
   purchase: ['owner', 'supervisor'],
   expense: ['owner', 'supervisor'],
@@ -63,8 +67,8 @@ const DRAFT_ALLOWED: Record<string, string[]> = {
  *   R3    → owner, supervisor only (large/sensitive amounts, reversals)
  *   R4    → nobody (blocked by design)
  *
- * Shops that need a stricter segregation of duties — nobody approves their own
- * draft, whatever its size — flip `WAKIL_STRICT_APPROVALS=1`, which routes
+ * Shops that need management-only approvals (including drafts created by
+ * management themselves) flip `WAKIL_STRICT_APPROVALS=1`, which routes
  * EVERY write through management. It is opt-in so the default demo flows keep
  * working, but real deployments with employees should turn it on.
  */
@@ -82,4 +86,9 @@ export function canApprove(role: string, risk: Risk): boolean {
 
 export function canDraft(role: string, type: OpType): boolean {
   return DRAFT_ALLOWED[type]?.includes(role) ?? false
+}
+
+/** Approval needs BOTH operation-type and risk capabilities. */
+export function canApproveOperation(role: string, type: OpType, risk: Risk): boolean {
+  return canDraft(role, type) && canApprove(role, risk)
 }

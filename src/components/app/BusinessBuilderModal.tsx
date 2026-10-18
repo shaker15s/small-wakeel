@@ -31,7 +31,7 @@ export function BusinessBuilderModal() {
   const [customTypeLabel, setCustomTypeLabel] = useState<string>('')
   const [name, setName] = useState<string>('')
   const [ownerName, setOwnerName] = useState<string>('صاحب العمل')
-  const [openingCash, setOpeningCash] = useState<string>('15000')
+  const [openingCash, setOpeningCash] = useState<string>('0')
   const [customItemsRaw, setCustomItemsRaw] = useState<string>('')
   const [submitting, setSubmitting] = useState(false)
 
@@ -54,7 +54,7 @@ export function BusinessBuilderModal() {
         name: cleanName,
         type: finalType,
         ownerName: ownerName.trim() || 'صاحب العمل',
-        openingCash: Number(openingCash) || 10000,
+        openingCash: Number(openingCash),
         customItems: customItems.length > 0 ? customItems : undefined,
       })
       await queryClient.invalidateQueries({ queryKey: QUERY_KEYS.bootstrap })
@@ -65,7 +65,7 @@ export function BusinessBuilderModal() {
       setView('chat')
       toast({
         title: `تم إنشاء نشاط «${res.business.name}» بنجاح`,
-        description: 'جهزنا الكتالوج المبدئي والأوامر السريعة ووكيل جاهز للشغل معاك',
+        description: 'النشاط اتفتح من غير بضاعة أو أرصدة أو موظفين تجريبيين. راجع بياناتك الفعلية وكمّلها.',
       })
       setBusinessBuilderOpen(false)
       setName('')
@@ -92,7 +92,7 @@ export function BusinessBuilderModal() {
             <div>
               <DialogTitle className="text-lg font-bold">بناء نشاط تجاري جديد</DialogTitle>
               <DialogDescription className="text-xs">
-                وكيل هيبني النشاط بمصطلحاته وكتالوجه المبدئي وأوامره السريعة في ثانية، أو تقدر تطلبه منه في الشات مباشرة.
+                هنفتح نشاط فاضي؛ أي أسماء أصناف تدخلها هتبدأ بصفر مخزون وأسعار لحد ما تدخل بياناتها الفعلية.
               </DialogDescription>
             </div>
           </div>

@@ -1,0 +1,1 @@
+ALTER TABLE "ShopReminder" ADD COLUMN "revision" INTEGER NOT NULL DEFAULT 0;

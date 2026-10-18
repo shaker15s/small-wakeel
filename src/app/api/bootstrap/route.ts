@@ -1,3 +1,4 @@
+import { providerUrl } from '@/lib/security/provider-network'
 // GET / POST /api/bootstrap — businesses (with users) + external model providers,
 // plus dynamic business creation (POST). Never exposes ModelProvider.apiKey.
 import { NextRequest, NextResponse } from 'next/server'
@@ -18,8 +19,9 @@ export async function GET(req: NextRequest) {
     if (!gate.ok) return gate.res
     const [businesses, providers] = await Promise.all([
       db.business.findMany({
+        where: gate.principal ? { id: gate.principal.business.id } : undefined,
         orderBy: { createdAt: 'asc' },
-        include: { users: true },
+        include: { users: gate.principal ? { where: { id: gate.principal.user.id } } : true },
       }),
       db.modelProvider.findMany({
         orderBy: { createdAt: 'asc' },
@@ -28,10 +30,12 @@ export async function GET(req: NextRequest) {
     ])
 
     const dto: BootstrapDTO = {
+      deploymentAdmin: gate.deploymentAdmin === true,
       businesses: businesses.map((b) => ({
         id: b.id,
         name: b.name,
         type: b.type as Vertical,
+        workflowMode: b.workflowMode,
         users: b.users
           .slice()
           .sort(
@@ -46,7 +50,9 @@ export async function GET(req: NextRequest) {
             title: u.title,
           })),
       })),
-      providers: providers.map((p) => ({
+      // Legacy localhost fixture providers stay inspectable to deployment admins,
+      // but are never offered as live model choices in a real workspace.
+      providers: providers.filter((p) => { try { providerUrl(p.baseUrl); return true } catch { return false } }).map((p) => ({
         id: p.id,
         name: p.name,
         baseUrl: p.baseUrl,
@@ -68,7 +74,7 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
-    const gate = await guard(req, { scope: 'open' })
+    const gate = await guard(req, { scope: 'admin' })
     if (!gate.ok) return gate.res
     const body = (await req.json().catch(() => ({}))) as {
       name?: string
@@ -86,7 +92,7 @@ export async function POST(req: NextRequest) {
         ? body.openingCashEgp
         : typeof body.openingCash === 'number'
           ? body.openingCash
-          : 15000
+          : 0
 
     const created = await createNewBusinessWithDefaults({
       name,

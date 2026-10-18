@@ -1,3 +1,5 @@
+import { reportedType } from '@/lib/cashbook-report'
+import { cashbookCash } from '@/lib/domain/cashbook'
 // وكيل — read tools: deterministic queries the agent can run (R0).
 // Results are structured ResultCardDTOs the UI renders as tables/kv cards.
 
@@ -8,7 +10,7 @@ import { db } from '@/lib/db'
 import type { ResultCardDTO } from '@/lib/types'
 import { egp, qty as fmtQty, arDate, arTime } from '@/lib/format'
 import { arUnit } from '@/lib/verticals'
-import { startOfCairoDay } from '@/app/api/_lib/dates'
+import { cairoIsoDay, startOfCairoDay } from '@/app/api/_lib/dates'
 import { inspectDesktopApplication, scanRunningApplications } from './cli-anything/bridge'
 
 export type ReadTool =
@@ -159,6 +161,8 @@ function opRow(op: Operation, userName?: string): Record<string, string> {
 }
 
 export const TYPE_AR: Record<string, string> = {
+  debt_promise: 'تعديل وعد السداد',
+  cashbook: 'دفتر الكاش والآجل',
   sale: 'بيع',
   purchase: 'شرا',
   expense: 'مصروف',
@@ -291,6 +295,28 @@ export async function runReadTool(
 ): Promise<ResultCardDTO[]> {
   const biz = await db.business.findUniqueOrThrow({ where: { id: businessId } })
 
+  if (biz.workflowMode === 'cashbook' && ['get_profit_margin', 'get_profit_by_item', 'analyze_profitability', 'forecast_stockout', 'forecast_stock', 'get_stock_value', 'get_top_items', 'compare_periods', 'get_staff_performance'].includes(tool)) {
+    return [{ kind: 'text', title: 'البيانات مش كفاية للحساب ده', body: 'دفتر المحل مش بيسجل كل بيعة أو استهلاك المخزون. ما ينفعش نستنتج الربح أو سرعة نفاد صنف أو أداء الكاشير من عدّ الخزنة. أقدر أراجع الكاش والديون والمصاريف ومواعيد السداد المسجلة، أو أسألك عن الناقص فعلًا.' }]
+  }
+  if (biz.workflowMode === 'cashbook' && ['get_daily_summary', 'get_period_totals', 'expense_breakdown'].includes(tool)) {
+    const days = tool === 'get_daily_summary' ? 1 : Math.max(1, Math.min(365, Number(args.days ?? 30) || 30))
+    const from = new Date(cairoIsoDay(new Date()) + 'T12:00:00Z'); from.setUTCDate(from.getUTCDate() - days + 1)
+    const fromDay = from.toISOString().slice(0, 10)
+    const ops = await db.operation.findMany({ where: { businessId, status: 'SUCCEEDED', createdAt: { gte: startOfCairoDay(days - 1) } } })
+    const sums: Record<string, number> = { sale: 0, purchase: 0, expense: 0, collection: 0, payment: 0 }
+    for (const op of ops) {
+      const p = readPayload(op.payload)
+      if (op.type === 'cashbook' && (op.reversedByRef || String(p.occurredOn) < fromDay)) continue
+      const type = reportedType(op.type, p)
+      if (type in sums) sums[type] += payloadMoney(p)
+    }
+    const cash = await db.$transaction(tx => cashbookCash(tx, businessId))
+    return [{ kind: 'kv', title: `المسجل فقط · آخر ${days} يوم`, rows: [
+      { label: 'رصيد الخزنة المسجل دلوقتي', value: egp(cash) }, { label: 'بيع مسجل فقط (يشمل الآجل)', value: egp(sums.sale) },
+      { label: 'شراء مسجل (يشمل الآجل)', value: egp(sums.purchase) }, { label: 'مصروفات مسجلة', value: egp(sums.expense) },
+      { label: 'تحصيلات مسجلة', value: egp(sums.collection) }, { label: 'سداد مسجل', value: egp(sums.payment) },
+    ] }, { kind: 'text', title: 'مش حساب أرباح', body: 'ده جزء الدفتر اللي اتسجل، مش إجمالي المبيعات أو الربح. فرق عدّ الخزنة غير مصنف. القرض والسحب والإيداع مش مبيعات.' }]
+  }
   switch (tool) {
     case 'get_cash_position': {
       const entries = await db.cashEntry.findMany({ where: { businessId }, select: { direction: true, amount: true } })
@@ -1734,7 +1760,7 @@ export async function runReadTool(
       return [
         {
           kind: 'table',
-          title: 'برامج وتطبيقات سطح المكتب المرصودة على الجهاز (CLI-Anything)',
+          title: 'تشخيص بيئة السيرفر فقط — ليس جهاز العميل',
           columns: [
             { key: 'name', label: 'البرنامج' },
             { key: 'category', label: 'النوع' },
@@ -1744,7 +1770,7 @@ export async function runReadTool(
           rows: apps.slice(0, 10).map((a) => ({
             name: a.name,
             category: a.category === 'accounting' ? 'برنامج محاسبة' : a.category === 'pos' ? 'نظام كاشير ومبيعات' : a.category === 'spreadsheet' ? 'جداول إكسل' : a.category === 'database' ? 'قاعدة بيانات' : 'تطبيق سطح مكتب',
-            status: a.hasCliHarness ? '🟢 جاهز للتسخير والربط' : '⚪ مسجل',
+            status: a.hasCliHarness ? 'موصل موثّق' : 'غير متصل — ملف تعريفي فقط',
             memory: a.memoryUsage || '—',
           })),
           footer: [{ label: 'إجمالي التطبيقات المرصودة', value: `${apps.length} برامج` }],

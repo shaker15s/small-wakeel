@@ -16,12 +16,16 @@ model Business {
   id             String   @id @default(cuid())
   name           String
   type           String // supermarket | gym | pharmacy | attar
+  workflowMode   String @default("inventory") // cashbook: no per-item cash sales required
   currency       String   @default("EGP")
   timezone       String   @default("Africa/Cairo")
   openingCash    Int      @default(0) // piastres
   opSeq          Int      @default(0)
   createdAt      DateTime @default(now())
 
+  cashbookEntries CashbookEntry[]
+  shopReminders ShopReminder[]
+  workspacePreferences WorkspacePreference[]
   users          User[]
   items          Item[]
   customers      Customer[]
@@ -35,6 +39,8 @@ model Business {
   usageEvents    UsageEvent[]
   quickCommands  QuickCommand[]
   agentNotes     AgentNote[]
+  subscriptions Subscription?
+  invitations Invitation[]
   settings       AgentSettings?
   tools          CustomTool[] @relation("BusinessTools")
 }
@@ -48,6 +54,8 @@ model User {
   title      String? // job title in Arabic
   createdAt  DateTime @default(now())
   tools      CustomTool[] @relation("UserTools")
+  workspacePreferences WorkspacePreference[]
+  membership Membership?
 }
 
 model Item {
@@ -102,6 +110,7 @@ model Supplier {
 
 model Operation {
   id             String    @id @default(cuid())
+  cashbookEntry CashbookEntry?
   ref            String    @unique // WKL-1001
   businessId     String
   business       Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
@@ -169,6 +178,7 @@ model Conversation {
   messageCount  Int       @default(0)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
+  cashbookDialogue CashbookDialogue?
   messages      Message[]
   notes         AgentNote[]
 
@@ -325,6 +335,7 @@ model ModelProvider {
   apiKey    String
   createdAt DateTime      @default(now())
   models    ModelConfig[]
+  speechSettings SpeechSettings[]
 }
 
 model ModelConfig {
@@ -360,4 +371,197 @@ model CustomTool {
   user       User      @relation("UserTools", fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([businessId, userId, active])
+}
+
+// SaaS identities are separate from per-business actors. Existing demo users
+// are never silently claimed by matching email/name or assigned to an account.
+model Account {
+  id String @id @default(cuid())
+  email String @unique
+  name String
+  passwordHash String
+  verifiedAt DateTime?
+  disabledAt DateTime?
+  mfaSecret String?
+  pendingMfaSecret String?
+  pendingMfaAt DateTime?
+  mfaLastStep Int @default(-1)
+  recoveryHashes String @default("[]")
+  createdAt DateTime @default(now())
+  memberships Membership[]
+  sessions Session[]
+  tokens AccountToken[]
+}
+
+model Membership {
+  id String @id @default(cuid())
+  accountId String
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  userId String @unique
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  disabledAt DateTime?
+  createdAt DateTime @default(now())
+  sessions Session[]
+  @@unique([accountId, userId])
+}
+
+model Session {
+  id String @id @default(cuid())
+  tokenHash String @unique
+  accountId String
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  membershipId String
+  membership Membership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  expiresAt DateTime
+  revokedAt DateTime?
+  @@index([accountId, revokedAt])
+  @@index([membershipId])
+  @@index([expiresAt])
+}
+
+model AccountToken {
+  id String @id @default(cuid())
+  tokenHash String @unique
+  accountId String
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  purpose String
+  usedAt DateTime?
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  @@index([accountId, purpose])
+}
+
+model Invitation {
+  id String @id @default(cuid())
+  businessId String
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  email String
+  role String
+  tokenHash String @unique
+  invitedBy String
+  acceptedAt DateTime?
+  revokedAt DateTime?
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  @@index([businessId, email])
+}
+
+model MailOutbox {
+  id String @id @default(cuid())
+  payload String // encrypted recipient/subject/body; contains one-time links
+  status String @default("pending")
+  attempts Int @default(0)
+  nextAttemptAt DateTime @default(now())
+  lockedAt DateTime?
+  sentAt DateTime?
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  @@index([status, nextAttemptAt])
+}
+
+model AuthThrottle {
+  id String @id
+  attempts Int @default(0)
+  windowAt DateTime @default(now())
+}
+
+model Subscription {
+  id String @id @default(cuid())
+  businessId String @unique
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  plan String @default("trial")
+  status String @default("trialing")
+  trialEndsAt DateTime
+  seatLimit Int @default(5)
+  dailyChatLimit Int @default(50)
+  createdAt DateTime @default(now())
+}
+
+model QuotaBucket {
+  id String @id
+  used Int @default(0)
+}
+
+// Deployment-global operational metadata; no recipient/body/token material.
+model WorkerHeartbeat {
+  id String @id
+  runId String
+  startedAt DateTime
+  finishedAt DateTime?
+  ok Boolean?
+}
+
+// Actor-scoped presentation only; never financial/business policy.
+model WorkspacePreference {
+  id String @id @default(cuid())
+  businessId String
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  config String @default("{}")
+  updatedAt DateTime @updatedAt
+  @@unique([businessId, userId])
+}
+
+model CashbookEntry {
+  id String @id @default(cuid())
+  businessId String
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  operationRef String @unique
+  operation Operation @relation(fields: [operationRef], references: [ref], onDelete: Cascade)
+  userId String
+  kind String
+  amount Int
+  partyName String @default("")
+  customerId String?
+  supplierId String?
+  occurredOn String
+  dueOn String?
+  note String @default("")
+  openAmount Int @default(0)
+  cashDelta Int @default(0)
+  settlements String @default("[]")
+  promiseRevision Int @default(0)
+  promiseRef String?
+  followupUserId String?
+  dateSource String @default("user_day")
+  lastNudgedOn String?
+  recordedAt DateTime @default(now())
+  @@index([businessId, dueOn, openAmount], map: "CashbookEntry_businessId_dueOn_openAmount_idx")
+}
+model ShopReminder {
+  id String @id @default(cuid())
+  businessId String
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  userId String
+  subject String
+  active Boolean @default(true)
+  revision Int @default(0)
+  createdAt DateTime @default(now())
+  @@unique([businessId, userId, subject], map: "ShopReminder_businessId_userId_subject_key")
+}
+
+// A short-lived financial clarification, not inferred long-term personal memory.
+model CashbookDialogue {
+  conversationId String @id
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  state String
+  lastTurnId String?
+  lastInput String @default("")
+  lastReply String @default("")
+  resolved String?
+  version Int @default(0)
+  expiresAt DateTime
+  updatedAt DateTime @updatedAt
+}
+
+// Explicit deployment-admin-selected ASR; never assume a chat model transcribes audio.
+model SpeechSettings {
+  id String @id
+  providerId String
+  provider ModelProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  remoteId String
+  updatedAt DateTime @updatedAt
 }

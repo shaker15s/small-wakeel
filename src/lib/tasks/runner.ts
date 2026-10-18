@@ -1,3 +1,4 @@
+import { nextCairoRun } from './cairo-time'
 // وكيل — due-task runner.
 //
 // One implementation shared by:
@@ -13,6 +14,7 @@
 // (`status: pending → running`), so two runners (a cron hit + the scheduler)
 // can never execute the same task twice.
 
+import { requireBusinessUser } from '@/lib/security/permissions'
 import { db } from '@/lib/db'
 import { runReadTool, type ReadTool } from '@/lib/agent/tools'
 import type { ResultCardDTO } from '@/lib/types'
@@ -36,7 +38,7 @@ function safeParse(raw: string): Record<string, unknown> {
 /** Ensure a conversation exists to deliver the result into. */
 async function deliverConversation(businessId: string, userId: string, conversationId: string | null) {
   if (conversationId) {
-    const existing = await db.conversation.findUnique({ where: { id: conversationId } })
+    const existing = await db.conversation.findFirst({ where: { id: conversationId, businessId, userId } })
     if (existing) return existing
   }
   const latest = await db.conversation.findFirst({
@@ -70,11 +72,7 @@ async function postAgentMessage(conversationId: string, data: { text: string; ca
 
 /** Next occurrence of a recurring task (exported for unit tests). */
 export function nextRun(from: Date, recurrence: string): Date {
-  const next = new Date(from)
-  if (recurrence === 'daily') next.setDate(next.getDate() + 1)
-  else if (recurrence === 'weekly') next.setDate(next.getDate() + 7)
-  else if (recurrence === 'monthly') next.setMonth(next.getMonth() + 1)
-  return next
+  return nextCairoRun(from, recurrence)
 }
 
 /**
@@ -100,6 +98,7 @@ export async function runDueTasks(limit = 10): Promise<TaskRunSummary> {
     if (claim.count === 0) continue
 
     try {
+      await requireBusinessUser(task.businessId, task.userId)
       // Completion update is RECURRENCE-AWARE for every task kind. The remind
       // branch used to hard-code «done», so «فكرني كل يوم…» fired exactly once —
       // a silently broken promise. A daily/weekly/monthly task now moves to its

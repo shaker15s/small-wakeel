@@ -1,9 +1,15 @@
+import { recordInference, strictInference } from './inference-audit'
+import { llmHealth } from './model-health'
+export { llmHealth } from './model-health'
+import { withModelBudget, withStreamBudget, type ModelBudget } from './model-budget'
+import { providerFetch } from '@/lib/security/provider-network'
+import { decryptProviderKey } from '@/lib/security/provider-secrets'
 // وكيل — Model Gateway: one streaming interface over built-in Google Gemini
 // (@google/genai), external BYO OpenAI-compatible providers, and fallback SDK.
 // Server-side only.
 //
-// External calls are HARD-TIMEOUT-capped so a slow provider can never hang the
-// agent turn: intent extraction 20s, reply streaming 60s. On timeout the
+// Completion budgets span retries/candidates/fallback (12/20/30s by tier);
+// streaming has a 60s whole-stream budget. On timeout the
 // harness falls back to its rule-based / deterministic paths.
 
 import { GoogleGenAI } from '@google/genai'
@@ -131,7 +137,7 @@ export async function resolveModel(modelKey: string | null | undefined): Promise
   if (modelKey && modelKey.startsWith('ext:')) {
     const configId = modelKey.slice(4)
     const config = await db.modelConfig.findUnique({ where: { id: configId }, include: { provider: true } })
-    if (config) {
+    if (config?.enabled) {
       return {
         key: modelKey,
         label: config.label,
@@ -173,7 +179,7 @@ export async function resolveModel(modelKey: string | null | undefined): Promise
   return BUILTIN_MODELS.find((m) => m.key === (modelKey ?? 'auto')) ?? BUILTIN_MODELS[0]
 }
 
-async function* streamBuiltin(messages: LLMMessage[], modelKey?: string): AsyncGenerator<StreamChunk> {
+async function* streamBuiltin(messages: LLMMessage[], modelKey: string | undefined, budget: ModelBudget): AsyncGenerator<StreamChunk> {
   if (process.env.WAKIL_OFFLINE === '1') {
     throw new Error('offline mode (WAKIL_OFFLINE=1) — using deterministic fallback')
   }
@@ -182,6 +188,8 @@ async function* streamBuiltin(messages: LLMMessage[], modelKey?: string): AsyncG
     const { systemInstruction, contents } = splitSystemAndContents(messages)
     const candidates = geminiModelCandidates(modelKey)
     for (const candidate of candidates) {
+      budget.remainingMs()
+      let emittedContent = false
       try {
         let responseStream
         try {
@@ -190,6 +198,8 @@ async function* streamBuiltin(messages: LLMMessage[], modelKey?: string): AsyncG
             contents,
             config: {
               systemInstruction: systemInstruction ? systemInstruction : undefined,
+              abortSignal: budget.signal,
+              httpOptions: { timeout: budget.remainingMs() },
               thinkingConfig: { includeThoughts: true },
             },
           })
@@ -198,7 +208,7 @@ async function* streamBuiltin(messages: LLMMessage[], modelKey?: string): AsyncG
           responseStream = await ai.models.generateContentStream({
             model: candidate,
             contents,
-            config: systemInstruction ? { systemInstruction } : undefined,
+            config: { systemInstruction, abortSignal: budget.signal, httpOptions: { timeout: budget.remainingMs() } },
           })
         }
         let yieldedAny = false
@@ -210,17 +220,22 @@ async function* streamBuiltin(messages: LLMMessage[], modelKey?: string): AsyncG
                 yieldedAny = true
                 yield { type: 'reasoning', text: part.text }
               } else if (part.text) {
+                emittedContent = true
+                llmHealth.servedBy = `Gemini · ${candidate}`
                 yieldedAny = true
                 yield { type: 'content', text: part.text }
               }
             }
           } else if (chunk.text) {
+            emittedContent = true
+                llmHealth.servedBy = `Gemini · ${candidate}`
             yieldedAny = true
             yield { type: 'content', text: chunk.text }
           }
         }
         if (yieldedAny) return
       } catch (err) {
+        if (emittedContent) throw err // Never splice another model into a partial answer.
         console.warn(`[llm] Gemini stream candidate ${candidate} failed, trying next:`, err instanceof Error ? err.message : err)
       }
     }
@@ -240,14 +255,15 @@ async function* streamBuiltin(messages: LLMMessage[], modelKey?: string): AsyncG
       source: 'external',
       remoteModel: activeExternal.remoteId,
       baseUrl: activeExternal.provider.baseUrl,
-    }, messages)
+    }, messages, budget)
     return
   }
 
   // Fallback to ZAI SDK if present
+  budget.remainingMs()
   const zai = await ZAI.create()
   const sdkMessages = messages.map((m) => ({
-    role: m.role === 'system' ? 'assistant' : m.role,
+    role: m.role,
     content: m.content,
   }))
   const stream = await zai.chat.completions.create({
@@ -264,7 +280,7 @@ async function* streamBuiltin(messages: LLMMessage[], modelKey?: string): AsyncG
     } else if (typeof raw === 'object' && 'choices' in (raw as Record<string, unknown>)) {
       const delta = (raw as { choices?: { delta?: { content?: string; reasoning_content?: string } }[] }).choices?.[0]?.delta
       if (delta?.reasoning_content) yield { type: 'reasoning', text: delta.reasoning_content }
-      if (delta?.content) yield { type: 'content', text: delta.content }
+      if (delta?.content) { llmHealth.servedBy = 'المحرك الاحتياطي · SDK'; yield { type: 'content', text: delta.content } }
       continue
     } else {
       continue
@@ -280,7 +296,7 @@ async function* streamBuiltin(messages: LLMMessage[], modelKey?: string): AsyncG
         const json = JSON.parse(data) as { choices?: { delta?: { content?: string; reasoning_content?: string } }[] }
         const delta = json.choices?.[0]?.delta
         if (delta?.reasoning_content) yield { type: 'reasoning', text: delta.reasoning_content }
-        if (delta?.content) yield { type: 'content', text: delta.content }
+        if (delta?.content) { llmHealth.servedBy = 'المحرك الاحتياطي · SDK'; yield { type: 'content', text: delta.content } }
       } catch {
         // ignore malformed keepalive lines
       }
@@ -288,21 +304,14 @@ async function* streamBuiltin(messages: LLMMessage[], modelKey?: string): AsyncG
   }
 }
 
-/** Hard timeout for external intent extraction (non-streaming) — 120s for deep models. */
-export const INTENT_TIMEOUT_MS = 120_000
-/** Hard timeout for external reply streaming — 180s. */
-export const REPLY_STREAM_TIMEOUT_MS = 180_000
+/** Hard timeout for external reply streaming — 60s. */
+export const REPLY_STREAM_TIMEOUT_MS = 60_000
 
 // ---------------------------------------------------------------------------
 // R15 resilience wiring + per-turn health telemetry
 // ---------------------------------------------------------------------------
 
 /** Set by retry/fallback hooks; the harness resets + reads it per turn. */
-export const llmHealth: { retried: boolean; fellBack: boolean; servedBy?: string | null } = {
-  retried: false,
-  fellBack: false,
-  servedBy: null,
-}
 
 function breakerKeyFor(model: ModelInfo): string {
   return `${model.source === 'external' ? 'external' : 'builtin'}:${model.key}`
@@ -322,38 +331,46 @@ interface StartedStream {
 }
 
 async function startStream(
-  gen: AsyncGenerator<StreamChunk>,
+  create: () => AsyncGenerator<StreamChunk>,
   key: string,
   label: string,
 ): Promise<StartedStream> {
   return withBreaker(key, () =>
     withRetry(
       async () => {
-        const first = await gen.next()
-        return { gen, first }
+        const gen = create()
+        try {
+          const first = await gen.next()
+          return { gen, first }
+        } catch (error) {
+          void gen.return(undefined).catch(() => {})
+          throw error
+        }
       },
       { label, onRetry: retryHook(label) },
     ),
   )
 }
 
-async function* streamExternal(model: ModelInfo, messages: LLMMessage[]): AsyncGenerator<StreamChunk> {
+async function* streamExternal(model: ModelInfo, messages: LLMMessage[], budget: ModelBudget): AsyncGenerator<StreamChunk> {
+  budget.remainingMs()
   const configId = model.key.slice(4)
   const config = await db.modelConfig.findUnique({ where: { id: configId }, include: { provider: true } })
-  if (!config) throw new Error('الموديل الخارجي مش موجود')
+  if (!config?.enabled) throw new Error('الموديل الخارجي غير متاح')
+  budget.remainingMs()
   const url = `${config.provider.baseUrl.replace(/\/$/, '')}/chat/completions`
-  const res = await fetch(url, {
+  const res = await providerFetch(url, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      authorization: `Bearer ${config.provider.apiKey}`,
+      authorization: `Bearer ${decryptProviderKey(config.provider.apiKey)}`,
     },
     body: JSON.stringify({
       model: config.remoteId,
       messages,
       stream: true,
     }),
-    signal: AbortSignal.timeout(REPLY_STREAM_TIMEOUT_MS),
+    signal: budget.signal,
   })
   if (!res.ok || !res.body) {
     const detail = await res.text().catch(() => '')
@@ -379,7 +396,7 @@ async function* streamExternal(model: ModelInfo, messages: LLMMessage[]): AsyncG
         }
         const delta = json.choices?.[0]?.delta
         if (delta?.reasoning_content) yield { type: 'reasoning', text: delta.reasoning_content }
-        if (delta?.content) yield { type: 'content', text: delta.content }
+        if (delta?.content) { llmHealth.servedBy = modelLabelFor(model); yield { type: 'content', text: delta.content } }
       } catch {
         // ignore malformed keepalive lines
       }
@@ -393,24 +410,32 @@ export async function* streamChat(
   model: ModelInfo,
   messages: LLMMessage[],
 ): AsyncGenerator<StreamChunk> {
+  yield* withStreamBudget(REPLY_STREAM_TIMEOUT_MS, (budget) => streamWithBudget(model, messages, budget))
+}
+async function* streamWithBudget(model: ModelInfo, messages: LLMMessage[], budget: ModelBudget): AsyncGenerator<StreamChunk> {
+  let emittedContent = false
   if (model.source === 'external') {
     try {
       const started = await startStream(
-        streamExternal(model, messages),
+        () => streamExternal(model, messages, budget),
         breakerKeyFor(model),
         `stream:${model.key}`,
       )
-      if (!started.first.done) yield started.first.value
-      yield* started.gen
+      if (!started.first.done) { emittedContent = started.first.value.type === 'content'; yield started.first.value }
+      for await (const chunk of started.gen) {
+        if (chunk.type === 'content') emittedContent = true
+        yield chunk
+      }
       return
     } catch (err) {
+      if (emittedContent || strictInference()) throw err
       console.error('[llm] external provider failed, falling back to builtin:', err)
       llmHealth.fellBack = true
       yield { type: 'reasoning', text: 'المزوّد الخارجي مش متاح حاليًا — هرجع للموديل الداخلي.' }
     }
   }
   const builtinKey = model.source === 'builtin' ? `builtin:${model.key}` : 'builtin:fallback'
-  const started = await startStream(streamBuiltin(messages, model.key), builtinKey, `stream:${model.key}`)
+  const started = await startStream(() => streamBuiltin(messages, model.key, budget), builtinKey, `stream:${model.key}`)
   if (!started.first.done) yield started.first.value
   yield* started.gen
 }
@@ -419,10 +444,17 @@ export async function* streamChat(
  *  wrapped with retry + breaker; the harness's deterministic fallbacks still
  *  catch the final throw. */
 export async function completeChat(model: ModelInfo, messages: LLMMessage[]): Promise<string> {
+  const ms = model.tier === 'air' ? 12_000 : model.tier === 'deep' ? 30_000 : 20_000
+  const content = await withModelBudget(ms, (budget) => strictInference() ? completeChatOnce(model, messages, budget) : completeWithBudget(model, messages, budget))
+  if (strictInference() && !content.trim()) throw new Error('Live model returned no content')
+  recordInference(messages, content, llmHealth.servedBy ?? 'unknown')
+  return content
+}
+async function completeWithBudget(model: ModelInfo, messages: LLMMessage[], budget: ModelBudget): Promise<string> {
   if (model.source === 'external') {
     try {
       return await withBreaker(breakerKeyFor(model), () =>
-        withRetry(() => completeChatOnce(model, messages), {
+        withRetry(() => completeChatOnce(model, messages, budget), {
           label: `intent:${model.key}`,
           onRetry: retryHook(`intent:${model.key}`),
         }),
@@ -431,18 +463,19 @@ export async function completeChat(model: ModelInfo, messages: LLMMessage[]): Pr
       console.warn('[llm] external completeChat failed, falling back to builtin:', err)
       llmHealth.fellBack = true
       const fallbackModel = BUILTIN_MODELS[0]
-      return completeChatOnce(fallbackModel, messages)
+      return completeChatOnce(fallbackModel, messages, budget)
     }
   }
   return withBreaker(breakerKeyFor(model), () =>
-    withRetry(() => completeChatOnce(model, messages), {
+    withRetry(() => completeChatOnce(model, messages, budget), {
       label: `intent:${model.key}`,
       onRetry: retryHook(`intent:${model.key}`),
     }),
   )
 }
 
-async function completeChatOnce(model: ModelInfo, messages: LLMMessage[]): Promise<string> {
+async function completeChatOnce(model: ModelInfo, messages: LLMMessage[], budget: ModelBudget): Promise<string> {
+  budget.remainingMs()
   if (process.env.WAKIL_OFFLINE === '1') {
     throw new Error('offline mode (WAKIL_OFFLINE=1) — using deterministic fallback')
   }
@@ -450,9 +483,10 @@ async function completeChatOnce(model: ModelInfo, messages: LLMMessage[]): Promi
     const ai = getGeminiClient()
     if (ai) {
       const { systemInstruction, contents } = splitSystemAndContents(messages)
-      const candidates = geminiModelCandidates(model.key)
+      const candidates = strictInference() ? geminiModelCandidates(model.key).slice(0, 1) : geminiModelCandidates(model.key)
       let lastGeminiErr: unknown = null
       for (const candidate of candidates) {
+        budget.remainingMs()
         try {
           let response
           try {
@@ -461,6 +495,8 @@ async function completeChatOnce(model: ModelInfo, messages: LLMMessage[]): Promi
               contents,
               config: {
                 systemInstruction: systemInstruction ? systemInstruction : undefined,
+                abortSignal: budget.signal,
+                httpOptions: { timeout: budget.remainingMs() },
                 thinkingConfig: { includeThoughts: true },
               },
             })
@@ -468,21 +504,23 @@ async function completeChatOnce(model: ModelInfo, messages: LLMMessage[]): Promi
             response = await ai.models.generateContent({
               model: candidate,
               contents,
-              config: systemInstruction ? { systemInstruction } : undefined,
+              config: { systemInstruction, abortSignal: budget.signal, httpOptions: { timeout: budget.remainingMs() } },
             })
           }
           const text = response.text ?? ''
-          if (text.trim()) return text
+          if (text.trim()) { llmHealth.servedBy = `Gemini · ${candidate}`; return text }
         } catch (err) {
           lastGeminiErr = err
           console.warn(`[llm] Gemini completeChat candidate ${candidate} failed, trying next:`, err instanceof Error ? err.message : err)
         }
       }
+      if (strictInference()) throw lastGeminiErr ?? new Error('Live Gemini returned no content')
       // If ZAI fallback is available, try it before throwing lastGeminiErr
       try {
+        budget.remainingMs()
         const zai = await ZAI.create()
         const sdkMessages = messages.map((m) => ({
-          role: m.role === 'system' ? 'assistant' : m.role,
+          role: m.role,
           content: m.content,
         }))
         const completion = await zai.chat.completions.create({
@@ -490,7 +528,7 @@ async function completeChatOnce(model: ModelInfo, messages: LLMMessage[]): Promi
           thinking: { type: 'disabled' },
         } as never)
         const content = (completion as { choices?: { message?: { content?: string } }[] }).choices?.[0]?.message?.content
-        if (content?.trim()) return content
+        if (content?.trim()) { llmHealth.servedBy = 'المحرك الاحتياطي · SDK'; return content }
       } catch {
         // ignore ZAI error and rethrow Gemini error if any
       }
@@ -498,6 +536,7 @@ async function completeChatOnce(model: ModelInfo, messages: LLMMessage[]): Promi
       return ''
     }
 
+    if (strictInference()) throw new Error('Live Gemini is not configured')
     const activeExternal = await db.modelConfig.findFirst({
       where: { enabled: true, provider: { baseUrl: { not: { contains: 'localhost' } } } },
       include: { provider: true },
@@ -514,12 +553,14 @@ async function completeChatOnce(model: ModelInfo, messages: LLMMessage[]): Promi
           baseUrl: activeExternal.provider.baseUrl,
         },
         messages,
+        budget,
       )
     }
 
+    budget.remainingMs()
     const zai = await ZAI.create()
     const sdkMessages = messages.map((m) => ({
-      role: m.role === 'system' ? 'assistant' : m.role,
+      role: m.role,
       content: m.content,
     }))
     const completion = await zai.chat.completions.create({
@@ -527,19 +568,23 @@ async function completeChatOnce(model: ModelInfo, messages: LLMMessage[]): Promi
       thinking: { type: 'disabled' },
     } as never)
     const content = (completion as { choices?: { message?: { content?: string } }[] }).choices?.[0]?.message?.content
+    if (content?.trim()) llmHealth.servedBy = 'المحرك الاحتياطي · SDK'
     return content ?? ''
   }
   const configId = model.key.slice(4)
   const config = await db.modelConfig.findUnique({ where: { id: configId }, include: { provider: true } })
-  if (!config) throw new Error('الموديل الخارجي مش موجود')
+  if (!config?.enabled) throw new Error('الموديل الخارجي غير متاح')
+  budget.remainingMs()
   const url = `${config.provider.baseUrl.replace(/\/$/, '')}/chat/completions`
-  const res = await fetch(url, {
+  const res = await providerFetch(url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${config.provider.apiKey}` },
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${decryptProviderKey(config.provider.apiKey)}` },
     body: JSON.stringify({ model: config.remoteId, messages, stream: false }),
-    signal: AbortSignal.timeout(INTENT_TIMEOUT_MS),
+    signal: budget.signal,
   })
   if (!res.ok) throw new Error(`المزوّد رجع ${res.status}`)
   const json = (await res.json()) as { choices?: { message?: { content?: string } }[] }
-  return json.choices?.[0]?.message?.content ?? ''
+  const content = json.choices?.[0]?.message?.content ?? ''
+  if (content.trim()) llmHealth.servedBy = `${config.label} · ${config.remoteId} · مزوّد خارجي`
+  return content
 }

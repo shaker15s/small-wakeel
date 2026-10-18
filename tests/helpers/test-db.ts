@@ -8,6 +8,7 @@
 //
 // So: exactly one temp copy per test run, created lazily, cleaned up on exit.
 // Tests never touch the real `db/custom.db`.
+import { applyMigrations } from '../../scripts/lib/migrations'
 import { copyFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -24,6 +25,7 @@ export function ensureTestDatabase(): string {
     throw new Error('اختبارات وكيل لازم تشتغل على نسخة مؤقتة من الداتابيز — مش على الداتابيز الحقيقية')
   }
   copyFileSync(join(process.cwd(), 'db', 'custom.db'), target)
+  applyMigrations(target)
   process.env.DATABASE_URL = `file:${target}`
   // one cleanup for the whole run
   process.on('exit', () => {

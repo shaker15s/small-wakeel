@@ -194,21 +194,29 @@ export async function POST(req: Request) {
     // Persisted conversation history for context (raised 8 → 12 messages)
     const history = await db.message.findMany({
       where: { conversationId: conversation.id, createdAt: { lt: userMsg.createdAt } },
-      orderBy: { createdAt: 'asc' },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: 12,
     })
 
     // R15 reflection: a correction opener («لا», «غلط», «مش كده», «قصدى») on
     // the PREVIOUS assistant reply extracts a lesson into agent memory.
     // Fire-and-forget by contract — it never throws, never blocks the turn.
-    const lastAssistant = [...history].reverse().find((m) => m.role === 'assistant')
+    const lastAssistant = history.find((m) => m.role === 'assistant')
     void maybeReflect(business.id, user.id, body.text, lastAssistant?.text ?? null)
 
     const encoder = new TextEncoder()
+    let disconnected = req.signal.aborted
+    const onDisconnect = () => { disconnected = true }
+    req.signal.addEventListener('abort', onDisconnect, { once: true })
     const stream = new ReadableStream({
       async start(controller) {
         const send = (data: unknown) => {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
+          if (disconnected || controller.desiredSize === null) return
+          const chunk = encoder.encode(`data: ${JSON.stringify(data)}\n\n`)
+          try { controller.enqueue(chunk) } catch (e) {
+            if (req.signal.aborted || controller.desiredSize === null) disconnected = true
+            else throw e
+          }
         }
         try {
           send({ event: 'start', conversationId: conversation!.id, messageId: userMsg.id })
@@ -242,7 +250,7 @@ export async function POST(req: Request) {
               conversationId: conversation!.id,
               text: body.text,
               modelKey: body.modelKey ?? null,
-              history: history.map((m) => ({ role: m.role, text: m.text })),
+              history: [...history].reverse().map((m) => ({ role: m.role, text: m.text })),
               deepResearch: body.deepResearch === true,
               turnId: turnId ?? undefined,
             },
@@ -293,9 +301,14 @@ export async function POST(req: Request) {
           console.error('[api/chat POST]', err)
           send({ event: 'error', message: 'حصل خطأ في السيرفر — جرّب تاني' })
         } finally {
-          controller.close()
+          req.signal.removeEventListener('abort', onDisconnect)
+          if (!disconnected && controller.desiredSize !== null) controller.close()
         }
       },
+      // On a long-lived server a canceled response stops transport, not the
+      // already-started bounded turn. Persist its result for same-turn replay.
+      // This is not a durable job guarantee across process loss.
+      cancel() { disconnected = true },
     })
 
     return new Response(stream, {

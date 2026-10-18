@@ -2,6 +2,8 @@
 
 // وكيل — شاشة «الإعدادات»: الموديلات والمزوّدين + المهام المؤجلة + ذاكرة وكيل + أدواتك السريعة.
 
+import { SpeechSettings } from './SpeechSettings'
+import { AccountPanel } from '@/components/app/AccountPanel'
 import { useState } from 'react'
 import { motion } from 'framer-motion'
 import {
@@ -173,9 +175,12 @@ export default function SettingsView({ businessId, userId }: ViewProps) {
   const setModel = useWakil((s) => s.setModel)
 
   // — queries
+  const bootstrapQ = useQuery({ queryKey: QUERY_KEYS.bootstrap, queryFn: api.bootstrap })
+  const canManageProviders = bootstrapQ.data?.deploymentAdmin === true
   const providersQ = useQuery({
     queryKey: QUERY_KEYS.providers,
     queryFn: () => api.providers(),
+    enabled: canManageProviders,
   })
   const tasksQ = useQuery({
     queryKey: QUERY_KEYS.tasks(businessId),
@@ -414,12 +419,14 @@ export default function SettingsView({ businessId, userId }: ViewProps) {
     >
       <ViewHeader title="الإعدادات" subtitle="الموديلات والمهام والذاكرة — كل حاجة تحت سيطرتك" />
 
+      <AccountPanel />
+
       {/* (أ) الموديلات والمزوّدين */}
       <SectionCard
         title="الموديلات والمزوّدين"
         icon={BrainCog}
         action={
-          <Button size="sm" className="min-h-10" onClick={() => setAddOpen(true)}>
+          canManageProviders && <Button size="sm" className="min-h-10" onClick={() => setAddOpen(true)}>
             <Plus aria-hidden /> إضافة مزوّد جديد
           </Button>
         }
@@ -428,7 +435,7 @@ export default function SettingsView({ businessId, userId }: ViewProps) {
           {/* الموديلات الجاهزة */}
           <div className="space-y-2">
             <p className="text-xs font-medium text-muted-foreground">
-              الموديلات الجاهزة — شغالة على حساب وكيل من غير أي إعداد
+              الموديلات الجاهزة — تحتاج تهيئة من مشغّل الخدمة؛ عند تعذّر الاتصال يعمل المحرك الحتمي
             </p>
             {BUILTIN_MODELS.map((m) => (
               <ModelRow
@@ -446,8 +453,8 @@ export default function SettingsView({ businessId, userId }: ViewProps) {
             ))}
           </div>
 
-          {/* المزوّدين الخارجيين */}
-          <div className="space-y-3">
+          {/* المزوّدين الخارجيين: مدير النشر فقط */}
+          {canManageProviders && <div className="space-y-3">
             <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
               <Server className="size-3.5" aria-hidden />
               مزوّديك الخارجيين (OpenAI-compatible)
@@ -577,9 +584,11 @@ export default function SettingsView({ businessId, userId }: ViewProps) {
               الرابط لازم يكون OpenAI-compatible — بيقبل <span className="font-mono">/models</span> و
               <span className="font-mono"> /chat/completions</span>. المزوّد بيتجرب قبل ما يتحفظ.
             </p>
-          </div>
+          </div>}
         </div>
       </SectionCard>
+
+      {canManageProviders && <SpeechSettings providers={providers} />}
 
       {/* (ب) المهام المؤجلة */}
       <SectionCard

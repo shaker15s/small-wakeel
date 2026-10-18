@@ -11,7 +11,7 @@
 
 'use client'
 
-import { useEffect, useMemo, useRef, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import {
@@ -29,6 +29,9 @@ import {
 } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import { api } from '@/lib/api'
+import { ACCENTS, DEFAULT_WORKSPACE } from '@/lib/workspace-options'
+import { AccountNotice } from './AccountNotice'
+import { AccessGate } from './AccessGate'
 import { QUERY_KEYS, useWakil, VIEW_LABELS, type ViewKey } from '@/lib/store'
 import { getVertical } from '@/lib/verticals'
 import { Button } from '@/components/ui/button'
@@ -101,11 +104,19 @@ export function AppShell() {
     hydrate()
   }, [hydrate])
 
-  const { data: bootstrap } = useQuery({
+  const { data: bootstrap, error: bootstrapError, refetch: retryBootstrap } = useQuery({
     queryKey: ['bootstrap'],
     queryFn: () => api.bootstrap(),
     staleTime: 60_000,
   })
+
+  useEffect(() => {
+    const nextBusiness = bootstrap?.businesses.find((b) => b.id === businessId) ?? bootstrap?.businesses[0]
+    const nextUser = nextBusiness?.users.find((u) => u.id === userId) ?? nextBusiness?.users[0]
+    if (nextBusiness && nextUser && (businessId !== nextBusiness.id || userId !== nextUser.id)) {
+      setSession(nextBusiness.id, nextUser.id)
+    }
+  }, [bootstrap, businessId, userId, setSession])
 
   // pending approvals count → notification badge
   const business = useMemo(
@@ -116,6 +127,29 @@ export function AppShell() {
     () => business?.users.find((u) => u.id === userId) ?? business?.users[0],
     [business, userId],
   )
+
+  const [deferredSetup, setDeferredSetup] = useState<string | null>(null)
+  const actorKey = business && user ? `${business.id}|${user.id}` : null
+  const workspace = useQuery({
+    queryKey: ['workspace-preferences', business?.id, user?.id],
+    queryFn: () => api.workspacePreferences(business!.id, user!.id),
+    enabled: !!business && !!user,
+  })
+  const modelPreferenceRef = useRef<string | null>(null)
+  useEffect(() => {
+    const profile = workspace.data ?? DEFAULT_WORKSPACE
+    document.documentElement.style.setProperty('--analytics-accent', ACCENTS[profile.accent])
+    document.documentElement.dataset.workspaceDensity = profile.density
+    const key = `${actorKey}|${profile.responseMode}`
+    if (workspace.data && modelPreferenceRef.current !== key) {
+      modelPreferenceRef.current = key
+      useWakil.getState().setModel(profile.responseMode === 'deep' ? 'gemini-pro' : 'gemini-flash')
+    }
+    return () => {
+      document.documentElement.style.removeProperty('--analytics-accent')
+      delete document.documentElement.dataset.workspaceDensity
+    }
+  }, [workspace.data, actorKey])
 
   const { data: overview } = useQuery({
     queryKey: business && user ? QUERY_KEYS.overview(business.id, user.id) : ['overview', 'none'],
@@ -147,9 +181,13 @@ export function AppShell() {
     for (const a of alerts) seenTextsRef.current.add(a.text)
   }, [overview, alerts, businessId, userId, toast])
 
+  if (mounted && bootstrapError) {
+    return <AccessGate error={bootstrapError} onRetry={() => { void retryBootstrap() }} />
+  }
+
   // first run → onboarding
-  if (mounted && !onboardingDone && bootstrap && bootstrap.businesses.length > 0) {
-    return <Onboarding businesses={bootstrap.businesses} onFinish={finishOnboarding} onPick={setSession} />
+  if (mounted && bootstrap && bootstrap.businesses.length > 0 && deferredSetup !== actorKey && (!onboardingDone || workspace.data?.onboardingComplete === false)) {
+    return <><AccountNotice onSettings={() => { setDeferredSetup(actorKey); finishOnboarding(); setView('settings') }} /><Onboarding key={actorKey} businesses={bootstrap.businesses} initial={workspace.data} onFinish={finishOnboarding} onPick={setSession} onDefer={() => { setDeferredSetup(actorKey); finishOnboarding(); setView('settings') }} /></>
   }
 
   if (!mounted || !bootstrap) {
@@ -164,7 +202,7 @@ export function AppShell() {
   }
 
   const activeBusiness = business ?? bootstrap.businesses[0]
-  const activeUser = user ?? activeBusiness.users[0]
+  const activeUser = user ?? activeBusiness?.users[0]
   if (!activeBusiness || !activeUser) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background p-6 text-center">
@@ -183,6 +221,7 @@ export function AppShell() {
   if (isChat) {
     return (
       <div className="flex h-dvh flex-col overflow-hidden bg-background">
+        <AccountNotice onSettings={() => setView('settings')} />
         <CommandPalette business={activeBusiness} businesses={bootstrap.businesses} userId={activeUser.id} />
         <BusinessBuilderModal />
         <PluginAndTaskStudioModal />
@@ -225,6 +264,7 @@ export function AppShell() {
   // ======================= APP VIEWS (classic chrome) =======================
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-background">
+        <AccountNotice onSettings={() => setView('settings')} />
       <CommandPalette business={activeBusiness} businesses={bootstrap.businesses} userId={activeUser.id} />
       <BusinessBuilderModal />
       <PluginAndTaskStudioModal />

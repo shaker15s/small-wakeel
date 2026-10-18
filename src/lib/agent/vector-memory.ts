@@ -1,3 +1,5 @@
+import { mayLearnImplicitly } from './memory-policy'
+import { canUsePermission, requireBusinessUser } from '@/lib/security/permissions'
 // وكيل — LOCAL VECTOR DATABASE & SEMANTIC CONTEXTUAL MEMORY ENGINE
 // (قاعدة البيانات المتجهية المحلية ونظام الذاكرة السياقية المستمرة)
 //
@@ -222,15 +224,25 @@ export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
 export class LocalVectorDB {
   private readonly indexByBusiness = new Map<string, Map<string, VectorDocument>>()
   private readonly lastSyncedAt = new Map<string, number>()
+  private scope(businessId: string, userId?: string) { return JSON.stringify([businessId, userId ?? null]) }
+  private store(scope: string, rows: Map<string, VectorDocument>) {
+    this.indexByBusiness.delete(scope)
+    this.indexByBusiness.set(scope, rows)
+    while (this.indexByBusiness.size > 128) {
+      const oldest = this.indexByBusiness.keys().next().value!
+      this.indexByBusiness.delete(oldest); this.lastSyncedAt.delete(oldest)
+    }
+  }
 
   /**
    * Upserts a document into the local vector store with automatic embedding computation.
    */
   upsertDocument(doc: Omit<VectorDocument, 'vector'> & { vector?: Float32Array }): VectorDocument {
-    let bizMap = this.indexByBusiness.get(doc.businessId)
+    const scope = this.scope(doc.businessId, doc.userId)
+    let bizMap = this.indexByBusiness.get(scope)
     if (!bizMap) {
       bizMap = new Map<string, VectorDocument>()
-      this.indexByBusiness.set(doc.businessId, bizMap)
+      this.store(scope, bizMap)
     }
     const fullDoc: VectorDocument = {
       ...doc,
@@ -241,24 +253,27 @@ export class LocalVectorDB {
   }
 
   removeDocument(businessId: string, id: string): void {
-    this.indexByBusiness.get(businessId)?.delete(id)
+    for (const rows of this.indexByBusiness.values()) {
+      if (rows.get(id)?.businessId === businessId) rows.delete(id)
+    }
   }
 
   /**
    * Synchronizes the vector index for a business from Prisma `AgentMemory` + recent operations.
    */
-  async syncBusinessMemories(businessId: string, memories?: AgentMemory[]): Promise<void> {
-    const rows =
+  async syncBusinessMemories(businessId: string, memories?: AgentMemory[], userId?: string): Promise<void> {
+    const scope = this.scope(businessId, userId)
+    const rows = !userId ? [] :
       memories ??
       (await db.agentMemory.findMany({
-        where: { businessId, active: true },
+        where: { businessId, userId, active: true },
         orderBy: { updatedAt: 'desc' },
         take: 60,
       }))
 
     const bizMap = new Map<string, VectorDocument>()
     for (const m of rows) {
-      if (!m.active) continue
+      if (!m.active || m.businessId !== businessId || m.userId !== userId) continue
       const kindWeight =
         m.kind === 'rule'
           ? 0.95
@@ -281,8 +296,8 @@ export class LocalVectorDB {
       })
     }
 
-    this.indexByBusiness.set(businessId, bizMap)
-    this.lastSyncedAt.set(businessId, Date.now())
+    this.store(scope, bizMap)
+    this.lastSyncedAt.set(scope, Date.now())
   }
 
   /**
@@ -290,18 +305,21 @@ export class LocalVectorDB {
    */
   async searchSemantic(params: {
     businessId: string
+    userId?: string
     query: string
     memories?: AgentMemory[]
     topK?: number
     minSimilarity?: number
   }): Promise<VectorSearchHit[]> {
-    const { businessId, query, memories, topK = 8, minSimilarity = 0.08 } = params
-    const lastSync = this.lastSyncedAt.get(businessId) ?? 0
-    if (memories || !this.indexByBusiness.has(businessId) || Date.now() - lastSync > 15_000) {
-      await this.syncBusinessMemories(businessId, memories)
+    const { businessId, userId, query, memories, topK = 8, minSimilarity = 0.08 } = params
+    if (!userId) return [] // Personal memory requires explicit actor scope.
+    const scope = this.scope(businessId, userId)
+    const lastSync = this.lastSyncedAt.get(scope) ?? 0
+    if (memories || !this.indexByBusiness.has(scope) || Date.now() - lastSync > 15_000) {
+      await this.syncBusinessMemories(businessId, memories, userId)
     }
 
-    const bizMap = this.indexByBusiness.get(businessId)
+    const bizMap = this.indexByBusiness.get(scope)
     if (!bizMap || bizMap.size === 0) return []
 
     const queryVec = computeSemanticEmbedding(query)
@@ -309,6 +327,7 @@ export class LocalVectorDB {
     const hits: VectorSearchHit[] = []
 
     for (const doc of bizMap.values()) {
+      if (doc.businessId !== businessId || doc.userId !== userId) continue
       const sim = cosineSimilarity(queryVec, doc.vector)
       // Standing rules (BUSINESS_DNA) get a baseline boost so critical shop laws are never missed
       const ruleBoost = doc.kind === 'rule' ? 0.14 : 0
@@ -336,6 +355,7 @@ export class LocalVectorDB {
    */
   async buildVectorContextBlock(params: {
     businessId: string
+    userId?: string
     query: string
     memories?: AgentMemory[]
     topK?: number
@@ -345,6 +365,7 @@ export class LocalVectorDB {
   }> {
     const hits = await this.searchSemantic({
       businessId: params.businessId,
+      userId: params.userId,
       query: params.query,
       memories: params.memories,
       topK: params.topK ?? 7,
@@ -386,17 +407,17 @@ export const localVectorDB = new LocalVectorDB()
 
 const IMPLICIT_PREF_PATTERNS: { re: RegExp; kind: 'preference' | 'rule' | 'fact'; category: string }[] = [
   {
-    re: /(?:انا بحب|انا بفضل|متعود|طريقتي في الشغل|بفضل دايما|خلي بالك انا)\s+(.{8,140})/i,
+    re: /^(?:انا بحب|انا بفضل|متعود|طريقتي في الشغل|بفضل دايما|خلي بالك انا)\s+(.{8,140})/i,
     kind: 'preference',
     category: 'work_style',
   },
   {
-    re: /(?:محلي شغال في|احنا متخصصين في|شغلنا الاساسي|اكتر حاجه بنبيعها)\s+(.{6,140})/i,
+    re: /^(?:محلي شغال في|احنا متخصصين في|شغلنا الاساسي|اكتر حاجه بنبيعها)\s+(.{6,140})/i,
     kind: 'fact',
     category: 'business_nature',
   },
   {
-    re: /(?:ممنوع|متسمحش|اوعي|القاعده عندنا|قانون المحل)\s+(.{8,160})/i,
+    re: /^(?:ممنوع|متسمحش|اوعي|القاعده عندنا|قانون المحل)\s+(.{8,160})/i,
     kind: 'rule',
     category: 'shop_policy',
   },
@@ -412,8 +433,10 @@ export async function autoLearnFromUserMessage(params: {
   userId: string
   text: string
 }): Promise<AgentMemory | null> {
+  const user = await requireBusinessUser(params.businessId, params.userId)
+  if (!canUsePermission(user.role, 'memory.manage')) return null
   const clean = params.text.trim()
-  if (clean.length < 10 || clean.length > 280) return null
+  if (!mayLearnImplicitly(clean)) return null
   const norm = normalizeAr(clean)
 
   for (const pat of IMPLICIT_PREF_PATTERNS) {

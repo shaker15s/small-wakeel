@@ -56,3 +56,6 @@ local-*
 tool-results/
 agent-ctx/
 skills/
+
+# Local CI reports
+.ci-results/

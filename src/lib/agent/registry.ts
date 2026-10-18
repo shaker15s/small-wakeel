@@ -79,6 +79,8 @@ export const AGENT_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   'calculate',
   'schedule_task',
   'set_persona',
+  'configure_workspace',
+  'toggle_plugin',
   // Next-Gen Employee Superpower tools
   'analyze_profitability',
   'forecast_stock',
@@ -131,6 +133,8 @@ export const TOOL_STEP_LABEL: Record<string, string> = {
   deep_dive: 'تحقيق عميق',
   calculate: 'الحاسبة',
   schedule_task: 'مهمة مجدولة',
+  configure_workspace: 'تخصيص واجهتك',
+  toggle_plugin: 'تفعيل أو إيقاف إضافة',
   set_persona: 'ضبط النبرة',
   analyze_profitability: 'تحليل الربحية والهوامش',
   forecast_stock: 'توقع نفاد المخزون',

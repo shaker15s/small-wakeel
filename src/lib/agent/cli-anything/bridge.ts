@@ -1,9 +1,8 @@
 // وكيل — CLI-Anything Autonomous Application Bridge & Harness Engine
 // (محرك الربط الذكي لتطبيقات الكمبيوتر وأنظمة التشغيل عبر CLI-Anything)
 //
-// Bridges any desktop, local software, database, or POS/ERP into an
-// Agent-Native Command-Line Interface and exposes it as an active plugin
-// in Wakil's PluginRegistry with structured JSON input/output.
+// Host discovery is diagnostic only. It does NOT connect a merchant's desktop.
+// External execution stays fail-closed until a real, tested adapter is installed.
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -11,9 +10,6 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import type { AgentPluginDTO, ResultCardDTO } from '@/lib/types'
-import { installOrUpdatePlugin } from '../plugin-harness'
-import { db } from '@/lib/db'
-import { egp, arDate } from '@/lib/format'
 
 const execFileAsync = promisify(execFile)
 
@@ -66,11 +62,12 @@ export interface CliBridgeResult {
   ok: boolean
   appName: string
   slug: string
-  statusSteps: { step: string; label: string; state: 'done' | 'active' | 'pending'; ms: number }[]
+  statusSteps: { step: string; label: string; state: 'done' | 'active' | 'pending' | 'failed'; ms: number }[]
   capabilities: string[]
   harnessSchema: Record<string, unknown>
   plugin?: AgentPluginDTO
   error?: string
+  status?: 'not_connected'
 }
 
 export interface BridgedToolParams {
@@ -92,6 +89,7 @@ export interface BridgedToolExecutionResult {
   cards: ResultCardDTO[]
   summary: string
   error?: string
+  status?: 'not_connected'
 }
 
 // ---------------------------------------------------------------------------
@@ -120,6 +118,7 @@ const PROCESS_CACHE_TTL_MS = 6000
  * Uses a 6s TTL cache to ensure real-time accuracy without repeating expensive OS queries.
  */
 export async function getRunningProcesses(forceRefresh = false): Promise<ProcessInfo[]> {
+  if (process.env.NODE_ENV === 'production') return []
   const now = Date.now()
   if (!forceRefresh && cachedProcesses && now - lastProcessScanTime < PROCESS_CACHE_TTL_MS) {
     return cachedProcesses
@@ -222,6 +221,7 @@ export async function getRunningProcesses(forceRefresh = false): Promise<Process
  * Inspects live Excel processes, COM objects, open workbooks, and scans recent spreadsheets.
  */
 export async function inspectExcelWorkbooks(): Promise<ExcelInspectionResult> {
+  if (process.env.NODE_ENV === 'production') return { isRunning: false, openWorkbooks: [], recentSpreadsheets: [] }
   const procs = await getRunningProcesses()
   const excelProc = procs.find(
     (p) => p.name.includes('excel') || p.name.includes('soffice') || p.name.includes('calc')
@@ -321,6 +321,7 @@ export async function inspectExcelWorkbooks(): Promise<ExcelInspectionResult> {
  * Queries active listening network ports, running database daemons, and local database files.
  */
 export async function inspectDatabaseOrService(): Promise<DatabaseInspectionResult> {
+  if (process.env.NODE_ENV === 'production') return { isRunning: false, ports: [], localDatabases: [] }
   const ports: { port: number; pid: number; service?: string }[] = []
   const localDatabases: { name: string; path: string; sizeKb: number }[] = []
 
@@ -396,6 +397,7 @@ export async function inspectDatabaseOrService(): Promise<DatabaseInspectionResu
  * Scans local machine for running business and desktop applications with live telemetry.
  */
 export async function scanRunningApplications(): Promise<DetectedApp[]> {
+  if (process.env.NODE_ENV === 'production') return []
   const apps: DetectedApp[] = []
   const seen = new Set<string>()
 
@@ -426,7 +428,7 @@ export async function scanRunningApplications(): Promise<DetectedApp[]> {
       title: 'دفاتر الجداول، فواتير المبيعات، وقوائم الأسعار',
       processName: 'excel',
       category: 'spreadsheet',
-      hasCliHarness: true,
+      hasCliHarness: false,
       cliAnythingModule: 'libreoffice',
     },
     {
@@ -435,7 +437,7 @@ export async function scanRunningApplications(): Promise<DetectedApp[]> {
       title: 'قاعدة بيانات البرنامج المحاسبي المحلي ونقاط البيع',
       processName: 'pos_db',
       category: 'database',
-      hasCliHarness: true,
+      hasCliHarness: false,
       cliAnythingModule: 'firefly-iii',
     },
     {
@@ -444,7 +446,7 @@ export async function scanRunningApplications(): Promise<DetectedApp[]> {
       title: 'نظام الحسابات السحابي وفواتير الموردين',
       processName: 'chrome',
       category: 'browser',
-      hasCliHarness: true,
+      hasCliHarness: false,
       cliAnythingModule: 'browser',
     },
     {
@@ -453,7 +455,7 @@ export async function scanRunningApplications(): Promise<DetectedApp[]> {
       title: 'تطبيق سطح مكتب مخصص للأنشطة والمحلات',
       processName: 'custom_erp',
       category: 'pos',
-      hasCliHarness: true,
+      hasCliHarness: false,
     },
   ]
 
@@ -483,7 +485,7 @@ function categorizeProcess(
       title: title || 'دفتر جداول وفواتير إكسل',
       processName: proc,
       category: 'spreadsheet',
-      hasCliHarness: true,
+      hasCliHarness: false,
       cliAnythingModule: 'libreoffice',
       pid: Number(id),
       path,
@@ -497,7 +499,7 @@ function categorizeProcess(
       title: title || 'نظام إدارة الحسابات والمستودعات الأمين',
       processName: proc,
       category: 'accounting',
-      hasCliHarness: true,
+      hasCliHarness: false,
       cliAnythingModule: 'al-ameen-cli',
       pid: Number(id),
       path,
@@ -511,7 +513,7 @@ function categorizeProcess(
       title: title || 'نظام الفواتير وإدارة الأعمال دفترة',
       processName: proc,
       category: 'accounting',
-      hasCliHarness: true,
+      hasCliHarness: false,
       cliAnythingModule: 'daftra-cli',
       pid: Number(id),
       path,
@@ -525,7 +527,7 @@ function categorizeProcess(
       title: title || 'نظام الكاشير وإدارة المتاجر إيزي ستور',
       processName: proc,
       category: 'pos',
-      hasCliHarness: true,
+      hasCliHarness: false,
       cliAnythingModule: 'easystore-cli',
       pid: Number(id),
       path,
@@ -539,7 +541,7 @@ function categorizeProcess(
       title: title || 'نظام الحسابات المالية كويك بوكس',
       processName: proc,
       category: 'accounting',
-      hasCliHarness: true,
+      hasCliHarness: false,
       cliAnythingModule: 'quickbooks-cli',
       pid: Number(id),
       path,
@@ -553,7 +555,7 @@ function categorizeProcess(
       title: title || 'نظام المحاسبة وإدارة المخزون تالي',
       processName: proc,
       category: 'accounting',
-      hasCliHarness: true,
+      hasCliHarness: false,
       cliAnythingModule: 'tally-cli',
       pid: Number(id),
       path,
@@ -567,7 +569,7 @@ function categorizeProcess(
       title: title || 'نظام إدارة الشركات والمصانع أونكس برو',
       processName: proc,
       category: 'accounting',
-      hasCliHarness: true,
+      hasCliHarness: false,
       cliAnythingModule: 'onyx-cli',
       pid: Number(id),
       path,
@@ -581,7 +583,7 @@ function categorizeProcess(
       title,
       processName: proc,
       category: 'pos',
-      hasCliHarness: true,
+      hasCliHarness: false,
       pid: Number(id),
       path,
       memoryUsage,
@@ -594,7 +596,7 @@ function categorizeProcess(
       title,
       processName: proc,
       category: 'database',
-      hasCliHarness: true,
+      hasCliHarness: false,
       cliAnythingModule: 'firefly-iii',
       pid: Number(id),
       path,
@@ -608,7 +610,7 @@ function categorizeProcess(
       title,
       processName: proc,
       category: 'browser',
-      hasCliHarness: true,
+      hasCliHarness: false,
       cliAnythingModule: 'browser',
       pid: Number(id),
       path,
@@ -621,7 +623,7 @@ function categorizeProcess(
     title,
     processName: proc,
     category: title ? 'accounting' : 'general',
-    hasCliHarness: true,
+    hasCliHarness: false,
     pid: Number(id),
     path,
     memoryUsage,
@@ -676,471 +678,53 @@ export interface DesktopInspectionResult {
   summary: string
 }
 
-/**
- * Universally inspects ANY Windows desktop application (Accounting, ERP, POS, or windowed app).
- * Queries running process telemetry, scans for real database and spreadsheet data stores,
- * performs live cross-reconciliation against Wakil's records, and provides proactive advisor cards.
- */
+/** Local host diagnostics, never external financial data or reconciliation. */
 export async function inspectDesktopApplication(
   appName: string,
   businessId?: string,
 ): Promise<DesktopInspectionResult> {
   const cleanName = appName.trim() || 'تطبيق العمل'
-  const lower = cleanName.toLowerCase()
   const procs = await getRunningProcesses()
-  const proc = procs.find(
-    (p) =>
-      p.name.includes(lower) ||
-      lower.includes(p.name) ||
-      p.title.toLowerCase().includes(lower),
-  )
-
-  // Scan user files & directories for data stores matching this application or generic business data
-  const dataFiles: DesktopDataFile[] = []
-  const candidateDirs = [
-    process.cwd(),
-    join(process.cwd(), 'db'),
-    join(homedir(), 'Documents'),
-    join(homedir(), 'AppData', 'Roaming'),
-    join(homedir(), 'AppData', 'Local'),
-  ]
-
-  for (const dir of candidateDirs) {
-    if (!existsSync(dir)) continue
-    try {
-      const entries = readdirSync(dir)
-      for (const ent of entries) {
-        if (dataFiles.length >= 8) break
-        const entLower = ent.toLowerCase()
-        const isDbOrDoc =
-          entLower.endsWith('.db') ||
-          entLower.endsWith('.sqlite') ||
-          entLower.endsWith('.sqlite3') ||
-          entLower.endsWith('.mdb') ||
-          entLower.endsWith('.accdb') ||
-          entLower.endsWith('.xlsx') ||
-          entLower.endsWith('.csv') ||
-          entLower.endsWith('.json')
-
-        if (isDbOrDoc && (entLower.includes(lower) || dir.includes(process.cwd()) || entLower.includes('data') || entLower.includes('pos') || entLower.includes('custom'))) {
-          const fullPath = join(dir, ent)
-          try {
-            const st = statSync(fullPath)
-            dataFiles.push({
-              name: ent,
-              path: fullPath,
-              sizeKb: Math.max(1, Math.round(st.size / 1024)),
-              type: entLower.endsWith('.db') || entLower.endsWith('.sqlite')
-                ? 'SQLite Database'
-                : entLower.endsWith('.mdb') || entLower.endsWith('.accdb')
-                ? 'MS Access DB'
-                : entLower.endsWith('.xlsx')
-                ? 'Excel Workbook'
-                : entLower.endsWith('.csv')
-                ? 'CSV Data Export'
-                : 'JSON Records',
-              modifiedAt: st.mtime.toISOString(),
-            })
-          } catch {}
-        }
-      }
-    } catch {}
-  }
-
-  // Cross-reconcile with Wakil's database if businessId is supplied
-  let matchedCount = 0
-  let discrepancyCount = 0
-  const reconItems: {
-    name: string
-    localStock: number
-    externalStock: number
-    diff: number
-    status: string
-  }[] = []
-
-  if (businessId && businessId !== 'system') {
-    try {
-      const dbItems = await db.item.findMany({
-        where: { businessId },
-        take: 6,
-        orderBy: { stockQty: 'desc' },
-      })
-      matchedCount = dbItems.length
-      for (let idx = 0; idx < dbItems.length; idx++) {
-        const it = dbItems[idx]
-        // Realistic comparison: slight variances simulating unposted movements
-        const variance = idx === 1 ? -2 : idx === 3 ? 1 : 0
-        const extStock = Math.max(0, it.stockQty + variance)
-        if (variance !== 0) discrepancyCount++
-        reconItems.push({
-          name: it.name,
-          localStock: it.stockQty,
-          externalStock: extStock,
-          diff: variance,
-          status: variance === 0 ? 'مطابق تماماً' : variance > 0 ? 'زيادة في النظام الخارجي' : 'عجز في النظام الخارجي (فارق جرد)',
-        })
-      }
-    } catch {}
-  }
-
-  const cards: ResultCardDTO[] = []
-
-  // 1. Telemetry card
-  cards.push({
-    kind: 'kv',
-    title: `حالة ربط وتسخير ديسكتوب «${cleanName}» حياً`,
-    rows: [
-      {
-        label: 'حالة البرنامج في النظام',
-        value: proc ? '🟢 يعمل الآن في الخلفية' : '⚪ مسجل في النظام وجاهز للمزامنة',
-        tone: proc ? 'good' : 'neutral',
-      },
-      { label: 'معرف العملية (PID)', value: proc?.pid ? String(proc.pid) : '—' },
-      { label: 'استهلاك الذاكرة (RAM)', value: proc?.memoryFormatted || '—' },
-      { label: 'عنوان النافذة النشطة', value: proc?.title || 'واجهة التطبيق الرئيسية' },
-      { label: 'الملفات وقواعد البيانات المرصودة', value: `${dataFiles.length} مخزن بيانات` },
-    ],
-  })
-
-  // 2. Data files card
-  if (dataFiles.length > 0) {
-    cards.push({
-      kind: 'table',
-      title: `قواعد البيانات وملفات «${cleanName}» على الجهاز`,
-      columns: [
-        { key: 'name', label: 'الملف' },
-        { key: 'type', label: 'النوع' },
-        { key: 'size', label: 'الحجم' },
-        { key: 'path', label: 'المسار' },
-      ],
-      rows: dataFiles.map((f) => ({
-        name: f.name,
-        type: f.type,
-        size: `${f.sizeKb} KB`,
-        path: f.path.length > 35 ? `...${f.path.slice(-32)}` : f.path,
-      })),
-      footer: [{ label: 'إجمالي المخازن المرصودة', value: `${dataFiles.length} ملفات` }],
-    })
-  }
-
-  // 3. Reconciliation card
-  if (reconItems.length > 0) {
-    cards.push({
-      kind: 'table',
-      title: `مطابقة الأرصدة والمخزون بين وكيل و«${cleanName}»`,
-      columns: [
-        { key: 'name', label: 'الصنف' },
-        { key: 'local', label: 'رصيد وكيل' },
-        { key: 'external', label: `رصيد ${cleanName}` },
-        { key: 'diff', label: 'الفارق' },
-        { key: 'status', label: 'الحالة' },
-      ],
-      rows: reconItems.map((r) => ({
-        name: r.name,
-        local: String(r.localStock),
-        external: String(r.externalStock),
-        diff: r.diff === 0 ? '٠' : r.diff > 0 ? `+${r.diff}` : String(r.diff),
-        status: r.status,
-      })),
-      footer: [
-        { label: 'الأصناف المفحوصة', value: `${reconItems.length} صنف` },
-        {
-          label: 'الفروقات المرصودة',
-          value: discrepancyCount > 0 ? `${discrepancyCount} أصناف تحتاج تسوية` : 'الأرصدة متطابقة 100%',
-        },
-      ],
-    })
-  }
-
-  // 4. Proactive Advice card
-  cards.push({
-    kind: 'kv',
-    title: `توصيات وكيل لتشغيل «${cleanName}» كأشطر موظف`,
-    rows: [
-      {
-        label: 'حالة المطابقة',
-        value: discrepancyCount > 0 ? `تم رصد ${discrepancyCount} فروقات جرد تحتاج اعتمادك` : 'المخزون والحسابات متوافقة بالكامل',
-        tone: discrepancyCount > 0 ? 'bad' : 'good',
-      },
-      {
-        label: 'إجراء التسوية المقترح',
-        value: discrepancyCount > 0 ? 'اعمل أمر تسوية جردية لتحديث الأرصدة تلقائياً' : 'مزامنة دورية نشطة كل ساعة في الخلفية',
-        tone: 'neutral',
-      },
-      {
-        label: 'حماية المبيعات',
-        value: 'الفواتير الجديدة بتتسجل فوراً بدون ازدواجية مع تسخير CLI-Anything',
-        tone: 'good',
-      },
-    ],
-  })
-
-  const summary = `تم فحص وتشغيل تسخير «${cleanName}» حياً عبر CLI-Anything: البرنامج ${proc ? 'يعمل' : 'خامل'}، ورُصدت ${dataFiles.length} ملفات ومخازن بيانات مع مطابقة ${reconItems.length} صنف.`
-
+  const proc = procs.find((p) => p.name.includes(cleanName.toLowerCase()))
   return {
     appName: cleanName,
     isRunning: Boolean(proc),
     process: proc,
-    dataFiles,
-    reconciliation: {
-      matchedCount,
-      discrepancyCount,
-      items: reconItems,
-    },
-    cards,
-    summary,
+    dataFiles: [],
+    reconciliation: { matchedCount: 0, discrepancyCount: 0, items: [] },
+    cards: notConnectedCards(cleanName),
+    summary: NOT_CONNECTED_MESSAGE,
   }
 }
 
-/**
- * Executes real system queries, inspects processes, and extracts structured live data
- * returning JSON payloads and rich ResultCardDTOs for Wakil's plugin system.
- */
+const NOT_CONNECTED_MESSAGE = 'غير متصل: لا يوجد موصل خارجي موثّق لهذا التطبيق. لم تُقرأ أو تُكتب بيانات خارجية، ولم تتم مطابقة مخزون أو مزامنة فواتير. فحص السيرفر لا يتيح الوصول لجهاز العميل.'
+
+function notConnectedCards(appName: string): ResultCardDTO[] {
+  return [{
+    kind: 'kv',
+    title: `حالة اتصال «${appName}»`,
+    rows: [{ label: 'الاتصال الخارجي', value: NOT_CONNECTED_MESSAGE, tone: 'bad' }],
+  }]
+}
+
+/** No synthetic data, internal-ledger fallback or success without an adapter. */
 export async function executeBridgedTool(params: BridgedToolParams): Promise<BridgedToolExecutionResult> {
-  const t0 = performance.now()
-  const cleanName = params.appName.trim() || 'Active Application'
-  const command = params.command || 'sync_invoices'
-  const lower = cleanName.toLowerCase()
-
-  const procs = await getRunningProcesses()
-  const proc = procs.find(
-    (p) =>
-      p.name.includes(lower) ||
-      lower.includes(p.name) ||
-      (params.processName && p.name.includes(params.processName.toLowerCase()))
-  )
-
-  const cards: ResultCardDTO[] = []
-  let dataPayload: Record<string, unknown> = {}
-  let summary = ''
-
-  if (lower.includes('excel') || lower.includes('calc') || lower.includes('sheet') || lower.includes('إكسل')) {
-    // Live Excel & Spreadsheet Inspection
-    const excelRes = await inspectExcelWorkbooks()
-
-    // Query latest business operations from Prisma for live data pairing
-    let recentOps: { id: string; type: string; amount: number; date: string }[] = []
-    if (params.businessId && params.businessId !== 'system') {
-      try {
-        const ops = await db.operation.findMany({
-          where: { businessId: params.businessId },
-          take: 6,
-          orderBy: { createdAt: 'desc' },
-        })
-        recentOps = ops.map((o) => {
-          let amt = 0
-          try {
-            const p = JSON.parse(o.payload)
-            amt = Number(p.amount ?? p.total ?? 0)
-          } catch {}
-          return {
-            id: o.id.slice(-6),
-            type: o.type === 'sale' ? 'فاتورة بيع' : o.type === 'expense' ? 'مصروف' : o.type,
-            amount: amt,
-            date: arDate(o.createdAt),
-          }
-        })
-      } catch {}
-    }
-
-    dataPayload = {
-      isExcelRunning: excelRes.isRunning,
-      process: excelRes.process ?? proc ?? { status: 'idle' },
-      openWorkbooks: excelRes.openWorkbooks,
-      spreadsheetsFound: excelRes.recentSpreadsheets.length,
-      spreadsheets: excelRes.recentSpreadsheets,
-      syncedOperations: recentOps,
-    }
-
-    // Telemetry Card
-    cards.push({
-      kind: 'kv',
-      title: `حالة ربط مايكروسوفت إكسل المباشر (${cleanName})`,
-      rows: [
-        {
-          label: 'حالة البرنامج في النظام',
-          value: excelRes.isRunning ? '🟢 يعمل الآن في الخلفية' : '⚪ خامل (جاهز للقراءة المباشرة)',
-          tone: excelRes.isRunning ? 'good' : 'neutral',
-        },
-        { label: 'معرف العملية (PID)', value: excelRes.process?.pid ? String(excelRes.process.pid) : '—' },
-        { label: 'استهلاك الذاكرة العشوائية', value: excelRes.process?.memoryFormatted || '—' },
-        {
-          label: 'دفاتر العمل المفتوحة',
-          value: excelRes.openWorkbooks.length > 0 ? excelRes.openWorkbooks.join(' · ') : 'لا توجد نوافذ مفتوحة',
-        },
-        { label: 'الملفات المكتشفة في النظام', value: `${excelRes.recentSpreadsheets.length} ملفات جداول/فواتير` },
-      ],
-    })
-
-    // Spreadsheets Table Card
-    if (excelRes.recentSpreadsheets.length > 0) {
-      cards.push({
-        kind: 'table',
-        title: `جداول وملفات ${cleanName} المرصودة على الجهاز`,
-        columns: [
-          { key: 'name', label: 'اسم الملف' },
-          { key: 'size', label: 'الحجم' },
-          { key: 'path', label: 'المسار' },
-          { key: 'headers', label: 'الأعمدة المرصودة' },
-        ],
-        rows: excelRes.recentSpreadsheets.slice(0, 5).map((s) => ({
-          name: s.name,
-          size: `${s.sizeKb} KB`,
-          path: s.path.length > 40 ? `...${s.path.slice(-37)}` : s.path,
-          headers: s.previewHeaders?.slice(0, 4).join(', ') || 'XLSX Binary Sheet',
-        })),
-      })
-    }
-
-    // Synced records Table Card
-    if (recentOps.length > 0) {
-      cards.push({
-        kind: 'table',
-        title: `الحركات والمزامنة اللحظية مع ${cleanName}`,
-        columns: [
-          { key: 'id', label: 'رقم الحركة' },
-          { key: 'type', label: 'النوع' },
-          { key: 'amount', label: 'القيمة' },
-          { key: 'date', label: 'التاريخ' },
-        ],
-        rows: recentOps.map((r) => ({
-          id: `#${r.id}`,
-          type: r.type,
-          amount: egp(r.amount),
-          date: r.date,
-        })),
-        footer: [{ label: 'إجمالي الحركات المزامنة', value: `${recentOps.length} حركات مسجلة` }],
-      })
-    }
-
-    summary = `تم فحص وتشغيل تسخير «${cleanName}» حياً: البرنامج ${excelRes.isRunning ? 'يعمل' : 'خامل'} ورُصدت ${excelRes.recentSpreadsheets.length} ملفات جداول.`
-  } else if (lower.includes('db') || lower.includes('sql') || lower.includes('قاعدة')) {
-    // Live Database & Service Inspection
-    const dbRes = await inspectDatabaseOrService()
-
-    let itemsCount = 0
-    let opsCount = 0
-    if (params.businessId && params.businessId !== 'system') {
-      try {
-        const [items, ops] = await Promise.all([
-          db.item.count({ where: { businessId: params.businessId } }),
-          db.operation.count({ where: { businessId: params.businessId } }),
-        ])
-        itemsCount = items
-        opsCount = ops
-      } catch {}
-    }
-
-    dataPayload = {
-      isDatabaseActive: dbRes.isRunning,
-      activePorts: dbRes.ports,
-      databases: dbRes.localDatabases,
-      itemsCount,
-      opsCount,
-    }
-
-    cards.push({
-      kind: 'kv',
-      title: `حالة ربط قاعدة البيانات ونقاط البيع (${cleanName})`,
-      rows: [
-        { label: 'حالة الخدمات النشطة', value: dbRes.isRunning ? '🟢 متصل بالخدمات المحلية' : '⚪ محلي', tone: dbRes.isRunning ? 'good' : 'neutral' },
-        {
-          label: 'المنافذ المصغية (Listening Ports)',
-          value:
-            dbRes.ports.map((p) => `${p.port} (${p.service})`).slice(0, 3).join(' · ') || 'لا توجد منافذ مفتوحة',
-        },
-        { label: 'ملف قاعدة البيانات المحلي', value: dbRes.localDatabases[0]?.name || 'custom.db' },
-        { label: 'حجم قاعدة البيانات', value: dbRes.localDatabases[0] ? `${dbRes.localDatabases[0].sizeKb} KB` : '1.2 MB' },
-        { label: 'عدد الأصناف المرتبطة', value: `${itemsCount} صنف` },
-        { label: 'عدد الحركات المسجلة', value: `${opsCount} حركة` },
-      ],
-    })
-
-    if (dbRes.ports.length > 0) {
-      cards.push({
-        kind: 'table',
-        title: 'منافذ الخدمات المحلية النشطة',
-        columns: [
-          { key: 'port', label: 'المنفذ' },
-          { key: 'service', label: 'الخدمة المقابلة' },
-          { key: 'pid', label: 'معرف العملية (PID)' },
-        ],
-        rows: dbRes.ports.map((p) => ({
-          port: String(p.port),
-          service: p.service || 'Unknown',
-          pid: String(p.pid),
-        })),
-      })
-    }
-
-    summary = `تم فحص قاعدة بيانات «${cleanName}» بنجاح: رُصد ${dbRes.ports.length} منافذ نشطة و${itemsCount} أصناف.`
-  } else if (lower.includes('chrome') || lower.includes('edge') || lower.includes('browser') || lower.includes('متصفح')) {
-    // Live Browser & Web Service Inspection
-    const dbRes = await inspectDatabaseOrService()
-    const browserProcs = procs.filter((p) => p.name.includes('chrome') || p.name.includes('msedge'))
-    const totalMemBytes = browserProcs.reduce((s, p) => s + (p.memoryBytes || 0), 0)
-
-    dataPayload = {
-      browserRunning: browserProcs.length > 0,
-      processCount: browserProcs.length,
-      totalMemoryMb: Math.round(totalMemBytes / 1024 / 1024),
-      listeningPorts: dbRes.ports,
-    }
-
-    cards.push({
-      kind: 'kv',
-      title: `حالة ربط المتصفح والبوابة السحابية (${cleanName})`,
-      rows: [
-        {
-          label: 'حالة المتصفح',
-          value: browserProcs.length > 0 ? `🟢 يعمل (${browserProcs.length} عمليات)` : '⚪ خامل',
-          tone: browserProcs.length > 0 ? 'good' : 'neutral',
-        },
-        { label: 'إجمالي استهلاك الذاكرة', value: `${Math.round(totalMemBytes / 1024 / 1024)} MB` },
-        {
-          label: 'منفذ الواجهة السحابية المحلي',
-          value: dbRes.ports.find((p) => p.port === 3000) ? 'Port 3000 (Wakil Core)' : '—',
-        },
-      ],
-    })
-
-    summary = `تم فحص جلسة المتصفح «${cleanName}» بنجاح: ${browserProcs.length} عمليات متصفح نشطة.`
-  } else {
-    // Universal Desktop Application Inspection (Daftra, Al-Ameen, EasyStore, QuickBooks, POS, etc.)
-    const desktopRes = await inspectDesktopApplication(cleanName, params.businessId)
-    dataPayload = {
-      isRunning: desktopRes.isRunning,
-      process: desktopRes.process,
-      dataFiles: desktopRes.dataFiles,
-      reconciliation: desktopRes.reconciliation,
-    }
-    cards.push(...desktopRes.cards)
-    summary = desktopRes.summary
-  }
-
-  const durationMs = Math.max(1, Math.round(performance.now() - t0))
-
+  const appName = params.appName.trim() || 'تطبيق العمل'
   return {
-    ok: true,
-    appName: cleanName,
-    command,
-    durationMs,
+    ok: false,
+    status: 'not_connected',
+    appName,
+    command: params.command ?? 'check_status',
+    durationMs: 0,
     executedAt: new Date().toISOString(),
-    processTelemetry: proc,
-    data: dataPayload,
-    cards,
-    summary,
+    data: { source: 'none', connectionStatus: 'not_connected' },
+    cards: notConnectedCards(appName),
+    summary: NOT_CONNECTED_MESSAGE,
+    error: 'not_connected',
   }
 }
 
-// ---------------------------------------------------------------------------
-// 8. Autonomous Bridge & Harness Synthesizer (100% Real Execution & Timings)
-// ---------------------------------------------------------------------------
-
-/**
- * Bridges any user application or process into Wakil's runtime, measuring actual
- * step execution timings, querying live processes/files, and persisting into PluginRegistry.
- */
+/** Fail before registration: a generated command schema is not a connection. */
 export async function bridgeApplicationWithCliAnything(params: {
   businessId: string
   userId: string
@@ -1149,148 +733,15 @@ export async function bridgeApplicationWithCliAnything(params: {
   appPath?: string
   businessType?: string
 }): Promise<CliBridgeResult> {
-  const cleanName = params.appName.trim() || 'تطبيق العمل'
-  const slug = `app_cli_${cleanName.replace(/[^a-zA-Z0-9_\u0600-\u06FF]/g, '_').toLowerCase().slice(0, 24)}_${Date.now().toString().slice(-4)}`
-
-  const statusSteps: CliBridgeResult['statusSteps'] = []
-
-  // Step 1: Detect (Execute real process query and file discovery)
-  const t0 = performance.now()
-  const procs = await getRunningProcesses()
-  const detectedProc = procs.find(
-    (p) =>
-      p.name.includes(cleanName.toLowerCase()) ||
-      (params.processName && p.name.includes(params.processName.toLowerCase()))
-  )
-  const ms1 = Math.max(1, Math.round(performance.now() - t0))
-  statusSteps.push({
-    step: 'detect',
-    label: detectedProc
-      ? `رصد عملية «${cleanName}» نشطة (PID: ${detectedProc.pid} · ${detectedProc.memoryFormatted || 'RAM'})`
-      : `رصد وتتبع ملفات وعمليات «${cleanName}» في بيئة التشغيل`,
-    state: 'done',
-    ms: ms1,
-  })
-
-  // Step 2: Dissect (Inspect real application files, ports, or spreadsheets)
-  const t1 = performance.now()
-  let dissectDetail = 'تفكيك الجداول والبروتوكول المحلي (Agent-Native Parsing)'
-  const lower = cleanName.toLowerCase()
-  if (lower.includes('excel') || lower.includes('calc') || lower.includes('sheet') || lower.includes('إكسل')) {
-    const xl = await inspectExcelWorkbooks()
-    dissectDetail = `فحص جداول ومصنفات إكسل (تم العثور على ${xl.recentSpreadsheets.length} ملفات)`
-  } else if (lower.includes('db') || lower.includes('sql') || lower.includes('pos')) {
-    const dbRes = await inspectDatabaseOrService()
-    dissectDetail = `فحص قاعدة البيانات والمنافذ المصغية (${dbRes.ports.length} منافذ نشطة)`
-  }
-  const ms2 = Math.max(1, Math.round(performance.now() - t1))
-  statusSteps.push({
-    step: 'dissect',
-    label: dissectDetail,
-    state: 'done',
-    ms: ms2,
-  })
-
-  // Step 3: Harness (Inspect CLI-Anything module registry and schema)
-  const t2 = performance.now()
-  const registry = getCliAnythingRegistry()
-  const hasModule = Boolean(registry && Object.keys(registry).length > 0)
-  const ms3 = Math.max(1, Math.round(performance.now() - t2))
-  statusSteps.push({
-    step: 'harness',
-    label: hasModule
-      ? `توليد أداة التسخير وربط وحدات CLI-Anything المتطابقة`
-      : `توليد أداة التسخير الذكية عبر محرك CLI-Anything`,
-    state: 'done',
-    ms: ms3,
-  })
-
-  // Step 4: Register (Persist into database & Wakil's PluginRegistry)
-  const t3 = performance.now()
-  const capabilities = [
-    `قراءة ومزامنة الفواتير والحركات من ${cleanName} حياً`,
-    `استخراج الأصناف والأرصدة اللحظية تلقائياً`,
-    `تسجيل العمليات وربطها بدفتر وكيل المالي بنقرة واحدة`,
-    `تنبيهات فورية عند تعارض الأسعار أو انخفاض المخزون في ${cleanName}`,
-  ]
-
-  const harnessSchema = {
-    agentNativeProtocol: 'cli-anything/v1',
-    targetApp: cleanName,
-    processName: params.processName ?? detectedProc?.name ?? 'active_process',
-    cliWrapper: `cli-anything run --app "${cleanName}" --json`,
-    outputMode: 'structured_json',
-    commands: {
-      sync_invoices: {
-        description: `سحب وتدقيق الفواتير اليومية من ${cleanName}`,
-        args: { date: 'string (optional)' },
-      },
-      export_inventory: {
-        description: `تحديث جرد الأصناف ومطابقتها مع مخزن وكيل من ${cleanName}`,
-        args: { category: 'string (optional)' },
-      },
-      record_transaction: {
-        description: `تصدير حركة بيع أو سداد من وكيل إلى ${cleanName}`,
-        args: { customer: 'string', amount: 'number', items: 'array' },
-      },
-    },
-  }
-
-  let pluginDto: AgentPluginDTO | undefined
-  try {
-    pluginDto = await installOrUpdatePlugin({
-      businessId: params.businessId,
-      userId: params.userId,
-      spec: {
-        slug,
-        name: `تحكم ${cleanName} (CLI-Anything)`,
-        description: `أداة تسخير وكيل المباشرة للتحكم في وتدقيق بيانات تطبيق «${cleanName}» وراء الكواليس بصيغة JSON مهيكلة ودون الحاجة لنقر الماوس.`,
-        category: 'finance',
-        icon: 'spark',
-        version: '1.0.0',
-        author: 'ai-synthesized',
-        triggers: [cleanName, `ربط ${cleanName}`, `مزامنة ${cleanName}`, `فواتير ${cleanName}`],
-        capabilities,
-        pipeline: [
-          { module: 'custom_query', label: `مزامنة بيانات وفواتير ${cleanName}`, params: { targetEntity: 'operations', limit: 10 } },
-        ],
-        proactiveRules: [],
-        quickPrompt: `افحص بيانات وفواتير ${cleanName}`,
-      },
-    })
-  } catch (err) {
-    console.error('[cli-anything bridge] failed to persist plugin:', err)
-  }
-  const ms4 = Math.max(1, Math.round(performance.now() - t3))
-  statusSteps.push({
-    step: 'register',
-    label: 'تسجيل الأداة في سجل أدوات وكيل (PluginRegistry)',
-    state: 'done',
-    ms: ms4,
-  })
-
-  // Step 5: Ready (Perform live dry-run probe to confirm responsiveness)
-  const t4 = performance.now()
-  await executeBridgedTool({
-    businessId: params.businessId,
-    appName: cleanName,
-    processName: params.processName,
-  }).catch(() => null)
-  const ms5 = Math.max(1, Math.round(performance.now() - t4))
-  statusSteps.push({
-    step: 'ready',
-    label: `الربط التام! وكيل الآن يستطيع التحكم بـ «${cleanName}» وسحب البيانات لحظياً`,
-    state: 'done',
-    ms: ms5,
-  })
-
+  const appName = params.appName.trim() || 'تطبيق العمل'
   return {
-    ok: true,
-    appName: cleanName,
-    slug,
-    statusSteps,
-    capabilities,
-    harnessSchema,
-    plugin: pluginDto,
+    ok: false,
+    status: 'not_connected',
+    appName,
+    slug: '',
+    statusSteps: [{ step: 'connect', label: NOT_CONNECTED_MESSAGE, state: 'failed', ms: 0 }],
+    capabilities: [],
+    harnessSchema: {},
+    error: 'not_connected',
   }
 }

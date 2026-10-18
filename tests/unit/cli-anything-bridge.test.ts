@@ -1,177 +1,91 @@
-// Tests for Wakil CLI-Anything 100% Real Systems & Harness Integration
+// OS telemetry is not a connector. These are diagnostics / fail-closed tests,
+// NOT integration tests against Excel, a POS backend, or a merchant's machine.
 import { describe, expect, test } from 'bun:test'
 import {
-  scanRunningApplications,
-  inspectExcelWorkbooks,
-  inspectDatabaseOrService,
-  bridgeApplicationWithCliAnything,
-  executeBridgedTool,
-  getRunningProcesses,
+  scanRunningApplications, inspectExcelWorkbooks, inspectDatabaseOrService,
+  bridgeApplicationWithCliAnything, executeBridgedTool, getRunningProcesses,
+  inspectDesktopApplication,
 } from '@/lib/agent/cli-anything/bridge'
 import { executePlugin } from '@/lib/agent/plugin-harness'
 import { db } from '@/lib/db'
 
-describe('CLI-Anything Real Systems Integration', () => {
-  test('getRunningProcesses queries live OS processes with real PIDs and memory', async () => {
+describe('CLI host diagnostics and unverified connector safety', () => {
+  test('local OS diagnostics return actual PIDs, never connection proof', async () => {
     const procs = await getRunningProcesses()
-    expect(Array.isArray(procs)).toBe(true)
     expect(procs.length).toBeGreaterThan(0)
-
-    const first = procs[0]
-    expect(first.pid).toBeGreaterThan(0)
-    expect(typeof first.name).toBe('string')
-    expect(first.name.length).toBeGreaterThan(0)
-  }, 15000)
-
-  test('scanRunningApplications returns detected apps with live metadata and baseline profiles', async () => {
+    expect(procs[0].pid).toBeGreaterThan(0)
+    expect(procs[0].name.length).toBeGreaterThan(0)
     const apps = await scanRunningApplications()
-    expect(Array.isArray(apps)).toBe(true)
     expect(apps.length).toBeGreaterThanOrEqual(4)
-
-    // Baseline apps should always be present
-    const excel = apps.find((a) => a.processName === 'excel' || a.id === 'excel_sheets')
-    expect(excel).toBeDefined()
-    expect(excel?.category).toBe('spreadsheet')
-    expect(excel?.hasCliHarness).toBe(true)
-
-    const dbApp = apps.find((a) => a.processName === 'pos_db' || a.id === 'sqlite_db')
-    expect(dbApp).toBeDefined()
-    expect(dbApp?.category).toBe('database')
-
-    const browserApp = apps.find((a) => a.processName === 'chrome' || a.id === 'web_portal')
-    expect(browserApp).toBeDefined()
-    expect(browserApp?.category).toBe('browser')
+    expect(apps.every((app) => !app.hasCliHarness)).toBe(true)
+    expect(Array.isArray((await inspectExcelWorkbooks()).recentSpreadsheets)).toBe(true)
+    expect(Array.isArray((await inspectDatabaseOrService()).ports)).toBe(true)
   })
 
-  test('inspectExcelWorkbooks inspects live system spreadsheets and open workbooks', async () => {
-    const result = await inspectExcelWorkbooks()
-    expect(typeof result.isRunning).toBe('boolean')
-    expect(Array.isArray(result.openWorkbooks)).toBe(true)
-    expect(Array.isArray(result.recentSpreadsheets)).toBe(true)
-
-    // Spreadsheets metadata check
-    for (const sheet of result.recentSpreadsheets) {
-      expect(typeof sheet.name).toBe('string')
-      expect(typeof sheet.path).toBe('string')
-      expect(typeof sheet.sizeKb).toBe('number')
-      expect(typeof sheet.modifiedAt).toBe('string')
-    }
-  })
-
-  test('inspectDatabaseOrService probes real listening network ports and local DB files', async () => {
-    const result = await inspectDatabaseOrService()
-    expect(typeof result.isRunning).toBe('boolean')
-    expect(Array.isArray(result.ports)).toBe(true)
-    expect(Array.isArray(result.localDatabases)).toBe(true)
-
-    for (const p of result.ports) {
-      expect(typeof p.port).toBe('number')
-      expect(p.port).toBeGreaterThan(0)
-      expect(typeof p.pid).toBe('number')
-    }
-  })
-
-  test('bridgeApplicationWithCliAnything measures REAL execution timings (no fake ms)', async () => {
-    const biz = await db.business.findFirst()
-    const user = await db.user.findFirst()
-    const businessId = biz?.id ?? 'system'
-    const userId = user?.id ?? 'system'
-
+  test('bridge refuses success and does not persist a fake plugin', async () => {
+    const before = await db.customTool.count()
     const res = await bridgeApplicationWithCliAnything({
-      businessId,
-      userId,
-      appName: 'مايكروسوفت إكسل',
-      processName: 'excel',
-      businessType: 'retail',
+      businessId: 'not-a-tenant', userId: 'not-a-user', appName: 'Excel', processName: 'excel',
     })
+    expect(res.ok).toBe(false)
+    expect(res.status).toBe('not_connected')
+    expect(res.plugin).toBeUndefined()
+    expect(res.capabilities).toEqual([])
+    expect(res.harnessSchema).toEqual({})
+    expect(res.statusSteps.some((s) => s.state === 'failed')).toBe(true)
+    expect(await db.customTool.count()).toBe(before)
+  })
 
-    expect(res.ok).toBe(true)
-    expect(res.appName).toBe('مايكروسوفت إكسل')
-    expect(res.slug.startsWith('app_cli_')).toBe(true)
-    expect(res.statusSteps.length).toBe(5)
+  for (const command of ['sync_invoices', 'export_inventory', 'record_transaction', 'check_status']) {
+    test(`${command} cannot fabricate external data or fall back to the ledger`, async () => {
+      const res = await executeBridgedTool({ appName: 'POS', businessId: 'any', command })
+      expect(res.ok).toBe(false)
+      expect(res.error).toBe('not_connected')
+      expect(res.data).toEqual({ source: 'none', connectionStatus: 'not_connected' })
+      expect(res.cards.length).toBe(1)
+      expect(res.summary).toContain('لم تُقرأ أو تُكتب')
+    })
+  }
 
-    // Verify all steps are completed and timings are REAL numbers > 0
-    const stepNames = res.statusSteps.map((s) => s.step)
-    expect(stepNames).toEqual(['detect', 'dissect', 'harness', 'register', 'ready'])
+  test('no inventory differences or matching claims without external records', async () => {
+    const owner = await db.user.findFirstOrThrow({ where: { role: 'owner' } })
+    const res = await inspectDesktopApplication('Daftra', owner.businessId)
+    expect(res.reconciliation).toEqual({ matchedCount: 0, discrepancyCount: 0, items: [] })
+    expect(res.summary).toContain('غير متصل')
+    expect(res.cards.some((c) => c.kind === 'table')).toBe(false)
+  })
 
-    for (const step of res.statusSteps) {
-      expect(step.state).toBe('done')
-      expect(step.ms).toBeGreaterThanOrEqual(1)
-      // Confirm we eliminated hardcoded fake timings (140, 220, 310)
-      expect(step.label.length).toBeGreaterThan(5)
+  test('legacy persisted bridge is blocked before its internal-ledger pipeline', async () => {
+    const owner = await db.user.findFirstOrThrow({ where: { role: 'owner' } })
+    // Simulate an OLD persisted row; the new installer must reject this module.
+    const legacy = {
+      slug: 'app_cli_legacy_test', name: 'Legacy external POS', description: 'Unverified bridge',
+      category: 'finance', icon: 'spark', version: '1', author: 'ai-synthesized',
+      triggers: ['legacy test'], capabilities: [], proactiveRules: [], quickPrompt: 'test',
+      pipeline: [{ module: 'custom_query', label: 'external invoices', params: { targetEntity: 'operations' } }],
     }
+    const row = await db.customTool.create({ data: { businessId: owner.businessId, userId: owner.id, kind: 'plugin', name: legacy.name, config: JSON.stringify(legacy), active: true } })
+    const plugin = { ...row, slug: legacy.slug }
 
-    // Harness schema must be structured and agent-native
-    expect(res.harnessSchema.agentNativeProtocol).toBe('cli-anything/v1')
-    expect(res.harnessSchema.targetApp).toBe('مايكروسوفت إكسل')
-    expect(res.capabilities.length).toBeGreaterThanOrEqual(4)
-  }, 15000)
+    try {
+      await expect(executePlugin({ businessId: owner.businessId, pluginOrSlug: plugin.slug })).rejects.toThrow('not_connected')
+    } finally {
+      await db.customTool.delete({ where: { id: plugin.id } })
+      await db.quickCommand.deleteMany({ where: { businessId: owner.businessId, label: plugin.name } })
+    }
+  })
 
-  test('executeBridgedTool executes live queries and returns structured JSON and ResultCards', async () => {
-    const biz = await db.business.findFirst()
-    const businessId = biz?.id ?? 'system'
-
-    // 1. Excel tool execution
-    const excelExec = await executeBridgedTool({
-      businessId,
-      appName: 'مايكروسوفت إكسل (Excel)',
-      command: 'sync_invoices',
-    })
-
-    expect(excelExec.ok).toBe(true)
-    expect(excelExec.appName).toBe('مايكروسوفت إكسل (Excel)')
-    expect(excelExec.durationMs).toBeGreaterThanOrEqual(1)
-    expect(excelExec.cards.length).toBeGreaterThanOrEqual(1)
-    expect(excelExec.cards[0].kind).toBe('kv')
-    expect(excelExec.data).toHaveProperty('spreadsheetsFound')
-
-    // 2. Database / POS tool execution
-    const dbExec = await executeBridgedTool({
-      businessId,
-      appName: 'قاعدة بيانات ونقاط بيع محلية (SQL / POS)',
-      command: 'check_status',
-    })
-
-    expect(dbExec.ok).toBe(true)
-    expect(dbExec.durationMs).toBeGreaterThanOrEqual(1)
-    expect(dbExec.cards.length).toBeGreaterThanOrEqual(1)
-    expect(dbExec.data).toHaveProperty('isDatabaseActive')
-
-    // 3. Browser portal execution
-    const browserExec = await executeBridgedTool({
-      businessId,
-      appName: 'بوابة الويب / متصفح السحابة (Chrome)',
-      command: 'inspect_session',
-    })
-
-    expect(browserExec.ok).toBe(true)
-    expect(browserExec.cards.length).toBeGreaterThanOrEqual(1)
-    expect(browserExec.data).toHaveProperty('browserRunning')
-  }, 15000)
-
-  test('executePlugin delegates app_cli_ plugins to executeBridgedTool dynamically', async () => {
-    const biz = await db.business.findFirst()
-    const user = await db.user.findFirst()
-    if (!biz || !user) return
-
-    // Bridge an application to persist in DB
-    const bridgeRes = await bridgeApplicationWithCliAnything({
-      businessId: biz.id,
-      userId: user.id,
-      appName: 'إكسل المبيعات',
-      processName: 'excel',
-    })
-
-    expect(bridgeRes.plugin).toBeDefined()
-    if (!bridgeRes.plugin) return
-
-    // Execute through Wakil's Plugin Harness runtime
-    const execRes = await executePlugin({
-      businessId: biz.id,
-      pluginOrSlug: bridgeRes.slug,
-    })
-
-    expect(execRes.cards.length).toBeGreaterThanOrEqual(1)
-    expect(execRes.cards.some((c) => c.title.includes('إكسل المبيعات'))).toBe(true)
-  }, 15000)
+  test('production diagnostics never scan the server on behalf of a tenant', async () => {
+    const prev = process.env.NODE_ENV
+    Object.assign(process.env, { NODE_ENV: 'production' })
+    try {
+      expect(await getRunningProcesses()).toEqual([])
+      expect(await scanRunningApplications()).toEqual([])
+      expect((await inspectExcelWorkbooks()).recentSpreadsheets).toEqual([])
+      expect((await inspectDatabaseOrService()).localDatabases).toEqual([])
+    } finally {
+      if (prev === undefined) Reflect.deleteProperty(process.env, 'NODE_ENV')
+      else Object.assign(process.env, { NODE_ENV: prev })
+    }
+  })
 })

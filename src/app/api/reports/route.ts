@@ -1,3 +1,4 @@
+import { reportedType } from '@/lib/cashbook-report'
 // GET /api/reports?businessId&range=7d|30d — aggregates for the Reports view.
 // Daily buckets (Cairo days), totals, top items by sold qty, and count/amount per type.
 // All money is integer piastres from SUCCEEDED operations' payload.total.
@@ -111,14 +112,16 @@ export async function GET(req: Request) {
       // byType: every operation type, count + amount from payload.total
       const typeEntry = typeMap.get(op.type) ?? { type: op.type, count: 0, amount: 0 }
       typeEntry.count += 1
-      typeEntry.amount += payloadTotalPiastres(op.payload)
+      typeEntry.amount += op.type === 'cashbook' && reportedType(op.type, parseJson(op.payload, {})) === 'cashbook' ? 0 : payloadTotalPiastres(op.payload)
       typeMap.set(op.type, typeEntry)
 
       // daily buckets: the five money movement types
-      const bucket = buckets.get(cairoIsoDay(op.createdAt))
+      const payload = parseJson<Record<string, unknown>>(op.payload, {})
+      if (op.type === 'cashbook' && op.reversedByRef) continue
+      const bucket = buckets.get(op.type === 'cashbook' ? String(payload.occurredOn) : cairoIsoDay(op.createdAt))
       if (bucket) {
         const total = payloadTotalPiastres(op.payload)
-        switch (op.type) {
+        switch (reportedType(op.type, payload)) {
           // A gym sells MEMBERSHIPS, not «sales». Leaving membership out of the
           // revenue bucket made the gym's stats screen read «المبيعات ٠» after
           // four renewals (found by the screens audit).
@@ -165,7 +168,7 @@ export async function GET(req: Request) {
     const topItems = [...topMap.values()].sort((a, b) => b.qty - a.qty).slice(0, 5)
     const byType = [...typeMap.values()].sort((a, b) => b.amount - a.amount || b.count - a.count)
 
-    const dto: ReportsDTO = { range, daily, totals, topItems, byType }
+    const dto: ReportsDTO = { cashbookMode: gate.business.workflowMode === 'cashbook', range, daily, totals, topItems, byType }
     return NextResponse.json(dto)
   } catch (e) {
     return serverError('reports', e)

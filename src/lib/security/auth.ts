@@ -1,21 +1,10 @@
 // وكيل — request authentication & tenant isolation.
 //
-// Two layers, both enforced in one place (`src/app/api/_lib/guard.ts`):
-//
-//  1. TENANT ISOLATION (always on). Every API route takes a `businessId` and
-//     (usually) a `userId` from the client. Without a check, any id guess leaks
-//     another shop's books — the classic horizontal privilege escalation. The
-//     guard therefore loads both rows and refuses the request unless the user
-//     really belongs to that business.
-//
-//  2. ACCESS TOKEN (opt-in). Set `WAKIL_ACCESS_TOKEN` and every API call must
-//     present it: `Authorization: Bearer <token>`, `X-Wakil-Token: <token>`,
-//     a `?token=` query param, or the `wakil_token` cookie (the web client
-//     stores whichever it was opened with). Leave it unset for the open demo —
-//     the seeded showcase businesses are meant to be clickable.
-//
-// Comparison is constant-time so a wrong token cannot be guessed byte by byte.
+// Development demo mode trusts the actor picker. Production never does:
+// server-configured, hashed per-user credentials bind every request to a DB user.
+// This is a pilot API credential mechanism, not a hosted identity provider.
 
+import { createHash } from 'node:crypto'
 import { db } from '@/lib/db'
 import type { Business, User } from '@prisma/client'
 
@@ -45,11 +34,12 @@ export function safeEqual(a: string, b: string): boolean {
   return diff === 0
 }
 
-function tokenFromRequest(req: Request): string | null {
+function tokenFromRequest(req: Request, headerOnly = false): string | null {
   const auth = req.headers.get('authorization')
   if (auth?.toLowerCase().startsWith('bearer ')) return auth.slice(7).trim()
   const header = req.headers.get('x-wakil-token')
   if (header?.trim()) return header.trim()
+  if (headerOnly) return null
   try {
     const url = new URL(req.url)
     const q = url.searchParams.get('token')
@@ -59,7 +49,9 @@ function tokenFromRequest(req: Request): string | null {
   }
   const cookie = req.headers.get('cookie') ?? ''
   const match = /(?:^|;\s*)wakil_token=([^;]+)/.exec(cookie)
-  if (match) return decodeURIComponent(match[1])
+  if (match) {
+    try { return decodeURIComponent(match[1]) } catch { return null }
+  }
   return null
 }
 
@@ -76,8 +68,38 @@ export function headerIds(req: Request): { businessId: string | null; userId: st
   }
 }
 
-/** True when the request carries the configured access token (or auth is off). */
+export interface CredentialIdentity {
+  userId: string
+  admin: boolean
+}
+
+/** Production always requires identity; configuring credentials also enables it in dev. */
+export function identityRequired(): boolean {
+  return process.env.WAKIL_SAAS_ENABLED === '1' || process.env.NODE_ENV === 'production' || process.env.WAKIL_AUTH_CREDENTIALS !== undefined
+}
+
+/** Never accept IDs, roles, shared demo tokens, query strings or cookies as identity. */
+export function credentialIdentity(req: Request): CredentialIdentity | null {
+  const token = tokenFromRequest(req, true)
+  if (!token || token.length < 32) return null
+  try {
+    const entries: unknown = JSON.parse(process.env.WAKIL_AUTH_CREDENTIALS ?? 'null')
+    if (!Array.isArray(entries) || entries.length === 0) return null
+    if (!entries.every((e) => e && typeof e.userId === 'string' && e.userId.length > 0 &&
+      typeof e.tokenHash === 'string' && /^[a-f0-9]{64}$/.test(e.tokenHash) &&
+      (e.admin === undefined || typeof e.admin === 'boolean'))) return null
+    const digest = createHash('sha256').update(token).digest('hex')
+    const matches = entries.filter((e) => safeEqual(e.tokenHash, digest))
+    if (matches.length !== 1) return null
+    return { userId: matches[0].userId, admin: matches[0].admin === true }
+  } catch {
+    return null // invalid / absent configuration is fail-closed
+  }
+}
+
+/** Demo access shell is never sufficient in production. */
 export function tokenAccepted(req: Request): boolean {
+  if (identityRequired()) return credentialIdentity(req) !== null
   const expected = process.env.WAKIL_ACCESS_TOKEN?.trim()
   if (!expected) return true
   const provided = tokenFromRequest(req)

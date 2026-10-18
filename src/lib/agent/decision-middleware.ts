@@ -1,3 +1,4 @@
+import { requireBusinessUser } from '@/lib/security/permissions'
 // وكيل — INTELLIGENT NLU MIDDLEWARE & AUTONOMOUS DECISION ENGINE
 // (الوسيط الذكي لتحليل اللغة الطبيعية ومحرك اتخاذ القرار التلقائي)
 //
@@ -29,10 +30,8 @@ import {
   type TaskEvolutionSnapshot,
 } from './memory'
 import {
-  executePlugin,
   getBusinessPlugins,
   pluginRegistry,
-  synthesizePluginWithAI,
 } from './plugin-harness'
 import {
   autoLearnFromUserMessage,
@@ -270,6 +269,8 @@ export function detectImplicitPluginRoute(
   plugins: AgentPluginDTO[],
 ): ImplicitPluginRoute | null {
   const norm = normalizeAr(text)
+  // Configuration is never a read trigger: let the explicit, permission-gated tool handle it.
+  if (/(وقف|اوقف|عطل|تفعيل|فعل|ثبت|حذف|امسح|ركب|غير|بدل|ابني|انشئ)/.test(norm)) return null
 
   // 1) Check active installed plugins by their natural triggers
   for (const p of plugins) {
@@ -413,6 +414,7 @@ export class DecisionEngine {
       getTaskEvolutionContext(params.business.id),
       localVectorDB.buildVectorContextBlock({
         businessId: params.business.id,
+        userId: params.user.id,
         query: params.text,
         memories: params.memories,
         topK: 7,
@@ -432,7 +434,7 @@ export class DecisionEngine {
         )
       } else if (implicitPlugin.action === 'auto_activate_starter' && implicitPlugin.slug) {
         decisionLines.push(
-          `- **توجيه محرك اتخاذ القرار (Decision Engine)**: طلب المستخدم الطبيعي يحتاج قدرة «${implicitPlugin.pluginName}» (${implicitPlugin.reasonAr}). استدعِ \`install_plugin({"prompt": "${implicitPlugin.pluginName}", "name": "${implicitPlugin.pluginName}"})\` لتفعيلها وتشغيلها فوراً في خطوة واحدة شفافة.`,
+          `- **توجيه محرك اتخاذ القرار (Decision Engine)**: طلب المستخدم الطبيعي يحتاج قدرة «${implicitPlugin.pluginName}» (${implicitPlugin.reasonAr}). استدعِ \`install_plugin({"prompt": "${implicitPlugin.pluginName}", "name": "${implicitPlugin.pluginName}"})\` فقط لو المستخدم طلب تثبيتها صراحة وعنده tools.manage؛ طلب تحليل أو قراءة وحده لا يثبت أو يفعل إضافة.`,
         )
       } else if (implicitPlugin.action === 'synthesize_custom') {
         decisionLines.push(
@@ -494,18 +496,7 @@ export class DecisionEngine {
       return { ...res, autoInstalled: false }
     }
 
-    const promptToUse = params.route.pluginName || params.rawText
-    const installed = await synthesizePluginWithAI({
-      businessId: params.businessId,
-      userId: params.userId,
-      prompt: promptToUse,
-      preferredName: params.route.pluginName,
-    })
-    const res = await executePlugin({
-      businessId: params.businessId,
-      pluginOrSlug: installed,
-    })
-    return { ...res, autoInstalled: true }
+    throw new Error('التثبيت والتفعيل يحتاجان طلبًا صريحًا وأداة تثبيت محكومة بالصلاحيات؛ التوجيه لا يغير الإضافات تلقائيًا')
   }
 
   /**
@@ -534,10 +525,11 @@ export class DecisionEngine {
       autoInstalled: boolean
     }
   }> {
+    const user = await requireBusinessUser(params.business.id, params.userId)
     const plugins = await getBusinessPlugins(params.business.id)
     const analysis = await this.analyzeAndRoute({
       business: params.business,
-      user: { id: params.userId, name: 'صاحب الشغل', role: 'owner' },
+      user,
       text: params.text,
       items: params.items,
       customers: params.customers,
@@ -559,7 +551,7 @@ export class DecisionEngine {
     // If the user's natural speech matches an existing active plugin or a starter capability,
     // execute it directly from the Plugin Registry so the user gets real-time execution with zero friction!
     if (analysis.implicitPlugin) {
-      if (analysis.implicitPlugin.action === 'run_existing' || analysis.implicitPlugin.action === 'auto_activate_starter') {
+      if (analysis.implicitPlugin.action === 'run_existing') {
         try {
           autoExecutedPlugin = await this.executePluginTransparently({
             businessId: params.business.id,
@@ -592,7 +584,7 @@ export class DecisionEngine {
       thinkingBits.push(`وجهت الطلب لـ «${analysis.implicitPlugin.pluginName ?? 'قدرة متخصصة'}»`)
     }
     if (analysis.wantsWebSearch) {
-      thinkingBits.push('فعّلت بحث الإنترنت الحي عبر Gemini')
+      thinkingBits.push('الطلب محتاج بحث إنترنت؛ توافر المزوّد والنتيجة لم يتأكد بعد')
     }
 
     return {
@@ -653,7 +645,7 @@ export class DecisionEngine {
     ])
 
     // Sync LocalVectorDB immediately
-    await localVectorDB.syncBusinessMemories(params.businessId, refreshedMemories)
+    await localVectorDB.syncBusinessMemories(params.businessId, refreshedMemories, params.userId)
 
     // Sync in-memory PluginRegistry
     for (const p of refreshedPlugins) {

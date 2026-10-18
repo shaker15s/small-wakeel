@@ -1,3 +1,4 @@
+import { requireBusinessReader, requirePermission } from '@/lib/security/permissions'
 // وكيل — CONCURRENT BACKGROUND TASK MANAGER & PROACTIVE RISK/OPPORTUNITY ENGINE
 // (محرك المهام الخلفية المتوازية ورادار المخاطر والفرص الاستباقي)
 //
@@ -25,7 +26,7 @@ import { executePlugin, getActivePlugins } from './plugin-harness'
 import { upsertCatalogItemInDb } from '@/lib/domain/business-builder'
 
 const JOB_TITLES_AR: Record<BackgroundJobKind, string> = {
-  sync_and_audit_records: 'تحديث ومراجعة السجلات والأرصدة',
+  sync_and_audit_records: 'قراءة ومراجعة السجلات بدون تعديل',
   analyze_financial_report: 'تحليل التقرير المالي والربحية (٣٠ يوم)',
   forecast_inventory_velocity: 'توقع دوران المخزون وخطة الشراء',
   scan_risks_and_opportunities: 'فحص رادار المخاطر والفرص الاستباقي',
@@ -37,14 +38,15 @@ const JOB_TITLES_AR: Record<BackgroundJobKind, string> = {
 // Proactive Risk & Opportunity Scanner (رادار المخاطر والفرص الاستباقي)
 // ---------------------------------------------------------------------------
 
-export async function scanRisksAndOpportunities(businessId: string): Promise<{
+export async function scanRisksAndOpportunities(businessId: string, userId: string): Promise<{
   alerts: ProactiveAlertDTO[]
   cards: ResultCardDTO[]
 }> {
+  const actor = await requireBusinessReader(businessId, userId)
   const since30d = new Date(Date.now() - 30 * 86400000)
   const [biz, radarInsights, items, customers, suppliers, sales30, entries, activePlugins] = await Promise.all([
     db.business.findUniqueOrThrow({ where: { id: businessId } }),
-    buildRadar(businessId),
+    actor.role === 'owner' ? buildRadar(businessId) : [],
     db.item.findMany({ where: { businessId }, orderBy: { name: 'asc' } }),
     db.customer.findMany({ where: { businessId, balance: { gt: 0 } }, orderBy: { balance: 'desc' } }),
     db.supplier.findMany({ where: { businessId, balance: { gt: 0 } }, orderBy: { balance: 'desc' } }),
@@ -122,7 +124,7 @@ export async function scanRisksAndOpportunities(businessId: string): Promise<{
     })
     .sort((a, b) => (soldByItem.get(b.id) ?? 0) * (b.sellPrice - b.costPrice) - (soldByItem.get(a.id) ?? 0) * (a.sellPrice - a.costPrice))
 
-  if (stars.length > 0) {
+  if (biz.workflowMode !== 'cashbook' && stars.length > 0) {
     const top = stars[0]
     const marginPct = Math.round(((top.sellPrice - top.costPrice) / top.sellPrice) * 100)
     alerts.push({
@@ -140,7 +142,7 @@ export async function scanRisksAndOpportunities(businessId: string): Promise<{
   }
 
   const slowHighStock = items.filter((it) => (soldByItem.get(it.id) ?? 0) === 0 && it.stockQty > it.lowStockThreshold * 2 && it.costPrice > 0)
-  if (slowHighStock.length > 0) {
+  if (biz.workflowMode !== 'cashbook' && slowHighStock.length > 0) {
     const lockedCash = slowHighStock.reduce((s, it) => s + Math.round(it.stockQty * it.costPrice), 0)
     alerts.push({
       id: 'opp-unlock-dead-stock',
@@ -162,25 +164,25 @@ export async function scanRisksAndOpportunities(businessId: string): Promise<{
       id: `opp-collect-${topCustomer.id.slice(0, 8)}`,
       category: 'opportunity',
       level: 'warning',
-      title: `فرصة تحصيل نقدي: ${egp(totalReceivables)} جاهزة للتحصيل من العملاء`,
-      detail: `أولوية التحصيل اليوم مع «${topCustomer.name}» (${egp(topCustomer.balance)}) لرفع رصيد الخزنة من ${egp(cashNow)} إلى ${egp(cashNow + topCustomer.balance)}.`,
+      title: `حسابات تستحق المراجعة: ${egp(totalReceivables)} مسجلة على حسابات العملاء`,
+      detail: `أكبر رصيد مسجل على «${topCustomer.name}» (${egp(topCustomer.balance)}). راجع الميعاد وأي سداد لسه ما اتسجلش؛ الرصيد ده مش كاش اتحصل فعلًا.`,
       metricValue: egp(totalReceivables),
       sourcePlugin: 'مدير التدفقات النقدية',
-      actionLabel: 'تحصيل من العميل',
-      actionPrompt: `حصلت دفعة من ${topCustomer.name}`,
+      actionLabel: 'راجع الحسابات',
+      actionPrompt: 'مين عليه فلوس',
       view: 'accounts',
     })
   }
 
   // 4. Evaluate Active Plugin Proactive Rules
-  for (const plugin of activePlugins) {
+  for (const plugin of biz.workflowMode === 'cashbook' ? [] : activePlugins) {
     for (const rule of plugin.proactiveRules) {
       alerts.push({
         id: `plugin-rule-${plugin.slug}-${rule.metric}`,
         category: rule.kind,
         level: rule.kind === 'risk' ? 'warning' : 'info',
-        title: rule.title,
-        detail: rule.recommendation,
+        title: `قاعدة متابعة: ${rule.title}`,
+        detail: `دي قاعدة مقترحة من الوحدة، مش نتيجة قياس تحققت دلوقتي. ${rule.recommendation}`,
         sourcePlugin: plugin.name,
         actionLabel: `تشغيل ${plugin.name}`,
         actionPrompt: plugin.quickPrompt,
@@ -274,6 +276,10 @@ export class TaskManager {
     job: BackgroundJobDTO
     proactiveAlerts: ProactiveAlertDTO[]
   }> {
+    await requirePermission(req.businessId, req.userId, 'automation.manage')
+    if (req.conversationId && !await db.conversation.findFirst({ where: { id: req.conversationId, businessId: req.businessId, userId: req.userId } })) {
+      throw new Error('المحادثة دي مش تبع المستخدم والنشاط ده')
+    }
     const batchId = req.batchId ?? `job_${Date.now().toString(36)}`
     const title = JOB_TITLES_AR[req.kind] ?? req.kind
     const row = await db.scheduledTask.create({
@@ -373,6 +379,7 @@ export class TaskManager {
     })
 
     try {
+      await requirePermission(businessId, request.userId, 'automation.manage')
       let cards: ResultCardDTO[] = []
       let alertsFound = 0
       let summary = ''
@@ -383,6 +390,7 @@ export class TaskManager {
         for (const upd of catalogUpdates) {
           const res = await upsertCatalogItemInDb({
             businessId,
+            userId: request.userId,
             name: upd.name,
             sellPriceEgp: upd.sellPriceEgp,
             buyPriceEgp: upd.buyPriceEgp,
@@ -412,68 +420,44 @@ export class TaskManager {
         summary = `تم تحديث ${updatedItems.length} سجل في الكتالوج`
         stepLabel = 'تم تحديث السجلات وتوثيقها'
       } else if (kind === 'sync_and_audit_records') {
-        const since14d = new Date(Date.now() - 14 * 86400000)
-        const [items, sales14, customers, suppliers, pendingOps] = await Promise.all([
+        // Reviewing records is read-only. Zero/unknown thresholds must never
+        // be silently overwritten from partial sales by a generic audit job.
+        const [items, customers, suppliers, pendingOps] = await Promise.all([
           db.item.findMany({ where: { businessId } }),
-          db.operation.findMany({
-            where: { businessId, type: 'sale', status: 'SUCCEEDED', createdAt: { gte: since14d } },
-          }),
           db.customer.findMany({ where: { businessId } }),
           db.supplier.findMany({ where: { businessId } }),
           db.operation.count({ where: { businessId, status: 'AWAITING_APPROVAL' } }),
         ])
-
-        const soldByItem = new Map<string, number>()
-        for (const s of sales14) {
-          try {
-            const p = JSON.parse(s.payload) as Record<string, unknown>
-            const id = String(p.itemId ?? '')
-            const q = Number(p.qty ?? 0)
-            if (id && q > 0) soldByItem.set(id, (soldByItem.get(id) ?? 0) + q)
-          } catch {
-            // ignore
-          }
-        }
-
-        let calibratedCount = 0
-        for (const it of items) {
-          if (it.lowStockThreshold <= 0) {
-            const sold = soldByItem.get(it.id) ?? 0
-            const smartThreshold = Math.max(3, Math.ceil((sold / 14) * 4))
-            await db.item.update({
-              where: { id: it.id },
-              data: { lowStockThreshold: smartThreshold },
-            })
-            calibratedCount++
-          }
-        }
-
+        const unconfigured = items.filter(it => it.lowStockThreshold <= 0).length
+        const manual = (await db.business.findUniqueOrThrow({ where: { id: businessId }, select: { workflowMode: true } })).workflowMode === 'cashbook'
         const lowStockNow = items.filter((i) => i.stockQty <= Math.max(1, i.lowStockThreshold)).length
         cards = [
           {
             kind: 'kv',
-            title: 'مراجعة وتحديث السجلات والأرصدة',
+            title: 'قراءة السجلات والأرصدة — بدون تعديل',
             rows: [
               { label: 'إجمالي الأصناف المراجعة', value: `${fmtQty(items.length)} صنف`, tone: 'good' },
-              { label: 'معايرة حدود الأمان التلقائية', value: calibratedCount > 0 ? `تم ضبط ${fmtQty(calibratedCount)} صنف` : 'الحدود مضبوطة بالكامل' },
-              { label: 'سجلات العملاء والموردين المطابقة', value: `${fmtQty(customers.length)} عميل · ${fmtQty(suppliers.length)} مورد` },
-              { label: 'أصناف تحت حد الأمان حالياً', value: fmtQty(lowStockNow), tone: lowStockNow > 0 ? 'bad' : 'good' },
+              { label: 'أصناف بدون حد أمان محدد', value: `${fmtQty(unconfigured)} — لم نغيّر أي حد تلقائيًا` },
+              { label: 'حسابات العملاء والموردين المسجلة', value: `${fmtQty(customers.length)} عميل · ${fmtQty(suppliers.length)} مورد` },
+              { label: 'متابعة النواقص', value: manual ? 'قائمة طلب المستخدم؛ لا نستنتج النقص من دفتر يدوي' : `${fmtQty(lowStockNow)} تحت حد الأمان حسب الرصيد المسجل` },
               { label: 'مسودات بانتظار الاعتماد', value: fmtQty(pendingOps) },
             ],
           },
         ]
-        summary = `تم فحص ومزامنة ${items.length} صنف و${customers.length + suppliers.length} طرف`
-        stepLabel = 'تمت مطابقة السجلات والأرصدة'
+        summary = `قراءة ${items.length} صنف و${customers.length + suppliers.length} حساب؛ لا أسعار أو كميات أو حدود أمان اتغيرت`
+        stepLabel = 'تمت قراءة السجلات بدون تعديل'
       } else if (kind === 'analyze_financial_report') {
         cards = await runReadTool('analyze_profitability', businessId, {})
-        summary = 'اكتمل تحليل الربحية والتدفق المالي لآخر ٣٠ يوم'
-        stepLabel = 'تم استخراج قوائم الربحية والهوامش'
+        const manual = (await db.business.findUniqueOrThrow({ where: { id: businessId } })).workflowMode === 'cashbook'
+        summary = manual ? 'الربح غير محسوب من دفتر يدوي غير مكتمل؛ عرضنا حدود البيانات' : 'اكتمل تحليل الربحية من الحركات المسجلة'
+        stepLabel = manual ? 'مش هنحسب ربح من الخزنة أو سجل غير مكتمل' : 'تم استخراج تحليل الحركات المسجلة'
       } else if (kind === 'forecast_inventory_velocity') {
         cards = await runReadTool('forecast_stock', businessId, {})
-        summary = 'اكتمل حساب سرعة السحب وميزانية إعادة الطلب'
-        stepLabel = 'تم حساب توقعات النفاد لـ ١٤ يوم'
+        const manual = (await db.business.findUniqueOrThrow({ where: { id: businessId } })).workflowMode === 'cashbook'
+        summary = manual ? 'النفاد غير متوقع من دفتر يدوي غير مكتمل؛ راجع النواقص الفعلية' : 'اكتمل حساب سرعة السحب من المبيعات المسجلة'
+        stepLabel = manual ? 'مفيش توقع نفاد موثوق من غير حركة أصناف كافية' : 'تم حساب توقعات النفاد من المسجل'
       } else if (kind === 'scan_risks_and_opportunities') {
-        const scan = await scanRisksAndOpportunities(businessId)
+        const scan = await scanRisksAndOpportunities(businessId, request.userId)
         cards = scan.cards
         alertsFound = scan.alerts.length
         if (alertsCollector) alertsCollector.push(...scan.alerts)
@@ -572,6 +556,11 @@ export class TaskManager {
       postToChat = true,
     } = params
 
+    await requirePermission(businessId, userId, 'automation.manage')
+    if (conversationId && !await db.conversation.findFirst({ where: { id: conversationId, businessId, userId } })) {
+      throw new Error('المحادثة دي مش تبع المستخدم والنشاط ده')
+    }
+
     const batchStarted = Date.now()
     const batchId = `batch_${batchStarted.toString(36)}`
 
@@ -643,7 +632,7 @@ export class TaskManager {
 
     if (postToChat && allCards.length > 0) {
       let conv = conversationId
-        ? await db.conversation.findUnique({ where: { id: conversationId } })
+        ? await db.conversation.findFirst({ where: { id: conversationId, businessId, userId } })
         : await db.conversation.findFirst({ where: { businessId, userId }, orderBy: { updatedAt: 'desc' } })
       if (!conv) {
         conv = await db.conversation.create({
@@ -683,11 +672,12 @@ export class TaskManager {
   /**
    * Track and retrieve asynchronous task status for a business.
    */
-  async getRecentJobs(businessId: string, limit = 16): Promise<BackgroundJobDTO[]> {
+  async getRecentJobs(businessId: string, limit = 16, userId?: string): Promise<BackgroundJobDTO[]> {
     const rows = await db.scheduledTask.findMany({
       where: {
         businessId,
         tool: { startsWith: 'bg:' },
+        ...(userId ? { userId } : {}),
       },
       orderBy: { createdAt: 'desc' },
       take: limit,
@@ -744,8 +734,9 @@ export async function dispatchConcurrentBackgroundJobs(
   return taskManager.dispatchBatch(params)
 }
 
-export async function getRecentBackgroundJobs(businessId: string): Promise<BackgroundJobDTO[]> {
-  return taskManager.getRecentJobs(businessId)
+export async function getRecentBackgroundJobs(businessId: string, userId: string): Promise<BackgroundJobDTO[]> {
+  await requireBusinessReader(businessId, userId)
+  return taskManager.getRecentJobs(businessId, 16, userId)
 }
 
 export async function executeDueScheduledTasks(params: {

@@ -4,14 +4,13 @@ import {
   bridgeApplicationWithCliAnything,
   executeBridgedTool,
 } from '@/lib/agent/cli-anything/bridge'
-import { db } from '@/lib/db'
 import { guard } from '../../_lib/guard'
 
 export const dynamic = 'force-dynamic'
 
 export async function GET(req: Request) {
   try {
-    const gate = await guard(req, { scope: 'open' })
+    const gate = await guard(req, { scope: 'admin' })
     if (!gate.ok) return gate.res
 
     const apps = await scanRunningApplications()
@@ -26,7 +25,7 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    const gate = await guard(req, { scope: 'open' })
+    const gate = await guard(req, { scope: 'admin' })
     if (!gate.ok) return gate.res
 
     const body = await req.json()
@@ -36,17 +35,9 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: 'appName is required' }, { status: 400 })
     }
 
-    // Resolve or fallback to active business if not provided
-    let bId = businessId
-    let uId = userId
-    if (!bId) {
-      const firstBiz = await db.business.findFirst()
-      if (firstBiz) bId = firstBiz.id
-    }
-    if (!uId) {
-      const firstUser = await db.user.findFirst()
-      if (firstUser) uId = firstUser.id
-    }
+    // No implicit first-tenant fallback. The bridge is disabled until verified.
+    const bId = gate.principal?.business.id ?? businessId
+    const uId = gate.principal?.user.id ?? userId
 
     // Execute live bridged tool query if requested
     if (action === 'execute' || command) {
@@ -57,7 +48,7 @@ export async function POST(req: Request) {
         command,
         args,
       })
-      return NextResponse.json(executionResult)
+      return NextResponse.json(executionResult, { status: executionResult.ok ? 200 : 409 })
     }
 
     // Synthesize autonomous harness and persist into PluginRegistry
@@ -69,7 +60,7 @@ export async function POST(req: Request) {
       businessType,
     })
 
-    return NextResponse.json(bridgeResult)
+    return NextResponse.json(bridgeResult, { status: bridgeResult.ok ? 200 : 409 })
   } catch (err) {
     return NextResponse.json(
       { ok: false, error: err instanceof Error ? err.message : 'failed to bridge app' },

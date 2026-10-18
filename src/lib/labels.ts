@@ -4,6 +4,8 @@
 import type { OpType, OpStatus, Risk, Vertical } from './types'
 
 export const TYPE_AR: Record<string, string> = {
+  debt_promise: 'تعديل وعد السداد',
+  cashbook: 'دفتر الكاش والآجل',
   sale: 'بيع',
   purchase: 'شرا',
   expense: 'مصروف',

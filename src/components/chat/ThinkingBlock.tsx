@@ -1,6 +1,6 @@
 'use client'
 
-// وكيل — «تفكير وكيل»: Luxury Apple-style live Thinking & Reasoning visualization
+// وكيل — «خطوات التنفيذ»: Luxury Apple-style live Thinking & Reasoning visualization
 // Features:
 // 1. Frosted Glass pill (`glass-strong`) with Apple micro-interactions.
 // 2. Pulsating warm amber aura (`animate-pulse` / framer-motion spring transitions).
@@ -8,7 +8,7 @@
 // 4. Staggered live equalizer wave bars.
 // 5. Smooth spring-animated collapsible trace for full auditability.
 
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
@@ -40,14 +40,6 @@ const STEP_ICONS: Record<NonNullable<ThinkingStep['icon']>, LucideIcon> = {
   note: NotebookPen,
 }
 
-const LIVE_STAGES = [
-  'عقلي بيقري طلبك وبيقرر الأدوات…',
-  'بتحقق من السجل الحقيقي…',
-  'بيفكر في العملية…',
-  'بيتحقق من المخزن…',
-  'بيحسب الأرقام…',
-] as const
-
 export function ThinkingBlock({
   steps,
   streaming = false,
@@ -56,16 +48,6 @@ export function ThinkingBlock({
   streaming?: boolean
 }) {
   const [open, setOpen] = useState(false)
-  const [stageIdx, setStageIdx] = useState(0)
-
-  // Rotate thought stages during live reasoning when waiting on steps
-  useEffect(() => {
-    if (!streaming) return
-    const timer = setInterval(() => {
-      setStageIdx((prev) => (prev + 1) % LIVE_STAGES.length)
-    }, 2200)
-    return () => clearInterval(timer)
-  }, [streaming])
 
   // Total measured time of the traced passes
   const totalMs = steps.reduce((sum, s) => sum + (s.ms ?? 0), 0)
@@ -79,8 +61,8 @@ export function ThinkingBlock({
     if (activeStep?.label) {
       return activeStep.label
     }
-    return LIVE_STAGES[stageIdx]
-  }, [activeStep, stageIdx])
+    return 'بجهّز الرد ليك…'
+  }, [activeStep])
 
   return (
     <motion.div
@@ -116,7 +98,7 @@ export function ThinkingBlock({
               'group flex w-full items-center justify-between gap-3 px-3.5 py-2.5 text-start outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50',
               open && 'border-b border-border/50 bg-muted/20',
             )}
-            aria-label={streaming ? `وكيل يفكر: ${stageText}` : 'عرض تفاصيل تفكير وكيل'}
+            aria-label={streaming ? `جارٍ التنفيذ: ${stageText}` : 'عرض تفاصيل خطوات التنفيذ'}
           >
             {/* Start side (RTL): Glowing Brain + Thought Stage or Finalized Summary */}
             <div className="flex min-w-0 flex-1 items-center gap-2.5">
@@ -166,7 +148,7 @@ export function ThinkingBlock({
                 </div>
               ) : (
                 <span className="truncate text-xs font-medium text-muted-foreground sm:text-sm">
-                  تفكير وكيل · <span className="num">{steps.length}</span> خطوات
+                  خطوات التنفيذ · <span className="num">{steps.length}</span> خطوات
                   {totalMs > 0 ? (
                     <>
                       {' · '}

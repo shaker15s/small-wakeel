@@ -7,6 +7,15 @@ The owner talks; the agent drafts; the server executes deterministically and ver
 
 Four verticals ship in the seed data — **سوبر ماركت، عطارة، صيدلية، جيم** — each with its own vocabulary, units and workflows.
 
+> **Launch status:** synthetic-data / controlled pilot hardening only. **NO-GO for paid public SaaS or unsupervised real financial records.** See [verification and remaining blockers](docs/LAUNCH_VERIFICATION_2026-10-17.md). CLI-Anything host discovery is not an external connector; unverified bridges return `not_connected`.
+> **Native SaaS now implemented (18 Oct 2026):** accounts, secure sessions, verification/reset/MFA, teams/invitations, isolated workspaces, trial/limits, manual operator contracts and encrypted mail jobs. See [SaaS guide](docs/SAAS.md), [current verification](docs/SAAS_VERIFICATION_2026-10-18.md), and [خطة الاستكمال والإطلاق](docs/SAAS_LAUNCH_PLAN_AR.md). No electronic payment or real mail delivery is claimed. Local gates now include Chromium E2E, SSE abort/replay, financial SIGKILL recovery and packaged quarantine/snapshots; hosted release and real infrastructure acceptance remain open.
+
+> **Brain/harness upgrade:** versioned prompt contract, real-role recent dialogue, actor-scoped semantic memory, bounded model requests/streams, honest draft/denial outcomes, canonical tool deduplication and accessible evidence-led chat states. The full local gate now passes **446 tests** plus Chromium/process checks. [تفاصيل التطوير وحدود التحقق](docs/BRAIN_HARNESS_2026-10-18_AR.md). Model-boundary tests are synthetic, not a claim of live-model quality or latency.
+> **Real workspace upgrade (2026-10-18):** actor-scoped persisted onboarding/preferences, usage-driven non-demo suggestions, consent-gated recurring READ reports, safe chat-driven analytics styling, fast/deep controls, permission-gated bounded plugins, and sourced playbooks for all nine presets. No automatic mock web search. `bun run model:acceptance` is a separate strict LIVE inference gate: **currently blocked**, not passed by offline fallbacks. [Implementation, evidence and migration notes](docs/WORKSPACE_BRAIN_ACCEPTANCE_2026-10-18_AR.md) · [Research sources](docs/BUSINESS_KNOWLEDGE_2026-10-18_AR.md). Original demo DB is preserved; newly created workspaces are blank.
+> **Manual-shop cashbook (2026-10-18):** attar/supermarket defaults now prioritize one-cashier cash/debt bookkeeping, itemless credit/cash purchases, lending/borrowing, physical drawer closing with **unclassified variance—not sales**, occurrence/promise dates, contextual goods reminders and ledger-checked overdue questions. New responsive Today/review/report flows are backed by the approval/atomic accounting machinery. Full local gate: **446 passed**, actual Chromium count/approval/mobile proof included. Persisted multi-turn financial clarification, single-utterance spoken amounts, atomic pre-approval draft corrections, nonce-bound duplicate-account choices, date-filtered due queries, personal revision-checked restock checklists, actionable daily promise/shortage review, read-only background audits, approval-only promise revisions/history, and unified legacy/new debt settlements are now included. Voice supports browser dictation plus real record/replay/consented server-ASR upload with admin-selected transcription models and review-only text. Live model inference remains blocked; no ASR is selected in the test environment, so **live microphone/recognition quality is not verified**. `bun run voice:acceptance` is a separate strict real-audio gate. [التنفيذ والأمثلة ودليل التحقق والحدود](docs/CASHBOOK_ACCEPTANCE_2026-10-18_AR.md). Original DB unchanged; no deploy.
+
+
+
 ---
 
 ## Why this is not «another chatbot»
@@ -19,28 +28,22 @@ Four verticals ship in the seed data — **سوبر ماركت، عطارة، ص
 | **Model outages must not stop the shop** | A fallback ladder walks the requested model → the closest-tier enabled BYO model → the built-in gateway, announces the switch, and only then drops to the deterministic rule ladder (`WAKIL_OFFLINE=1` reproduces that path in tests). |
 | **The reply must agree with the cards** | A draft turn's reply is a *contract* composed deterministically (operation, amount, approval requirement); a read turn's reply is buffered and **grounded** — if the model's prose shares no figure or distinctive word with the cards, the deterministic summary replaces it. |
 | **Money math** | Integer **piastres** everywhere (1 EGP = 100 piastres). No floats in the ledger. |
-| **Time** | Every «today» is a **Cairo** day (`src/app/api/_lib/dates.ts`), never the server's UTC day. |
+| **Time** | Every operational «today» is a **Cairo** day (`src/app/api/_lib/dates.ts`), never the server's UTC day. The separate SaaS request allowance resets at UTC midnight. |
 
 ---
 
 ## Quickstart
 
 ```bash
-bun install                # or: npm install
+bun install --frozen-lockfile # Bun 1.3.11; Node 22
 cp .env.example .env       # DATABASE_URL=file:./db/custom.db
 bun run db:generate        # Prisma client (works offline — see scripts/prisma-generate.sh)
-bun run db:sync            # additive schema push, no engines required
-bun run db:seed            # 4 demo businesses, catalogs, customers, history
+DATABASE_URL="file:$PWD/db/custom.db" bun run db:migrate # explicit versioned additive migration
+# Optional: bun run db:seed (DESTRUCTIVE; synthetic showcase only)
 bun run dev                # http://localhost:3000
 ```
 
-Optional — a local OpenAI-compatible model so the agent has a real LLM:
-
-```bash
-cd mini-services/mock-provider && bun install && bun --hot index.ts   # :3031
-```
-
-Then point a provider at it from the UI (الموديلات → مزوّد جديد → `http://localhost:3031/v1`).
+For deterministic local testing set `WAKIL_OFFLINE=1`. BYO providers require public HTTPS; the old localhost mock provider is not a supported connector and is no longer offered by Compose.
 
 ### Quality gates
 
@@ -53,8 +56,8 @@ bun run check       # typecheck + lint + tests
 bun run db:sync --check   # schema drift gate (exit 1 when drift)
 ```
 
-`bun run ci` runs the whole gate locally (install → prisma → drift → typecheck → lint → tests → evals → build); `bun run ci:fast` skips the build.
-CI runs the same script — copy [`docs/ci/github-actions.yml`](docs/ci/github-actions.yml) to `.github/workflows/ci.yml` to enable it (pushing workflow files needs a token with the `workflow` scope).
+`bun run ci` runs frozen install → Prisma → migrations on a disposable copy → schema/date checks → synthetic backup restore → typecheck → lint → tests → financial SIGKILL/reopen proof → offline evals → build → production financial/SaaS HTTP + server-rendered screens + real Chromium → five packaged maintenance jobs. `bun run ci:fast` explicitly skips build/boot/screens.
+The active workflow is [`.github/workflows/ci.yml`](.github/workflows/ci.yml), with an exact reference copy in `docs/ci`. GitHub execution and required-check branch rules must be verified separately on the release SHA; local green gates do not prove remote CI ran.
 
 ---
 
@@ -63,15 +66,19 @@ CI runs the same script — copy [`docs/ci/github-actions.yml`](docs/ci/github-a
 | Variable | Default | Meaning |
 |---|---|---|
 | `DATABASE_URL` | `file:./db/custom.db` | SQLite file (libsql driver adapter). Any `file:`/`libsql:` URL works. |
-| `WAKIL_ACCESS_TOKEN` | *(unset)* | When set, every `/api/*` call must present it (header, `?token=`, or cookie). Unset = local demo mode. |
+| `WAKIL_AUTH_CREDENTIALS` | *(unset)* | Hashed per-user pilot/operator credentials. Native SaaS cookie sessions are a separate identity path; absent both, production fails closed. See `docs/SECURITY.md`. |
+| `WAKIL_SECRETS_KEY` | *(unset)* | External 64-hex AES key for provider, MFA and mail secrets. |
+| `WAKIL_ACCESS_TOKEN` | *(unset)* | Optional **development demo only** shared token. Not production identity. |
 | `WAKIL_ALLOWED_ORIGINS` | *(unset)* | Extra origins allowed to call the API (CSRF guard). Same-origin is always allowed. |
-| `WAKIL_STRICT_APPROVALS` | `0` | `1` = nobody approves their own write; every R1/R2 needs owner/supervisor. |
+| `WAKIL_STRICT_APPROVALS` | `0` | `1` = every R1/R2 needs management; managers may approve their own drafts (not four-eyes). |
 | `WAKIL_OFFLINE` | `0` | `1` = every model call fails instantly (deterministic ladder; used by evals/CI). |
 | `WAKIL_SCHEDULER` | `on` | `off` disables the in-process due-task sweep. |
 | `WAKIL_SCHEDULER_INTERVAL_MS` | `60000` | Sweep interval (floor 5 s). |
 | `WAKIL_RATE_LIMIT*` | 600/120/40 per min | Read / write / chat token buckets. |
 | `WAKIL_EMBED_ORIGINS` | *(unset)* | Origins allowed to iframe the app (`https://*.e2b.app` is allowed in dev). |
-| `WAKIL_LOCAL_WEBHOOKS` | `0` | `1` allows tenant webhooks to target private/loopback addresses (SSRF guard otherwise blocks them). |
+| `WAKIL_SAAS_ENABLED` / `WAKIL_SIGNUP_ENABLED` | `0` | Opt in to native accounts / public signup; signup also requires real mail/key/HTTPS configuration. |
+| `WAKIL_APP_URL` | *(unset)* | Canonical HTTPS origin for cookie writes and security links. |
+| `WAKIL_MAIL_ENDPOINT` / `WAKIL_MAIL_TOKEN` | *(unset)* | Public HTTPS JSON mail gateway + private token; scheduled worker required. See [SAAS](docs/SAAS.md). |
 
 Full list with commentary: [`.env.example`](.env.example).
 
@@ -125,8 +132,8 @@ Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/SECURITY.md](docs
 - **Accuracy beats refusal** — a sale larger than the recorded stock drafts anyway (the shelf count is often stale); the agent attaches the finding, drops its confidence, and escalates to a written reason when the stock is zero. A package size inside an item's name («زيت عافية 800 مل») is identity, not a measurement.
 
 **For the engineer**
-- Strict TypeScript, zod at every boundary, ESLint clean, no dead code or unused dependency.
-- Real tests: **158 tests across 18 files** (unit + integration against a throwaway copy of the real DB) and 10 golden-dataset evals of the Arabic pipeline; `bun test` is proven not to touch the demo data (`bunfig.toml` preload + `tests/helpers/preload.ts`). New gates: `tests/unit/pipeline.test.ts` (plan normalisation refuses writes, tool timeouts, context budget, sub-agent isolation), `tests/integration/superpowers.test.ts` (SQL arithmetic of all five superpowers), `tests/unit/motion-guard.test.ts` (reduced motion never hides content) and `tests/unit/ui-hygiene.test.ts` (dead imports — the crash class that blanked the preview).
+- Strict TypeScript, boundary validation and lint gates for app-owned code. Existing lint warnings and broader authorization/validation gaps are documented; vendored CLI-Anything is not covered by app lint.
+- Unit and integration tests run against a disposable SQLite copy, plus **10 offline Arabic routing evals**. New security regressions cover each exported HTTP handler, production identity/tenant denials, provider URL/DNS policy, key encryption and fail-closed bridges. See the dated verification report for actual results, not a fixed marketing test count.
 - Speed is measured, not claimed: a 5-second catalog cache with write-through invalidation and hit/miss stats on `GET /api/health`; unreachable providers fail fast instead of burning the retry budget (7 s → ~0.1 s in the live preview).
 - Engine-free Prisma setup for offline/air-gapped installs (`scripts/db-sync.ts`, `scripts/prisma-generate.sh`).
 - Additive-only migrations, indexed query paths, `no-store` on all API responses, CSP + security headers.
@@ -137,19 +144,20 @@ Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/SECURITY.md](docs
 
 ```bash
 bun run build            # next build (type errors fail the build)
-bun run start            # standalone server on :3000
+bun run start            # standalone :3000; production identity config required
 ```
 
-- Docker: `docker build -t wakil . && docker run -p 3000:3000 -v wakil-db:/app/db wakil`
-- Compose (app + mock model provider): `docker compose up --build`
-- Health probe: `GET /api/health` (200 healthy · `degraded` with a backlog of drafts · 503 when the DB is unreachable).
+- Docker: see [pilot configuration](docs/OPERATIONS.md); an unconfigured production container refuses API access.
+- Compose: `docker compose up --build` requires per-user credentials, external encryption key, admin health credential and HTTPS origin in the operator environment. No mock service. Container execution is not verified by the local gate.
+- Health probe: admin-authenticated `GET /api/health` (200 reachable/degraded, 503 DB unavailable; 401/403 invalid identity/permissions).
 
 **Backups** — the SQLite file *is* the product state:
 
 ```bash
-bun run db:snapshot                       # timestamped copy into db/
-curl -s "$BASE/api/export?businessId=…" > backup.json
-curl -s -X POST "$BASE/api/restore" -d @backup.json   # mode=preview first!
+DATABASE_URL=file:/persistent/wakil.db bun run db:snapshot --output /secure-backups/wakil.db
+bun run backup:drill                      # synthetic full-DB restore rehearsal
+# JSON export includes financial data; catalog import cannot restore the ledger.
+# Full recovery uses DB snapshots + key versions + quarantine/reconciliation. See docs/OPERATIONS.md.
 ```
 
 ---

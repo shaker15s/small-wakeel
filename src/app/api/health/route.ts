@@ -10,7 +10,9 @@
 //
 // Status codes: 200 healthy/degraded, 503 unhealthy (database unreachable).
 import { NextResponse } from 'next/server'
+import { operationalHealth } from '@/lib/saas/health'
 import { db } from '@/lib/db'
+import { identityRequired } from '@/lib/security/auth'
 import { guard } from '../_lib/guard'
 import { schedulerStatus } from '@/lib/scheduler'
 import { catalogCacheStats } from '@/lib/agent/catalog'
@@ -22,10 +24,11 @@ export const dynamic = 'force-dynamic'
 const bootAt = Date.now()
 
 export async function GET(req: Request) {
-  const gate = await guard(req, { scope: 'open' })
+  const gate = await guard(req, { scope: 'admin' })
   if (!gate.ok) return gate.res
 
   const dbStarted = Date.now()
+  let operational: Awaited<ReturnType<typeof operationalHealth>> | null = null
   let dbOk = true
   let dbError: string | null = null
   let counts = { businesses: 0, items: 0, operations: 0, pendingOps: 0, scheduledPending: 0, messages: 0 }
@@ -39,6 +42,7 @@ export async function GET(req: Request) {
       db.message.count(),
     ])
     counts = { businesses, items, operations, pendingOps, scheduledPending, messages }
+    operational = await operationalHealth()
   } catch (err) {
     dbOk = false
     dbError = err instanceof Error ? err.message : 'database unreachable'
@@ -68,7 +72,7 @@ export async function GET(req: Request) {
     // a missing provider table must not fail the health check
   }
 
-  const status = !dbOk ? 'unhealthy' : counts.pendingOps > 25 ? 'degraded' : 'healthy'
+  const status = !dbOk ? 'unhealthy' : counts.pendingOps > 25 || (operational?.alerts.length ?? 0) > 0 ? 'degraded' : 'healthy'
   const body = {
     status,
     version: pkg.version,
@@ -76,13 +80,15 @@ export async function GET(req: Request) {
     time: new Date().toISOString(),
     runtime: { node: process.version, env: process.env.NODE_ENV ?? 'development' },
     db: { ok: dbOk, latencyMs: dbLatencyMs, error: dbError, counts },
+    operational,
     scheduler: schedulerStatus(),
     catalog: catalogCacheStats(),
     models,
     security: {
-      accessTokenRequired: Boolean(process.env.WAKIL_ACCESS_TOKEN?.trim()),
+      accessTokenRequired: identityRequired() || Boolean(process.env.WAKIL_ACCESS_TOKEN?.trim()),
+      identityRequired: identityRequired(),
       allowedOrigins: (process.env.WAKIL_ALLOWED_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean).length,
-      localWebhooksAllowed: process.env.ALLOW_LOCAL_WEBHOOKS === '1',
+      localWebhooksAllowed: process.env.NODE_ENV !== 'production' && process.env.ALLOW_LOCAL_WEBHOOKS === '1',
     },
   }
 

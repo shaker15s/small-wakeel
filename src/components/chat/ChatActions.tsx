@@ -35,9 +35,11 @@ const FALLBACK_ICON: LucideIcon = LayoutGrid
 export function ChatActions({
   actions,
   onNavigate,
+  onReply,
 }: {
   actions: ChatActionDTO[]
   onNavigate?: (view: ViewKey) => void
+  onReply?: (text: string) => void
 }) {
   if (actions.length === 0) return null
 
@@ -53,18 +55,19 @@ export function ChatActions({
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: i * 0.06, duration: 0.2, ease: 'easeOut' }}
-            onClick={() => onNavigate?.(a.view)}
+            disabled={!!a.reply && !onReply}
+            onClick={() => { if (a.reply) onReply?.(a.reply); else onNavigate?.(a.view) }}
             aria-label={a.label}
             title={a.label}
             className={cn(
-              'press inline-flex h-10 items-center gap-1.5 rounded-full px-4 text-xs font-semibold outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50',
+              'press disabled:opacity-40 disabled:cursor-not-allowed inline-flex min-h-10 min-w-0 max-w-full items-center gap-1.5 rounded-full px-4 text-xs font-semibold outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50',
               primary
                 ? 'bg-primary text-primary-foreground shadow-xs hover:bg-primary/90'
                 : 'border border-border bg-card text-foreground hover:border-wakil-amber/50 hover:bg-accent hover:text-accent-foreground',
             )}
           >
             <Icon className="size-3.5 shrink-0" aria-hidden="true" />
-            <span className="truncate">{a.label}</span>
+            <span className="min-w-0 whitespace-normal break-words text-start [overflow-wrap:anywhere]">{a.label}</span>
           </motion.button>
         )
       })}

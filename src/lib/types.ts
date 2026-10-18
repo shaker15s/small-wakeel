@@ -24,6 +24,8 @@ export type OpStatus =
   | 'CANCELLED'
 
 export type OpType =
+  | 'debt_promise'
+  | 'cashbook'
   | 'sale'
   | 'purchase'
   | 'expense'
@@ -43,6 +45,7 @@ export interface BusinessLite {
   id: string
   name: string
   type: Vertical
+  workflowMode?: string
   users: UserLite[]
 }
 export interface UserLite {
@@ -190,6 +193,8 @@ export interface MessageDTO {
 export interface ChatActionDTO {
   id: string
   label: string
+  /** Server-stamped clarification only; never a financial approval. */
+  reply?: string
   view: 'chat' | 'today' | 'inventory' | 'journal' | 'accounts' | 'stats' | 'reports' | 'settings'
   icon?: 'chart' | 'boxes' | 'users' | 'wallet' | 'today' | 'journal' | 'book'
   tone?: 'primary' | 'outline'
@@ -204,6 +209,7 @@ export interface CardOutcomeDTO {
 
 export interface ActionCardDTO {
   kind: 'draft'
+  supersedesRef?: string
   opId?: string
   ref: string
   type: OpType
@@ -316,6 +322,7 @@ export interface CustomToolDTO {
 }
 
 export interface BootstrapDTO {
+  deploymentAdmin?: boolean
   businesses: BusinessLite[]
   providers: ProviderDTO[]
 }
@@ -441,6 +448,7 @@ export interface ProbeResultDTO {
 }
 
 export interface ReportsDTO {
+  cashbookMode?: boolean
   range: '7d' | '30d'
   daily: { date: string; sales: number; purchases: number; expenses: number; collections: number; payments: number }[]
   totals: { sales: number; purchases: number; expenses: number; collections: number; payments: number; net: number }
@@ -488,7 +496,7 @@ export interface AgentPluginDTO {
   category: PluginCategory
   icon: 'spark' | 'boxes' | 'users' | 'wallet' | 'chart' | 'book' | 'today' | 'alert'
   version: string
-  author: 'ai-synthesized' | 'wakil-core'
+  author: 'ai-synthesized' | 'wakil-core' | 'wakil-deterministic-compiler'
   active: boolean
   installed: boolean
   usageCount: number

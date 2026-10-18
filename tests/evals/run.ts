@@ -13,6 +13,7 @@
 // A failure means the agent stopped understanding something an Egyptian shop
 // owner actually types — that is a product bug, not a test bug.
 
+import { applyMigrations } from '../../scripts/lib/migrations'
 import { copyFileSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -97,6 +98,7 @@ async function main() {
   const dbFile = join(tmpDir, 'custom.db')
   copyFileSync(join(process.cwd(), 'db', 'custom.db'), dbFile)
 
+  applyMigrations(dbFile)
   process.env.DATABASE_URL = `file:${dbFile}`
   // Deterministic ladder only: no network, no retries, no model latency.
   process.env.WAKIL_OFFLINE = '1'

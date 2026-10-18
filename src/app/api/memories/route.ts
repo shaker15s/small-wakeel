@@ -25,7 +25,7 @@ export async function POST(req: Request) {
     }
     if (!body.businessId) return badRequest('businessId مطلوب')
     if (!body.userId) return badRequest('userId مطلوب')
-    const gate = await guard(req, { businessId: body.businessId, userId: body.userId })
+    const gate = await guard(req, { businessId: body.businessId, userId: body.userId, permission: 'memory.manage' })
     if (!gate.ok) return gate.res
     const trimmed = body.text?.trim()
     if (!trimmed) return badRequest('نص الذاكرة مطلوب')
@@ -94,7 +94,7 @@ export async function GET(req: Request) {
 
 export async function PATCH(req: Request) {
   try {
-    const gate = await guard(req, { scope: 'business' })
+    const gate = await guard(req, { scope: 'business', permission: 'memory.manage' })
     if (!gate.ok) return gate.res
 
     const body = (await req.json()) as {
@@ -105,7 +105,7 @@ export async function PATCH(req: Request) {
     }
     if (!body.id) return badRequest('id مطلوب')
 
-    const existing = await db.agentMemory.findUnique({ where: { id: body.id } })
+    const existing = await db.agentMemory.findFirst({ where: { id: body.id, businessId: gate.business.id } })
     if (!existing) return notFound('الذاكرة دي مش موجودة')
 
     const data: { text?: string; active?: boolean; category?: string; updatedAt: Date } = { updatedAt: new Date() }
@@ -116,7 +116,7 @@ export async function PATCH(req: Request) {
     if (typeof body.active === 'boolean') data.active = body.active
     if (typeof body.category === 'string') data.category = body.category.trim().slice(0, 40) || 'general'
 
-    const memory = await db.agentMemory.update({ where: { id: body.id }, data })
+    const memory = await db.agentMemory.update({ where: { id: body.id, businessId: gate.business.id }, data })
 
     if (memory.kind === 'rule' && typeof body.text === 'string') {
       await decisionEngine.syncSystemOnMutation({
@@ -136,17 +136,17 @@ export async function PATCH(req: Request) {
 
 export async function DELETE(req: Request) {
   try {
-    const gate = await guard(req, { scope: 'business' })
+    const gate = await guard(req, { scope: 'business', permission: 'memory.manage' })
     if (!gate.ok) return gate.res
 
     const sp = searchParams(req)
     const id = sp.get('id')
     if (!id) return badRequest('id مطلوب')
 
-    const existing = await db.agentMemory.findUnique({ where: { id } })
+    const existing = await db.agentMemory.findFirst({ where: { id, businessId: gate.business.id } })
     if (!existing) return notFound('الذاكرة دي مش موجودة')
 
-    await db.agentMemory.delete({ where: { id } })
+    await db.agentMemory.delete({ where: { id, businessId: gate.business.id } })
     return NextResponse.json({ ok: true })
   } catch (e) {
     return serverError('memories-delete', e)

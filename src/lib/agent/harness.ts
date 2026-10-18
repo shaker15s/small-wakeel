@@ -1,3 +1,11 @@
+import { cashbookTurn } from './cashbook'
+import { resolveCairoSchedule } from '@/lib/tasks/cairo-time'
+import { getWorkspacePreferences, updateWorkspacePreferences } from '@/lib/workspace-preferences'
+import { executePlugin, getActivePlugins, getBusinessPlugins, pluginsPromptSection, synthesizePluginWithAI, togglePluginActive } from './plugin-harness'
+import { containsMemorySecret } from './memory-policy'
+import { withModelHealth } from './model-health'
+import { evidenceBlock, recentDialogue, toolSignature } from './context'
+import { AuthorizationError, requireBusinessUser, requirePermission } from '@/lib/security/permissions'
 // وكيل — THE AGENT HARNESS (multi-pass, deterministic, stream-first).
 //
 // Pass 0 (Instant): identity questions («انت مين»), memory-save requests
@@ -95,7 +103,6 @@ import {
 } from './memory'
 import { decisionEngine } from './decision-middleware'
 import { decomposeGoalIntoSubtasks, executeSubagentPipeline } from './task-engine'
-import { autoLearnFromUserMessage } from './vector-memory'
 
 export interface TurnEmit {
   (ev:
@@ -176,8 +183,8 @@ async function streamDeterministic(text: string, emit: TurnEmit, budgetMs = REPL
     if (remainingPieces <= 0) break
     const remainingBudget = budgetMs - (Date.now() - t0)
     if (remainingBudget <= 0) {
-      await sleep(PIECE_DELAY_MIN_MS)
-      continue
+      emit({ event: 'delta', text: pieces.slice(i + 1).join('') })
+      break
     }
     await sleep(Math.min(PIECE_DELAY_MAX_MS, Math.max(PIECE_DELAY_MIN_MS, remainingBudget / remainingPieces)))
   }
@@ -2414,6 +2421,10 @@ function turnIdem(ctx: TurnContext, type: string, summary: string): string {
 }
 
 export async function runAgentTurn(ctx: TurnContext, emit: TurnEmit): Promise<TurnResult> {
+  return withModelHealth(() => runMeasuredTurn(ctx, emit))
+}
+
+async function runMeasuredTurn(ctx: TurnContext, emit: TurnEmit): Promise<TurnResult> {
   ensurePrismaFresh() // dev-server prisma hot-reload seam (no-op on fresh processes)
   const t0 = Date.now()
   let ttftMs: number | null = null
@@ -2421,6 +2432,7 @@ export async function runAgentTurn(ctx: TurnContext, emit: TurnEmit): Promise<Tu
   const meta: TurnMeta = { kind: 'chat', fallback: false, notesJotted: 0, startedAt: t0 }
   llmHealth.retried = false
   llmHealth.fellBack = false
+  llmHealth.servedBy = null
   const trackedEmit: TurnEmit = (ev) => {
     if (!sawFirstToken && (ev.event === 'delta' || ev.event === 'step')) {
       sawFirstToken = true
@@ -2509,7 +2521,14 @@ async function reflectOnDraft(args: {
 }
 
 async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMeta): Promise<TurnResult> {
+  const liveUser = await requireBusinessUser(ctx.business.id, ctx.user.id)
+  const ownedConversation = await db.conversation.findFirst({ where: { id: ctx.conversationId, businessId: ctx.business.id, userId: liveUser.id }, select: { id: true } })
+  if (!ownedConversation) throw new AuthorizationError()
+  ctx = { ...ctx, user: liveUser }
   const { business, user, text } = ctx
+  // Manual-shop commands run before provider discovery, catalog loading, and broad cash reads.
+  const cashbook = await cashbookTurn(ctx, emit)
+  if (cashbook) return cashbook
   const v = getVertical(business.type)
   const model = await resolveModel(ctx.modelKey)
   const modelLabel = modelLabelFor(model)
@@ -2519,18 +2538,18 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   // بتاعتك» the owner's own tools — one prompt line so the agent knows them)
   // Catalog comes from the 5-second cache (invalidated on every committed
   // write); memories/notes/tools stay live because they change mid-conversation.
-  const { items, customers, suppliers } = await getCatalog(business.id)
+  const catalogPromise = getCatalog(business.id)
   // «سرعة»: the recall pass is timed like every other pass — «فتكرت من ذاكرتي»
   // used to be the ONE step with no milliseconds, which made the trace look
   // like it had skipped work it had actually done.
   const recallClock = Date.now()
-  const [memories, pendingCount, notesSection, userTools] = await Promise.all([
-    db.agentMemory.findMany({ where: { businessId: business.id, userId: user.id, active: true }, orderBy: { createdAt: 'desc' }, take: 12 }),
+  const [{ items, customers, suppliers }, memories, pendingCount, notesSection, userTools] = await Promise.all([
+    catalogPromise,
+    db.agentMemory.findMany({ where: { businessId: business.id, userId: user.id, active: true }, orderBy: { updatedAt: 'desc' }, take: 80 }),
     db.operation.count({ where: { businessId: business.id, status: 'AWAITING_APPROVAL' } }),
     notesContext(ctx.conversationId),
     activeTools(business.id),
   ])
-  void autoLearnFromUserMessage({ businessId: business.id, userId: user.id, text }).catch(() => null)
   const middlewareOut = await decisionEngine.routeAndPrepare({
     text,
     business,
@@ -2675,7 +2694,13 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
 
   // ---- PASS 0b: Memory save (preference OR BUSINESS_DNA rule) → instant, persisted, zero LLM ----
   const saveRequest = extractSaveRequest(text, norm) ?? extractRuleRequest(text, norm)
+  if (saveRequest && containsMemorySecret(saveRequest.text)) {
+    const replyText = 'لحمايتك، مش هحفظ كلمات مرور أو رموز أمان في ذاكرة المحادثة. استخدم مدير كلمات مرور أو إعدادات الأسرار المخصصة.'
+    await streamDeterministic(replyText, emit, 400)
+    return { replyText, modelLabel, thinking: steps, actions: null }
+  }
   if (saveRequest) {
+    await requirePermission(business.id, user.id, 'memory.manage')
     // Dedupe: re-saving the exact same memory must NOT clutter the memory
     // list — the owner repeating himself deserves a calm «already saved».
     const isDuplicate = memories.some((m) => normalizeAr(m.text) === normalizeAr(saveRequest.text))
@@ -2718,6 +2743,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   // ---- PASS 0c: FORGET («انسى…") → deactivate, instant, zero LLM ----
   const forgetRequest = extractForgetRequest(text, norm)
   if (forgetRequest) {
+    await requirePermission(business.id, user.id, 'memory.manage')
     const target = findMemoryByReference(forgetRequest.reference, memories)
     done(IDX.understand, 'طلب مسح من الذاكرة — مش محتاج موديل')
     done(IDX.search, 'بدوّر عليها في ذاكرتي المحفوظة')
@@ -2813,6 +2839,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     let draftOpId: string | undefined
     let anyDraft = false
     const replyParts: string[] = []
+    const confirmedMutationReplies: string[] = []
     const resultsForModel: Record<string, unknown>[] = []
     // A tool that FAILED (missing money, over-debt collection, unknown item) —
     // the owner must hear about it even if the model answers with small talk.
@@ -2822,6 +2849,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     // ONE turn (the model sometimes re-issues its earlier call when it
     // echoes JSON) — a repeat reports back instead of drafting a duplicate.
     const executedSigs = new Set<string>()
+    const executedResults = new Map<string, Record<string, unknown>>()
 
     // dynamic thinking timeline: understand(done) + mem + [tool steps…] + verify + reply
     const toolSteps: ThinkingStep[] = []
@@ -2892,12 +2920,18 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     const execBrainCall = async (call: BrainToolCall): Promise<void> => {
       // R18 dedupe: an exact re-issue (the model echoing its own earlier
       // call) reports back instead of re-executing — no duplicate drafts.
-      const sig = `${call.tool}:${JSON.stringify(call.args)}`
+      const sig = toolSignature(call.tool, call.args)
       if (executedSigs.has(sig)) {
-        resultsForModel.push({ tool: call.tool, ok: true, duplicate: true, note: 'نفذت الأداة دي مرة قبل كده في نفس الرسالة — مكررتهاش' })
+        const prior = executedResults.get(sig)
+        resultsForModel.push(prior ? { ...prior, duplicate: true } : { tool: call.tool, ok: false, duplicate: true, pending: true, error: 'الأداة قيد التنفيذ؛ لا تعتبر التكرار نجاحًا' })
         return
       }
       executedSigs.add(sig)
+      const report = (result: Record<string, unknown>) => {
+        executedResults.set(sig, result)
+        if (result.ok === false && brainFailures.length === 0) brainFailures.push('الإجراء المطلوب لم ينفذ أو يتأكد من السجل؛ مفيش نجاح مؤكد. راجع البيانات والصلاحيات أو حدد التفاصيل الناقصة.')
+        resultsForModel.push(result)
+      }
       executedAnyTool = true
       const { label, icon } = brainStepLabel(call)
       const argBits = Object.values(call.args)
@@ -2921,7 +2955,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           const run = await runToolPipeline(call.tool, business.id, call.args)
           if (!run.ok) {
             step.detail = run.error?.slice(0, 80) ?? 'الأداة فشلت'
-            resultsForModel.push({ tool: call.tool, ok: false, error: run.error ?? 'فشل' })
+            report({ tool: call.tool, ok: false, error: run.error ?? 'فشل' })
             replyParts.push(`مش قادر أجيب ${TOOL_LABEL_AR[call.tool] ?? call.tool} دلوقتي — قول للمستخدم إن في مشكلة مؤقتة.`)
             brainFailures.push(`مش قادر أجيب ${TOOL_LABEL_AR[call.tool] ?? call.tool} دلوقتي — جرّب تاني بعد شوية`)
             return
@@ -2944,7 +2978,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             })
             .join('؛ ')
           step.detail = (run.trimmed ? `${summary.slice(0, 70)}… (اتقصّرت للسياق)` : summary.slice(0, 90)) || 'رجعت ببيانات'
-          resultsForModel.push({
+          report({
             tool: call.tool,
             ok: true,
             ms: run.ms,
@@ -2966,7 +3000,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           const plan = normalizePlan(call.args)
           if (plan.length === 0) {
             step.detail = 'الخطة فاضية أو فيها أداة غير مسموحة'
-            resultsForModel.push({
+            report({
               tool: 'run_plan',
               ok: false,
               error: 'الخطة لازم تكون أدوات قراءة معروفة بس (من غير أي كتابة)',
@@ -2991,7 +3025,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           }
           if (allCards.length > 0) emit({ event: 'cards', cards: allCards })
           step.detail = `نفّذت ${toArabicNum(doneRuns.length)}/${toArabicNum(runs.length)} استعلام في خطوة واحدة`
-          resultsForModel.push({
+          report({
             tool: 'run_plan',
             ok: true,
             steps: runs.map((r) => ({ tool: r.tool, ok: r.ok, ms: r.ms, error: r.error, output: r.output })),
@@ -3028,7 +3062,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           // only the SUMMARY enters the parent's context — the intermediate
           // reads stay inside the sub-agent (Claude Code's summary-only return)
           step.detail = sub.summary.slice(0, 80)
-          resultsForModel.push({
+          report({
             tool: 'deep_dive',
             ok: true,
             rounds: sub.rounds,
@@ -3047,14 +3081,14 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         if (w) {
           if (!canDraft(user.role, w.opType)) {
             step.detail = `محتاجة صلاحية أعلى من ${roleTitle(user)}`
-            resultsForModel.push({ tool: call.tool, ok: false, error: `صلاحية ${user.name} مش بتسمح بعملية ${TYPE_AR[w.opType] ?? w.opType}` })
+            report({ tool: call.tool, ok: false, error: `صلاحية ${user.name} مش بتسمح بعملية ${TYPE_AR[w.opType] ?? w.opType}` })
             replyParts.push(`عملية ${TYPE_AR[w.opType] ?? w.opType} محتاجة صلاحية أعلى — مش من اختصاصك.`)
             return
           }
           const resolved = await resolveWrite({ ...ctx, text }, { intent: 'write', opType: w.opType, fields: w.fields(call.args) }, emit, memCtx)
           if (!resolved.ok) {
             step.detail = `ناقص: ${resolved.missing ?? ''}`
-            resultsForModel.push({
+            report({
               tool: call.tool,
               ok: false,
               error: `${resolved.failMessage ?? resolved.missing ?? 'ناقصة بيانات'} — العملية دي ماتسجلتش خالص، ولازم تقول للمستخدم كده بصراحة في ردك`,
@@ -3135,7 +3169,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
               replyParts.push(`وسجلت في ذاكرتي الموعد: ${memText}`)
             }
           }
-          resultsForModel.push({ tool: call.tool, ok: true, ref: draft.ref, summary: resolved.summary, note: 'مسودة مستنية اعتماد — مبتنفذش لوحدها', ...(resolved.issues?.length ? { تنبيه: resolved.issues.join('؛ ') } : {}) })
+          report({ tool: call.tool, ok: true, ref: draft.ref, summary: resolved.summary, note: 'مسودة مستنية اعتماد — مبتنفذش لوحدها', ...(resolved.issues?.length ? { تنبيه: resolved.issues.join('؛ ') } : {}) })
           replyParts.push(`جهزت مسودة «${TYPE_AR[resolved.opType] ?? resolved.opType}» (${draft.ref}): ${resolved.summary} — مستنية اعتمادك.`)
           // A draft can carry a caveat the owner MUST read (e.g. the amount was
           // lowered to the real debt) — it goes through the same failure guard so
@@ -3144,11 +3178,62 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           await trackUsage(business.id, user.id, 'tool', resolved.opType)
           return
         }
+        // Presentation plugins cannot execute JS/CSS, grant roles, or touch money.
+        if (call.tool === 'configure_workspace') {
+          const preferences = await updateWorkspacePreferences(business.id, user.id, call.args)
+          report({ tool: call.tool, ok: true, preferences })
+          confirmedMutationReplies.push('حفظت إعدادات واجهتك لحسابك في المنشأة دي؛ الحسابات والصلاحيات متغيرتش.')
+          await trackUsage(business.id, user.id, 'tool', call.tool)
+          return
+        }
+        if (call.tool === 'list_plugins') {
+          const plugins = await getBusinessPlugins(business.id)
+          report({ tool: call.tool, ok: true, plugins: plugins.map((p) => ({ slug: p.slug, name: p.name, installed: p.installed, active: p.active })) })
+          return
+        }
+        if (call.tool === 'install_plugin') {
+          await requirePermission(business.id, user.id, 'tools.manage')
+          if (!/ثبت|ثبّت|ركب|ركّب|فعل|فعّل|ابني|انشئ|أنشئ|ضيف|أضف|اضف|عايز.*(?:قدرة|ميزة|نظام|أداة)/.test(text)) throw new Error('تثبيت إضافة يحتاج طلب صريح')
+          const prompt = String(call.args.prompt ?? '').trim().slice(0, 1200)
+          if (!prompt || containsMemorySecret(prompt)) throw new Error('وصف الإضافة غير صالح')
+          const plugin = await synthesizePluginWithAI({ businessId: business.id, userId: user.id, prompt, preferredName: String(call.args.name ?? '').slice(0, 80) || undefined })
+          report({ tool: call.tool, ok: true, slug: plugin.slug, name: plugin.name, active: plugin.active })
+          confirmedMutationReplies.push(`ثبّت إضافة «${plugin.name}»؛ دي خطوات تحليل معتمدة، مش كود حر ولا صلاحية جديدة.`)
+          return
+        }
+        if (call.tool === 'toggle_plugin') {
+          await requirePermission(business.id, user.id, 'tools.manage')
+          if (typeof call.args.active !== 'boolean') throw new Error('حدد التفعيل أو الإيقاف')
+          const plugin = (await getBusinessPlugins(business.id)).find((p) => p.slug === call.args.slug && p.installed)
+          if (!plugin) throw new Error('إضافة غير مثبتة في المنشأة')
+          const updated = await togglePluginActive(plugin.id, call.args.active, business.id, user.id)
+          if (!updated) throw new Error('لم يتأكد تغيير الإضافة')
+          report({ tool: call.tool, ok: true, slug: updated.slug, active: updated.active })
+          confirmedMutationReplies.push(`${updated.active ? 'فعّلت' : 'وقفت'} الإضافة «${updated.name}» في المنشأة دي.`)
+          return
+        }
+        if (call.tool === 'run_plugin') {
+          const slug = String(call.args.slug ?? '')
+          const plugin = (await getActivePlugins(business.id)).find((p) => p.slug === slug)
+          if (!plugin) throw new Error('الإضافة غير مثبتة أو غير مفعلة؛ اطلب تفعيلها من صاحب الصلاحية')
+          const result = await executePlugin({ businessId: business.id, pluginOrSlug: slug })
+          allCards.push(...result.cards)
+          if (result.cards.length) emit({ event: 'cards', cards: result.cards })
+          report({ tool: call.tool, ok: true, summary: result.summaryText })
+          return
+        }
         // ---- memory_save (the model's own long-term learning tool) ----
         if (call.tool === 'memory_save') {
+          await requirePermission(business.id, user.id, 'memory.manage')
           const memText = String(call.args.text ?? '').trim().slice(0, 200)
+          if (containsMemorySecret(memText)) {
+            const error = 'مش هحفظ كلمات مرور أو رموز أمان في الذاكرة.'
+            report({ tool: 'memory_save', ok: false, error })
+            brainFailures.push(error)
+            return
+          }
           if (memText.length < 3) {
-            resultsForModel.push({ tool: 'memory_save', ok: false, error: 'نص فاضي' })
+            report({ tool: 'memory_save', ok: false, error: 'نص فاضي' })
             return
           }
           const memNorm = normalizeAr(memText)
@@ -3167,23 +3252,24 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             })
           }
           step.detail = dup ? 'موجودة أصلًا — من غير تكرار' : memText.slice(0, 60)
-          resultsForModel.push({ tool: 'memory_save', ok: true, saved: true, duplicate: dup })
+          report({ tool: 'memory_save', ok: true, saved: true, duplicate: dup })
           replyParts.push(dup ? `دي محفوظة عندي أصلًا ✅ — «${memText}»` : `اتحفظت في ذاكرتي ✅ — «${memText}»`)
           modelSavedMemory = true
           return
         }
         // ---- memory_forget ----
         if (call.tool === 'memory_forget') {
+          await requirePermission(business.id, user.id, 'memory.manage')
           const q = String(call.args.query ?? call.args.text ?? '').trim()
           const target = findMemoryByReference(q, memories)
           if (target) {
             await db.agentMemory.update({ where: { id: target.id }, data: { active: false, updatedAt: new Date() } })
             step.detail = target.text.slice(0, 60)
-            resultsForModel.push({ tool: 'memory_forget', ok: true, forgotten: target.text.slice(0, 80) })
+            report({ tool: 'memory_forget', ok: true, forgotten: target.text.slice(0, 80) })
             replyParts.push(`اتمسحت من ذاكرتي ✅ — «${target.text.slice(0, 100)}»`)
           } else {
             step.detail = 'ملقيتش حاجة بالشكل ده'
-            resultsForModel.push({ tool: 'memory_forget', ok: false, error: 'ملقيتش حاجة بالشكل ده' })
+            report({ tool: 'memory_forget', ok: false, error: 'ملقيتش حاجة بالشكل ده' })
             replyParts.push('ملقيتش في ذاكرتي حاجة بالشكل ده 🤔')
           }
           return
@@ -3204,32 +3290,40 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             emit({ event: 'cards', cards: allCards })
             brainFacts.push({ label: prettyExpr, value: valueAr })
             step.detail = `${prettyExpr} = ${valueAr}`
-            resultsForModel.push({ tool: 'calculate', ok: true, expression: prettyExpr, value: calc.value })
+            report({ tool: 'calculate', ok: true, expression: prettyExpr, value: calc.value })
             replyParts.push(`${prettyExpr} = ${valueAr}`)
           } else {
             step.detail = calc.error
-            resultsForModel.push({ tool: 'calculate', ok: false, error: calc.error })
+            report({ tool: 'calculate', ok: false, error: calc.error })
           }
           await trackUsage(business.id, user.id, 'tool', 'calculate')
           return
         }
         // ---- schedule_task (R18 «مهمة مجدولة» — reminders land in the chat) ----
         if (call.tool === 'schedule_task') {
+          await requirePermission(business.id, user.id, 'automation.manage')
+          if (/اقترح|اقتراح|لا تنشئ|ماتفع[لّ]|نفكر/.test(text) || !/فكرني|ذكرني|جدول|تذكير|موافق|أكد|تاكيد|تأكيد/.test(text)) {
+            report({ tool: call.tool, ok: false, error: 'اعرض اقتراح فقط، واطلب موافقة صريحة بالموعد والتكرار قبل إنشاء مهمة' })
+            replyParts.push('ده اقتراح فقط؛ محتاج موافقتك وموعد وتكرار محددين بتوقيت القاهرة قبل التفعيل.')
+            return
+          }
           const title = String(call.args.title ?? call.args.reminder ?? '').trim().slice(0, 140)
           const whenLabel = String(call.args.whenLabel ?? call.args.when ?? '').trim().slice(0, 80)
           if (!title) {
             step.detail = 'عنوان المهمة فاضي'
-            resultsForModel.push({ tool: 'schedule_task', ok: false, error: 'title مطلوب' })
+            report({ tool: 'schedule_task', ok: false, error: 'title مطلوب' })
             return
           }
           const rawTool = String(call.args.tool ?? '').trim()
           const taskTool = READ_TOOLS.has(rawTool) ? rawTool : 'remind'
-          const when = resolveArabicWhen(whenLabel) ?? (() => {
-            const d = new Date()
-            d.setDate(d.getDate() + 1)
-            d.setHours(10, 0, 0, 0)
-            return d
-          })()
+          if (rawTool && rawTool !== 'remind' && !READ_TOOLS.has(rawTool)) throw new Error('ممنوع جدولة أداة كتابة مالية')
+          const when = resolveCairoSchedule(whenLabel)
+          if (!when || when <= new Date()) {
+            report({ tool: call.tool, ok: false, error: 'حدد موعدًا مستقبليًا مفهومًا؛ لا نفترض غدًا أو وقتًا افتراضيًا' })
+            return
+          }
+          const recurrence = call.args.recurrence == null ? null : String(call.args.recurrence)
+          if (recurrence && !['daily', 'weekly', 'monthly'].includes(recurrence)) throw new Error('تكرار غير صالح')
           const whenAr = new Intl.DateTimeFormat('ar-EG', { weekday: 'long', day: 'numeric', month: 'long' }).format(when)
           const task = await db.scheduledTask.create({
             data: {
@@ -3241,7 +3335,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
               fields: JSON.stringify(call.args.fields ?? {}),
               whenLabel: whenLabel || whenAr,
               scheduledFor: when,
-              recurrence: null,
+              recurrence,
             },
           })
           step.detail = `${title} — ${whenLabel || whenAr}`
@@ -3254,18 +3348,19 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             source: 'scheduled',
           })
           meta.notesJotted++
-          resultsForModel.push({ tool: 'schedule_task', ok: true, task: title, when: whenLabel || whenAr })
-          replyParts.push(`سجّلت مهمة مجدولة ✅ — «${title}» يوم ${whenLabel || whenAr}، وهفتكرها في وقتها.`)
+          report({ tool: 'schedule_task', ok: true, task: title, when: whenLabel || whenAr })
+          confirmedMutationReplies.push(`حفظت مهمة «${title}» في ${whenLabel} بتوقيت القاهرة${recurrence ? `؛ التكرار: ${recurrence}` : '؛ مرة واحدة'}. تقرير أو تذكير فقط، مش حركة فلوس.`)
           await trackUsage(business.id, user.id, 'tool', 'schedule_task')
           return
         }
         // ---- set_persona (R18: the model tunes its own operating tone) ----
         if (call.tool === 'set_persona') {
+          await requirePermission(business.id, user.id, 'business.configure')
           const raw = String(call.args.tone ?? call.args.style ?? '').trim()
           const key = toneKey(raw)
           if (!key) {
             step.detail = 'نبرة مش معروفة'
-            resultsForModel.push({ tool: 'set_persona', ok: false, error: 'اختار: ودود / رسمي / مختصر' })
+            report({ tool: 'set_persona', ok: false, error: 'اختار: ودود / رسمي / مختصر' })
             return
           }
           await db.agentSettings.upsert({
@@ -3274,7 +3369,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             create: { businessId: business.id, vertical: business.type, tone: key },
           })
           step.detail = TONE_AR[key] ?? key
-          resultsForModel.push({ tool: 'set_persona', ok: true, tone: key })
+          report({ tool: 'set_persona', ok: true, tone: key })
           replyParts.push(`ظبطت نبرتي من دلوقتي ✅ — ${TONE_AR[key] ?? key}.`)
           await trackUsage(business.id, user.id, 'tool', 'set_persona')
           return
@@ -3294,7 +3389,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           for (const t of pipelineResult.completedTasks) {
             if (t.resultSummary) replyParts.push(`- **${t.agentLabel}**: ${t.resultSummary}`)
           }
-          resultsForModel.push({
+          report({
             tool: 'decompose_and_run_tasks',
             ok: true,
             tasksCount: subtasks.length,
@@ -3304,12 +3399,13 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           return
         }
         // ---- unknown tool ----
-        resultsForModel.push({ tool: call.tool, ok: false, error: 'أداة غير معروفة' })
+        report({ tool: call.tool, ok: false, error: 'أداة غير معروفة' })
         step.detail = 'أداة مش معروفة — تجاهلتها'
       } catch (err) {
         console.error('[brain] tool exec failed:', call.tool, err)
-        step.detail = 'مشكلة في التنفيذ — كمّلت'
-        resultsForModel.push({ tool: call.tool, ok: false, error: 'فشل تنفيذ الأداة' })
+        step.detail = err instanceof AuthorizationError ? 'الصلاحية لا تسمح بالإجراء' : 'تعذّر تأكيد نتيجة الإجراء'
+        brainFailures.push(err instanceof AuthorizationError ? 'صلاحيتك الحالية مش بتسمح بالإجراء ده — مغيرتش صلاحياتك.' : 'تعذّر تأكيد نتيجة الإجراء من السجل؛ راجعها قبل إعادة المحاولة.')
+        report({ tool: call.tool, ok: false, error: 'فشل تنفيذ الأداة' })
       } finally {
         step.state = 'done'
         step.ms = Math.max(0, Date.now() - toolClock)
@@ -3325,6 +3421,8 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       // R18: the persona tone the user/model chose (set_persona writes it) —
       // the brain's OWN system prompt is data the agent controls.
       const settings = await db.agentSettings.findUnique({ where: { businessId: business.id } })
+      const workspace = await getWorkspacePreferences(business.id, user.id)
+      const plugins = await getActivePlugins(business.id)
       const baseBrain = buildAgentSystemPrompt({
         business,
         user,
@@ -3333,13 +3431,16 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         suppliers,
         memories,
         snapshot,
-        history: ctx.history,
+        history: undefined, // Sent as real dialogue roles, never promoted to system authority.
         tone: settings?.tone ?? undefined,
+        workspace,
+        pluginsSection: pluginsPromptSection(plugins),
         middlewareRuntimeTail: middlewareOut?.dynamicRuntimeTail ?? undefined,
       })
-      const brainSystem = notesSection ? `${baseBrain}\n\n${notesSection}` : baseBrain
+      const brainSystem = notesSection ? `${baseBrain}\n\n${evidenceBlock('conversation-notes', notesSection, 4_000)}` : baseBrain
       const convo: LLMMessage[] = [
         { role: 'system', content: brainSystem },
+        ...recentDialogue(ctx.history),
         { role: 'user', content: text },
       ]
       let raw = await completeChat(model, convo)
@@ -3348,7 +3449,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       while (calls && totalCalls < 6) {
         rounds++
         convo.push({ role: 'assistant', content: raw.slice(0, 1200) })
-        const batch = calls.slice(0, 4)
+        const batch = calls.slice(0, Math.min(4, 6 - totalCalls))
         // ---- independent reads run CONCURRENTLY; anything that can change the
         // ledger (drafts, memory, scheduling, tone) stays strictly sequential —
         // order is part of the money contract.
@@ -3433,6 +3534,10 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     // refused (correct) but the model answered with a friendly «قولّي تحب نعمل
     // إيه» and the owner never learned the operation was rejected. Any tool
     // failure the model's prose does not acknowledge is stated verbatim.
+    if (brainFailures.length > 0 && executedResults.size > 0 && [...executedResults.values()].every((r) => r.ok === false)) {
+      finalText = [...new Set(brainFailures)].join('\n\n')
+      meta.fallback = true
+    }
     if (brainFailures.length > 0) {
       const digitGroups = (t: string) => (toWesternDigits(t).match(/[0-9]+/g) ?? []).filter((d) => d.length >= 2)
       const told = brainFailures.every((f) => {
@@ -3464,7 +3569,8 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         .split(/[^\p{L}\p{N}]+/u)
         .filter((w) => w.length >= 4)
       const grounded = refOk || words.some((w) => t2.includes(w))
-      if (!grounded) {
+      const pendingHonest = /(مسود|مستني|بانتظار|اعتماد|اعتمد)/.test(t2) && !/(تم (خصم|تنفيذ|تسجيل|تحصيل|سداد)|(^|\s)(خصمت|نفذت|سجلت|حصلت|دفعت)(\s|[.،]|$))/.test(t2)
+      if (!grounded || !pendingHonest) {
         finalText = brainDraftContract
         meta.fallback = true
       }
@@ -3476,6 +3582,8 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       finalText = deterministicReadReply(allCards)
       meta.fallback = true
     }
+
+    if (!anyDraft && confirmedMutationReplies.length > 0) finalText = [...confirmedMutationReplies, ...new Set(brainFailures)].join('\n\n')
 
     // ---------- final reply: verify BEFORE streaming, then pace it ----------
     if (!finalText.trim()) {
@@ -3665,7 +3773,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     const N = subs.length
     const overflow = N - Math.min(N, 4)
     const capped = subs.slice(0, 4)
-    fallbackTasks = decomposeGoalIntoSubtasks(text, business.id, business.type)
+    fallbackTasks = await decomposeGoalIntoSubtasks(text, business.id, business.type)
     emit({ event: 'tasks', tasks: fallbackTasks })
     // rebuild the thinking array with per-sub steps («١/٣: ملخص اليوم»)
     const subSteps: ThinkingStep[] = capped.map((s, i) => ({
@@ -4078,6 +4186,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       }
     } catch (err) {
       console.error('[harness] reply stream failed:', err)
+      if (replyText.trim()) throw new Error('الرد اتقطع قبل ما يكتمل — النتيجة النهائية مش مؤكدة')
       meta.fallback = true
       if (!replyText) {
         const fallback = advisoryMode

@@ -8,3 +8,7 @@ tsconfig.tsbuildinfo
 db/*.backup.db
 docs/research
 tests
+
+.env*
+!.env.example
+build
