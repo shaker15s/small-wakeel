@@ -887,7 +887,7 @@ export async function runReadTool(
       return [
         {
           kind: 'table',
-          title: 'المديونيات — اللي علينا للعملاء... يعني اللي ليّ عليهم',
+          title: 'المديونيات — العملاء اللي لسه ليه فلوس عندنا',
           columns: [
             { key: 'name', label: 'العميل' },
             { key: 'balance', label: 'المديونية' },

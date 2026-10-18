@@ -181,7 +181,7 @@ function passOf(messages: Msg[]): "intent" | "brain" | "reply" {
 }
 
 /** Detect the write/read intent of an Arabic sentence (shared by both passes). */
-function detect(text: string): { kind: "write" | "read" | "chat"; opType?: string; tool?: string; qty?: number; amount?: number; name?: string; itemName?: string } {
+function detect(text: string): { kind: "write" | "read" | "chat" | "schedule"; opType?: string; tool?: string; qty?: number; amount?: number; name?: string; itemName?: string; schedule?: { title: string; when: string; recurrence?: string; tool: string } } {
   const isQuestion = /[؟?]/.test(text);
   // «انصحني إزاي أقلل المصاريف» is ADVICE, not an expense entry — the word
   // «مصاريف» alone used to make the fixture draft a payment (live R29).
@@ -214,6 +214,12 @@ function detect(text: string): { kind: "write" | "read" | "chat"; opType?: strin
   // Item name: qty + unit consumed, name captured up to a ROLE preposition
   // (ل/لأ/من/بـ) or a و-continuation («جبت 100 صفيحه سمنه ودفعتله 1000»).
   const itemMatch = text.match(/(?:بعت|بيع|اشتريت|شرا|جبت)\s+[\d٠-٩.]*\s*[^\s]*\s*([^،,]+?)(?=\s+(?:لـ|ل|لأ|من|بـ|و)|$)/);
+  // an explicit reminder verb owns the sentence («فكرني بفلان بكرة 10 الصبح»)
+  const sched = parseSchedule(text);
+  if (sched) return { kind: "schedule" as const, schedule: sched };
+  if (/(فكرني|فكريني|ذكرني|ذكريني|تذكيرني|تذكيري)/.test(text)) {
+    return { kind: "schedule" as const, schedule: null }; // verb, no clock → ask
+  }
   // a QUESTION about an operation is a READ (unless it is clearly an instruction)
   if (write && !isQuestion) {
     return { kind: "write", opType: write[1], tool: write[2], qty, amount, name: nameMatch?.[1]?.trim(), itemName: itemMatch?.[1]?.trim() };
@@ -246,6 +252,53 @@ function intentJson(text: string): string {
   }
   if (d.kind === "read") return JSON.stringify({ intent: "read", tool: d.tool, fields: queryArgs(text, d.tool!) });
   return JSON.stringify({ intent: "chat", fields: {} });
+}
+
+/** «فكرني بجرد المخزون بكرة 10 الصبح» → a scheduled task. The harness
+ *  re-validates (Cairo clock must be explicit + future; recurrence whitelisted)
+ *  — we only parse, we never assume a time. Evening parts of day shift the
+ *  hour («2 العصر» = 14:00), quarters map to 15/30/45. */
+function parseSchedule(text: string): { title: string; when: string; recurrence?: string; tool: string } | null {
+  if (!/(فكرني|فكريني|ذكرني|ذكريني|تذكيرني|تذكيري)/.test(text)) return null;
+  const recurrence = /كل يوم|يومياً|يومي/.test(text) ? "daily"
+    : /كل اسبوع|اسبوعي|اسبوعيا/.test(text) ? "weekly"
+    : /كل شهر|شهري|شهريا/.test(text) ? "monthly" : undefined;
+  const dayWords = /بعد بكره|بكره|بكرة|النهارده|النهاردة|اليوم|غدًا|غدا|السبت|الاحد|الاثنين|التلات|الاربع|الخميس|الجمعه/;
+  const explicitDay = text.match(/بعد بكره/)?.[0] ?? text.match(dayWords)?.[0] ?? null;
+  // clock: a bare number in the middle of a sentence is NOT a time — the hour
+  // must be followed by a colon, a quarter/half word, a day-part word, or EOL
+  // NOTE: JS \b does NOT work for Arabic letters (they are not \w) — guard
+  // with an explicit Arabic-letter lookahead instead.
+  const hm = text.match(/(?<!\d)([1-9]|1[0-2])(?::([0-5]\d))?\s*(?:والربع|و ربع|ونص|والنص)?\s*(?=\s+(?:الصبح|صباح|العصر|المساء|الليل)(?![\u0600-\u06FF])|$)/);
+  if (!hm) return null; // no clock → the harness asks for a clear future time
+  let hour = parseInt(hm[1], 10);
+  let minute = hm[2] ? parseInt(hm[2], 10) : /والربع|و ربع/.test(text) ? 15 : /ونص|والنص/.test(text) ? 30 : 0;
+  if (/المساء|الليل|بالليل|بتاعة الليل/.test(text) && hour < 12) hour += 12;
+  if (/العصر|بالعصر/.test(text) && hour < 12) hour += 12;
+  const clock = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+  // day: explicit word wins. Without one a one-shot means today (the harness
+  // rejects a past time with a clear message); a RECURRING task whose time
+  // already passed today rolls to tomorrow — «كل يوم 9 الصبح» at night means
+  // the next morning, never the one that just went by.
+  const now = new Date();
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+  const day = explicitDay ?? (recurrence && hour * 60 + minute <= nowMin ? "بكره" : "النهارده");
+  // title = whatever survives after removing the schedule machinery
+  let title = text
+    .replace(/فكرني|فكريني|ذكرني|ذكريني|تذكيرني|تذكيري/g, " ")
+    .replace(/كل يوم|يومياً|يومي|كل اسبوع|اسبوعي|اسبوعيا|كل شهر|شهري|شهريا/g, " ")
+    .replace(/بعد بكره|بكره|بكرة|النهارده|النهاردة|اليوم|غدًا|غدا|السبت|الاحد|الاثنين|التلات|الاربع|الخميس|الجمعه/g, " ")
+    .replace(hm[0], " ")
+    .replace(/والربع|و ربع|ونص|والنص|تلات ارباع|الصبح|صباح|العصر|المساء|الليل|بالليل|بتاعة الليل|بالعصر/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!title) title = "تذكير";
+  // a topic that maps to a real read report runs that report; else a plain reminder
+  const tool = /مخزون|نواقص|ناقص/.test(title) ? "list_low_stock"
+    : /خزانه|خزنة|كاش|رصيدها/.test(title) ? "get_cash_position"
+    : /مديون|عليهم|تحصيل|لهم/.test(title) ? "list_receivables"
+    : "remind";
+  return { title, when: `${day} ${clock}`, recurrence, tool };
 }
 
 /** Tool arguments for a read tool (query/name/days where they apply). */
@@ -327,6 +380,25 @@ function brainReply(rawText: string, model: string): string {
       if (readHit) calls.push({ tool: readHit[1], args: queryArgs(text, readHit[1]) });
     }
     return JSON.stringify({ tool_calls: calls });
+  }
+  if (d.kind === "schedule" && !d.schedule) {
+    return "تمام — بس اكتبلي الموعد بالتفصيل وأنا أحتفظ بالمهمة: «فكرني بمراجعة الحسابات بكرة 5 العصر».";
+  }
+  if (d.kind === "schedule" && d.schedule) {
+    const sc = d.schedule;
+    return JSON.stringify({
+      tool_calls: [{
+        tool: "schedule_task",
+        args: {
+          title: sc.title,
+          whenLabel: sc.when,
+          when: sc.when,
+          ...(sc.recurrence ? { recurrence: sc.recurrence } : {}),
+          tool: sc.tool,
+          fields: {},
+        },
+      }],
+    });
   }
   if (d.kind === "read") {
     // A compound request («الخزنة والنواقص») becomes ONE programmatic plan call —
