@@ -62,6 +62,17 @@ import type { VerticalDef } from '@/lib/verticals'
 import { egp, qty as fmtQty, arDate } from '@/lib/format'
 import { arUnit, getVertical } from '@/lib/verticals'
 import { wordBoundedAt, convertToBaseUnit, matchEntity, normalizeAr, parseQuantity, toWesternDigits, unitToCode } from './arabic'
+import {
+  extractNewItemCandidate,
+  fillPendingSlots,
+  getActivePendingRequest,
+  looksLikeNewTopic,
+  markPendingDone,
+  pendingFollowUpText,
+  pendingQuestionText,
+  savePendingRequest,
+  type NewItemSlots,
+} from './pending-request'
 import { parseSinceClause } from './since'
 import { createDraft } from '@/lib/domain/executors'
 import { auditDraft } from '@/lib/domain/audit'
@@ -353,6 +364,12 @@ const GREETING_RES: RegExp[] = [
   /^(?:أهلا|اهلا|أهلاً|مرحبا|مرحباً|هلا|اهلًا)[\s؟?!.،,]*$/,
   /^(?:صباح\s+الخير|مساء\s+الخير|صباح\s+نور|مساء\s+نور)[\s؟?!.،,]*$/,
   /^(?:حالك\s+ايه|كيف\s+حالك|اخبارك|كيفيك)[\s؟?!.،,]*$/,
+  // R41: the «ازيك» family — the owner's actual word for hi (word-bounded;
+  // an optional «يا فلان» tail is still a greeting, work content is not).
+  // normalizeAr folds أ/إ/آ→ا and ى→ي, so ONE spelling covers the variants:
+  // ازيك · ازيك · ازيك · ازيكم · ازاك · ازاك · ازاياك · زيك · وازيك …
+  /^(?:و)?(?:ا)?زا?ي?ك(?:م)?[\s؟?!.،,]*(?:يا\s+\S+)?[\s؟?!.،,]*$/,
+  /^(?:عامل|عاملين|عامله)\s+(?:ايه|ايش|ايش)[\s؟?!.،,]*(?:يا\s+\S+)?[\s؟?!.،,]*$/,
 ]
 function isGreeting(norm: string): boolean {
   if (norm.length > 60) return false
@@ -364,10 +381,12 @@ function isGreeting(norm: string): boolean {
 /** Warm, work-steering Egyptian reply (3 variants — no robotic repetition). */
 function greetingReply(userName: string): string {
   const first = userName.split(/\s+/)[0] ?? 'يا صاحبي'
+  // R41: a real colleague answers the hi FIRST, then offers the work —
+  // the reply must sound human, not like a system banner.
   const templates = [
-    `وعليكم السلام يا ${first}! 👋 أنا قاعد على الشغل — سجّل أي بيع أو شراء، اسأل عن أي رصيد أو مديونية، وقولي لو في حاجة تفتكرني بيها.`,
-    `أهلاً يا ${first}! ☕ أنا هنا وجاهز: قولي «بعت…» أو «صرفت…» أو «فلان عليه كام؟» وأنا أعمل الباقي وأتحقق من الأرقام.`,
-    `حياك الله يا ${first}! 🏪 النهارده معاك على طول — أي رقم أو عملية أو سؤال عن السجل، قول وأنا أجهزه.`,
+    `وعليكم السلام يا ${first}! 👋 إزيك؟ أنا تمام الحمد لله — قاعد على الشغل جاهز. قولي أي بيع أو شرا أو سؤال عن الأرصدة وأنا أشتغل فورًا.`,
+    `أهلاً يا ${first}! ☕ إزيك؟ أنا في الخدمة على طول: سجّل أي عملية، اسأل عن أي رصيد أو مديونية، أو امشي معايا في قراءة شغلك.`,
+    `حياك يا ${first}! 🏪 فرحتلك النهارده — أي رقم أو عملية أو سؤال عن السجل، قول وأنا أجهزه في ثواني.`,
   ]
   return templates[Math.floor(Math.random() * templates.length)]
 }
@@ -1149,6 +1168,12 @@ interface ResolvedWrite {
   card: ActionCardDTO
   missing?: string
   failMessage?: string
+  /**
+   * R41 «موظف حقيقي»: a multi-turn request is OPEN (new item waiting for its
+   * supplier/total). The question OWNS this turn's reply — it is streamed
+   * verbatim, deterministically, and the model never rephrases it.
+   */
+  pendingQuestion?: string
   /** Multi-item drafts: lines that could NOT be drafted (stock/unit), shown to the user. */
   issues?: string[]
 }
@@ -1361,6 +1386,29 @@ function resolvePaid(norm: string, f: Record<string, unknown>, total: number): n
   return total
 }
 
+/**
+ * R41 learning loop: the LAST time this item was bought (saved by the
+ * new-item flow) names its supplier. A proposal, never an assumption — the
+ * question says «نفس المورد؟» and the owner's silence + total counts as a yes.
+ */
+async function suggestSupplierForItem(businessId: string, itemName: string): Promise<string | null> {
+  const flat = normalizeAr(itemName).replace(/\s+/g, ' ').trim()
+  if (flat.length < 2) return null
+  const rows = await db.agentMemory.findMany({
+    where: { businessId, kind: 'fact', category: 'supply_chain', active: true },
+    orderBy: { updatedAt: 'desc' },
+    take: 10,
+  })
+  for (const m of rows) {
+    const mFlat = normalizeAr(m.text).replace(/\s+/g, ' ')
+    if (mFlat.includes(flat)) {
+      const mm = m.text.match(/آخر مرة جت من (.+?)\s*\(سعر/)
+      if (mm && mm[1].trim().length >= 2) return mm[1].trim()
+    }
+  }
+  return null
+}
+
 async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: TurnEmit, memCtx: MemoryContext): Promise<ResolvedWrite> {
   const { business, user } = ctx
   const type = (intent.opType ?? 'sale') as OpType
@@ -1519,6 +1567,76 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
         if (alias) await saveLexiconMemory({ businessId: business.id, userId: user.id }, alias, item)
       }
       if (!item) {
+        // ---- R41 «موظف حقيقي»: new-item purchase flow ----
+        // The employee does NOT make the owner re-type a catalog name. An
+        // unknown item + a stated quantity or payment is a NEW ITEM: propose
+        // registering it, hold the request per conversation, and ask only the
+        // missing slots (supplier / total) — one targeted question, never a
+        // blank «مش لاقي الصنف».
+        if (type === 'purchase' && f.newItem && f.itemName && f.supplierName) {
+          const qtyN = Math.round(Number(f.qty ?? 0) * 1000) / 1000
+          const itemName = String(f.itemName).trim()
+          const supplierName = String(f.supplierName).trim()
+          const unitCode = String(f.unit ?? 'piece')
+          const unitPrice =
+            typeof f.unitPrice === 'number' && f.unitPrice > 0
+              ? Math.round(f.unitPrice * 100)
+              : Math.round(((typeof f.total === 'number' ? f.total : 0) / Math.max(qtyN, 0.001)) * 100)
+          const totalP = Math.round(((typeof f.total === 'number' && f.total > 0 ? f.total : (unitPrice / 100) * qtyN) as number) * 100)
+          const paidP = Math.min(Math.round(Number(f.paid ?? 0) * 100), totalP)
+          if (!(qtyN > 0) || totalP <= 0) {
+            return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'المبلغ', failMessage: `كام الحساب كله لـ«${itemName}»؟` }
+          }
+          const supplier = suppliers.find((s) => normalizeAr(s.name).replace(/\s+/g, ' ') === normalizeAr(supplierName).replace(/\s+/g, ' ')) ?? null
+          const payload: Record<string, unknown> = {
+            itemId: null,
+            itemName,
+            qty: qtyN,
+            unit: unitCode,
+            unitPrice,
+            total: totalP,
+            paid: paidP,
+            supplierId: supplier?.id ?? null,
+            supplierName,
+            newItem: true,
+            newSupplier: supplier == null,
+            unitLabel: typeof f.unitLabel === 'string' ? f.unitLabel : undefined,
+          }
+          const risk = computeRisk(type, totalP)
+          const unitTxt = arUnit(unitCode)
+          const summary = `شرا ${fmtQty(qtyN, unitTxt)} ${itemName} (صنف جديد) بـ${egp(totalP)} — من ${supplierName}`
+          const card = fieldsToCard('', type, risk, summary, [
+            { label: 'الصنف', value: `${itemName} — هيتسجل جديد`, hint: 'الاسم اللي قلته بالظبط' },
+            { label: 'الكمية', value: `${fmtQty(qtyN, unitTxt)}${typeof f.unitLabel === 'string' && f.unitLabel !== unitTxt ? ` (${f.unitLabel})` : ''}` },
+            { label: 'سعر الوحدة', value: egp(unitPrice) },
+            { label: 'الإجمالي', value: egp(totalP) },
+            { label: 'مدفوع', value: egp(paidP) },
+            ...(totalP - paidP > 0 ? [{ label: 'باقي (للمورد)', value: egp(totalP - paidP) }] : []),
+            { label: 'المورد', value: `${supplierName}${supplier ? '' : ' — هيتسجل جديد'}` },
+          ], [
+            { label: `مخزون ${itemName}`, value: `${fmtQty(0, unitTxt)} ← ${fmtQty(qtyN, unitTxt)}`, tone: 'neutral' },
+            { label: 'الخزنة', value: egp(-paidP), tone: 'bad' },
+            ...(totalP - paidP > 0 && supplier ? [{ label: 'المستحق للمورد', value: egp(totalP - paidP), tone: 'bad' as const }] : []),
+          ], RISK_META[risk].hint)
+          return { ok: true, opType: type, payload, summary, card }
+        }
+        if (type === 'purchase' && !f.newItem && ctx.conversationId) {
+          const cand = extractNewItemCandidate(text, norm)
+          if (cand) {
+            const suggested = await suggestSupplierForItem(business.id, cand.itemName)
+            const slots = { ...cand, suggestedSupplier: suggested }
+            const question = pendingQuestionText(slots, 'purchase_new_item')
+            await savePendingRequest({
+              businessId: business.id,
+              conversationId: ctx.conversationId,
+              userId: user.id,
+              kind: 'purchase_new_item',
+              slots,
+              question,
+            })
+            return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'الصنف', failMessage: question, pendingQuestion: question }
+          }
+        }
         return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'الصنف', failMessage: `مش لاقي الصنف — ممكن تكتبه بالاسم اللي في الكتالوج؟` }
       }
 
@@ -1686,6 +1804,41 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
       const customer = lexCustomer ?? (customerName ? matchEntity(customerName, customers)?.entity : null) ?? (type === 'sale' ? findPartyMention(text, customers) : null)
       const supplierName = String(f.supplierName ?? '')
       const supplier = (supplierName ? matchEntity(supplierName, suppliers)?.entity : null) ?? (type === 'purchase' ? findPartyMention(text, suppliers, 'من') : null)
+      // R41: a supplier name the owner EXPLICITLY gave but that is not in the
+      // book yet is a NEW supplier (born at approval) — never a hard fail,
+      // never re-asked.
+      const supplierIsNew = !supplier && type === 'purchase' && supplierName.trim().length >= 2
+
+      // ---- R41 «موظف حقيقي»: a purchase that leaves a balance needs its
+      // counterparty. «جبت 80 سمنه ودفعتله 500 بس» — the «له» implies a
+      // supplier the owner forgot to name (or that Wakil should already
+      // know). Never hard-fail: hold the request and ask the ONE missing
+      // slot. The item is known, so its price comes from the catalog.
+      if (type === 'purchase' && !supplier && !supplierIsNew && total - paid > 0 && ctx.conversationId) {
+        const suggested = await suggestSupplierForItem(business.id, item.name)
+        const slots: NewItemSlots = {
+          itemId: item.id,
+          itemName: item.name,
+          qty: qtyN,
+          unit: item.unit,
+          unitLabel: null,
+          paid: Math.round(paid / 100),
+          supplierName: null,
+          suggestedSupplier: suggested,
+          total: priceOverride ? Math.round(total / 100) : null,
+          unitPrice: priceOverride && qtyN > 0 ? Math.round((total / qtyN) / 100 * 100) / 100 : null,
+        }
+        const question = pendingQuestionText(slots, 'purchase_known_item')
+        await savePendingRequest({
+          businessId: business.id,
+          conversationId: ctx.conversationId,
+          userId: user.id,
+          kind: 'purchase_known_item',
+          slots,
+          question,
+        })
+        return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'المورد', failMessage: question, pendingQuestion: question }
+      }
 
       const payload: Record<string, unknown> = {
         itemId: item.id,
@@ -1697,11 +1850,17 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
         paid,
         ...(priceOverride ? { priceOverride: true } : {}),
         ...(type === 'sale' && customer ? { customerId: customer.id, customerName: customer.name } : {}),
-        ...(type === 'purchase' && supplier ? { supplierId: supplier.id, supplierName: supplier.name } : {}),
+        ...(type === 'purchase' && (supplier || supplierIsNew)
+          ? {
+              supplierId: supplier?.id ?? null,
+              supplierName: supplier?.name ?? supplierName.trim(),
+              ...(supplierIsNew ? { newSupplier: true } : {}),
+            }
+          : {}),
       }
       const ref = `WKL-DRAFT` // replaced by real ref from createDraft
       const risk = computeRisk(type, total)
-      const summary = `${type === 'sale' ? 'بيع' : 'شرا'} ${fmtQty(qtyN, arUnit(item.unit))} ${item.name} بـ${egp(total)}${type === 'sale' && customer ? ` — ${customer.name}` : ''}${type === 'purchase' && supplier ? ` — من ${supplier.name}` : ''}`
+      const summary = `${type === 'sale' ? 'بيع' : 'شرا'} ${fmtQty(qtyN, arUnit(item.unit))} ${item.name} بـ${egp(total)}${type === 'sale' && customer ? ` — ${customer.name}` : ''}${type === 'purchase' && (supplier || supplierIsNew) ? ` — من ${supplier?.name ?? supplierName.trim()}` : ''}`
       // BUSINESS_DNA credit-limit enforcement (آجل on a capped party)
       let dangerNote: string | undefined
       let creditField: { label: string; value: string; hint?: string } | undefined
@@ -1721,11 +1880,16 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
         { label: 'مدفوع', value: egp(paid) },
         ...(total - paid > 0 ? [{ label: 'باقي (آجل)', value: egp(total - paid) }] : []),
         ...(type === 'sale' && customer ? [{ label: 'العميل', value: customer.name }] : []),
-        ...(type === 'purchase' && supplier ? [{ label: 'المورد', value: supplier.name }] : []),
+        ...(type === 'purchase' && (supplier || supplierIsNew)
+          ? [{ label: 'المورد', value: `${supplier?.name ?? supplierName.trim()}${supplierIsNew ? ' — هيتسجل جديد' : ''}` }]
+          : []),
         ...(creditField ? [creditField] : []),
       ], [
         { label: `مخزون ${item.name}`, value: `${fmtQty(item.stockQty, arUnit(item.unit))} ← ${fmtQty(item.stockQty + (type === 'sale' ? -qtyN : qtyN), arUnit(item.unit))}`, tone: 'neutral' },
         { label: 'الخزنة', value: egp(type === 'sale' ? paid : -paid), tone: type === 'sale' ? 'good' : 'bad' },
+        ...(type === 'purchase' && total - paid > 0 && (supplier || supplierIsNew)
+          ? [{ label: 'المستحق للمورد', value: egp(total - paid), tone: 'bad' as const }]
+          : []),
       ], dangerNote ?? RISK_META[risk].hint)
       return { ok: true, opType: type, payload, summary, card }
     }
@@ -1826,19 +1990,29 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
 
     case 'membership': {
       const isRenewal = norm.includes('تجديد') || norm.includes('جدد')
-      const explicitName = String(f.customerName ?? '').trim()
+      const explicitName = String(f.customerName ?? f.name ?? '').trim()
       const customer = explicitName ? matchEntity(explicitName, customers)?.entity ?? null : matchEntity(text, customers)?.entity ?? null
       // A name WAS typed but it is not in the member list. Saying «لمين؟» again
       // makes the owner think the agent ignored him — name the missing person
       // and offer the fix. («اشتركت سارة …» when سارة is not registered.)
-      const hintedName = text.match(/(?:اشتركت|جددت|جدد|اشتراك|لـ|ل)\s+([^\s،,؟?0-9]{2,20})/)?.[1]
+      // Name hint for the «مش مسجّل» message. Prefer the ل+name tail (glued OR
+      // spaced: «لكابتن حسام», «ل كابتن حسام»), then the verb-object forms
+      // «اشتراك فلان» / «جددت فلان». The word right after «اشتراك» is usually
+      // the PLAN (شهري/سنوي), not a name — plan/time tokens are excluded.
+      const hintedRaw =
+        text.match(/(?:^|\s)ل(?:ـ)?\s*([^،,.؟?\s][^،,.؟?،]{1,19})$/)?.[1]
+        ?? text.match(/(?:اشتركت|جددت|جدد|اشتراك|لـ)\s+([^\s،,؟?0-9]{2,20})/)?.[1]
+      const PLAN_HINTS = /^(?:اشتراك|تجديد|شهر|شهري|شهرا|شهراً|شهريين|شهرين|شهور|شهران|سنه|سنة|سنوي|ربع|ربعين|ثلث|ثلاثه|أربعه|نص سنه|نصف سنه|سنه ونصف)$/
+      const hintedName = hintedRaw && !PLAN_HINTS.test(normalizeAr(hintedRaw)) ? hintedRaw : null
       if (!customer && !explicitName && hintedName && normalizeAr(hintedName).length >= 2) {
         return {
           ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'العضو',
           failMessage: `مفيش عضو مسجّل باسم «${hintedName}» — اتأكد من الاسم أو ضيفه من شاشة الأعضاء`,
         }
       }
-      if (!customer && isRenewal) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'العضو', failMessage: 'تجديد لمين؟' }
+      // A name WAS typed («جدد اشتراك سنوي لطارق») — never re-ask «لمين؟»;
+      // the unregistered-name path below handles it.
+      if (!customer && !explicitName && isRenewal) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'العضو', failMessage: 'تجديد لمين؟' }
       // A NEW subscription with NO name at all (rule path, question-like text)
       // must never draft «عضو جديد» — ask for the name first.
       if (!customer && !explicitName) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'العضو', failMessage: 'اشتراك جديد لمين؟ اكتبلي اسم العضو' }
@@ -2012,10 +2186,31 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
     }
 
     case 'reversal': {
-      const ref = String(f.ref ?? '') || (norm.match(/WKL-\d+/)?.[0] ?? '')
-      if (!ref) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'رقم العملية', failMessage: 'عايز تعكس أنهي عملية؟ اكتب رقمها (زي WKL-1006)' }
-      const original = await db.operation.findFirst({ where: { businessId: business.id, ref } })
-      if (!original) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, failMessage: `ملقيتش عملية رقم ${ref}` }
+      let ref = String(f.ref ?? '') || (norm.match(/WKL-\d+/)?.[0] ?? '')
+      let original = ref ? await db.operation.findFirst({ where: { businessId: business.id, ref } }) : null
+      // R41 «موظف حقيقي»: no number? The owner talks about the work, not the
+      // ledger — «اعكس شرا السمنه» means the most recent operation whose
+      // summary carries that word. Match summary words INTO the message
+      // (recent first) so the user never has to learn a ref format.
+      if (!original && !ref) {
+        const GENERIC = new Set(['شرا', 'شراء', 'بيع', 'عملية', 'عمليات', 'مسودة', 'قطعة', 'قطعا', 'صنف', 'جديد', 'صنف', 'يوم', 'اليوم', 'عكس', 'اعكس', 'تصحيح', 'خطأ', 'جنيه', 'المورد', 'العميل'])
+        const candidates = await db.operation.findMany({
+          where: { businessId: business.id, status: { in: ['SUCCEEDED', 'AWAITING_APPROVAL'] }, reversedByRef: null },
+          orderBy: { createdAt: 'desc' },
+          take: 12,
+        })
+        let best: { op: typeof candidates[number]; score: number } | null = null
+        for (const c of candidates) {
+          const words = new Set(normalizeAr(c.summary).replace(/[«»،,؟?!.()٠-٩0-9]/g, ' ').split(/\s+/).filter((w) => w.length >= 3 && !GENERIC.has(w)))
+          const score = [...words].reduce((s, w) => s + (norm.includes(w) ? 1 : 0), 0)
+          if (score > 0 && (!best || score > best.score)) best = { op: c, score }
+        }
+        if (best) {
+          original = best.op
+          ref = best.op.ref
+        }
+      }
+      if (!original) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'رقم العملية', failMessage: 'عايز تعكس أنهي عملية؟ اكتب رقمها (زي WKL-1006) أو اسم الصنف بتاعها' }
       if (original.reversedByRef) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, failMessage: `العملية ${ref} معكوسة قبل كده بـ${original.reversedByRef}` }
       const reason = String(f.reason ?? '') || 'تصحيح خطأ'
       const payload = { originalRef: ref, reason }
@@ -2850,6 +3045,101 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     }
   }
 
+  // ---- PASS 0e: PENDING multi-turn request (R41 «موظف حقيقي») ----
+  // The owner's information arrives in pieces: quantity + payment first,
+  // supplier + total later. A real employee does not restart from zero — he
+  // holds the request and asks ONE targeted question for what is missing.
+  // Deterministic on purpose: the follow-up is either (a) COMPLETED → a
+  // new-item purchase draft, (b) partial → one follow-up question, or
+  // (c) clearly a new topic → released and handled normally.
+  let pendingWriteIntent: ExtractedIntent | null = null
+  if (ctx.conversationId) {
+    const pending = await getActivePendingRequest(business.id, ctx.conversationId)
+    if (pending && (pending.kind === 'purchase_new_item' || pending.kind === 'purchase_known_item')) {
+      const isKnown = pending.kind === 'purchase_known_item'
+      const suppliersNow = await db.supplier.findMany({ where: { businessId: business.id }, select: { name: true } })
+      const filled = fillPendingSlots(norm, pending.slots, suppliersNow.map((s) => s.name))
+      const slots: NewItemSlots = {
+        ...pending.slots,
+        supplierName: filled.supplierName ?? pending.slots.supplierName,
+        total: filled.total ?? pending.slots.total,
+        unitPrice: filled.unitPrice ?? pending.slots.unitPrice,
+      }
+      // The user's LATEST message overrides memory: an explicit supplier
+      // always beats a stale suggestion.
+      if (filled.supplierName) slots.suggestedSupplier = null
+      let changed = filled.changed
+      // Suggested supplier + total, no explicit supplier = the owner
+      // confirmed by silence («بيتعود»: first time asks, next proposes, and
+      // a total-without-objection is a yes).
+      if (!slots.supplierName && slots.suggestedSupplier && (slots.total != null || slots.unitPrice != null)) {
+        slots.supplierName = slots.suggestedSupplier
+      }
+      // A bare YES accepts the PROPOSED supplier: the question ended with
+      // «نفس المورد؟» — «ايوه / نفسه / تمام» IS the answer.
+      const CONFIRM_RE = /^(?:ايوه|ايوا|نعم|نفسه|نفسها|نفس المورد|تمام|موافق|اوه|اي)[\s؟?!.،,]*(?:يا\s+\S+)?[\s؟?!.،,]*$/
+      if (!slots.supplierName && slots.suggestedSupplier && CONFIRM_RE.test(norm)) {
+        slots.supplierName = slots.suggestedSupplier
+        changed = true
+      }
+      // A known item prices itself from the catalog — the total is optional.
+      const complete = !!slots.supplierName && slots.qty != null && (isKnown || slots.total != null || slots.unitPrice != null)
+      if (!changed && looksLikeNewTopic(norm)) {
+        // The owner moved on — release the request, process the new topic.
+        await markPendingDone(ctx.conversationId, 'cancelled')
+      } else if (complete) {
+        // (a) done — the deterministic purchase draft OVERRIDES whatever the
+        // model/rules would have made of this follow-up.
+        pendingWriteIntent = {
+          intent: 'write',
+          opType: 'purchase',
+          fields: {
+            ...(isKnown && slots.itemId ? { itemId: slots.itemId } : {}),
+            itemName: slots.itemName,
+            qty: slots.qty,
+            unit: slots.unit,
+            unitLabel: slots.unitLabel,
+            supplierName: slots.supplierName,
+            total: slots.total,
+            unitPrice: slots.unitPrice,
+            paid: slots.paid,
+            newItem: !isKnown,
+          },
+        }
+        await markPendingDone(ctx.conversationId, 'resolved')
+        // Learning loop: next time this item is mentioned, its supplier is
+        // PROPOSED instead of asked. A known item with catalog pricing keeps
+        // the fact price-free (the catalog is the source of truth).
+        const unitPriceEgp = slots.unitPrice ?? (slots.total != null && slots.qty ? slots.total / slots.qty : null)
+        const memText = isKnown && unitPriceEgp == null
+          ? `${slots.itemName}: آخر مرة جت من ${slots.supplierName}`
+          : `${slots.itemName}: آخر مرة جت من ${slots.supplierName} (سعر الوحدة ${egp(unitPriceEgp ?? 0)})`
+        const dup = memories.some((m) => normalizeAr(m.text) === normalizeAr(memText))
+        if (!dup) {
+          await db.agentMemory.create({
+            data: { businessId: business.id, userId: user.id, kind: 'fact', category: 'supply_chain', text: memText, confidence: 90 },
+          })
+        }
+      } else {
+        // (b) partial — or unchanged but not a new topic: ask what is
+        // missing, one question, in the employee's voice.
+        const q = changed ? pendingFollowUpText(slots, pending.kind) : pendingQuestionText(slots, pending.kind)
+        await savePendingRequest({
+          businessId: business.id,
+          conversationId: ctx.conversationId,
+          userId: user.id,
+          kind: pending.kind,
+          slots,
+          question: q,
+        })
+        done(IDX.understand, 'طلب معلق مفتوح — بكمّل الناقص')
+        done(IDX.reply)
+        await streamDeterministic(q, emit, 900)
+        return { replyText: q, card: null, cards: null, thinking: steps, modelLabel, actions: null }
+      }
+    }
+  }
+
   // ---- PASS 0d: DEEP RESEARCH (user-toggled OR auto-detected) — R15 ----
   // Plan-first pipeline: خطة البحث → جمع من السجل (نفس أدوات الريجستري) →
   // بحث ويب (٢ استعلامات) → كارت المصادر المرقمة → تقرير الخلاصة/التحليل/
@@ -2916,12 +3206,17 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     let draftCard: ActionCardDTO | null = null
     let draftOpId: string | undefined
     let anyDraft = false
+    // R41 «موظف حقيقي»: a write that opened a pending multi-turn request —
+    // its question replaces the model's reply verbatim (deterministic).
+    let pendingQuestionFromWrite: string | null = null
     const replyParts: string[] = []
     const confirmedMutationReplies: string[] = []
     const resultsForModel: Record<string, unknown>[] = []
     // A tool that FAILED (missing money, over-debt collection, unknown item) —
     // the owner must hear about it even if the model answers with small talk.
     const brainFailures: string[] = []
+    // The last-resort line when a tool failed without a specific message.
+    const GENERIC_TOOL_FAIL = 'الإجراء المطلوب لم ينفذ أو يتأكد من السجل؛ مفيش نجاح مؤكد. راجع البيانات والصلاحيات أو حدد التفاصيل الناقصة.'
     let rounds = 0
     // R18 dedupe: the same tool+args signature must never execute twice in
     // ONE turn (the model sometimes re-issues its earlier call when it
@@ -3007,7 +3302,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       executedSigs.add(sig)
       const report = (result: Record<string, unknown>) => {
         executedResults.set(sig, result)
-        if (result.ok === false && brainFailures.length === 0) brainFailures.push('الإجراء المطلوب لم ينفذ أو يتأكد من السجل؛ مفيش نجاح مؤكد. راجع البيانات والصلاحيات أو حدد التفاصيل الناقصة.')
+        if (result.ok === false && brainFailures.length === 0) brainFailures.push(GENERIC_TOOL_FAIL)
         resultsForModel.push(result)
       }
       executedAnyTool = true
@@ -3166,13 +3461,27 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           const resolved = await resolveWrite({ ...ctx, text }, { intent: 'write', opType: w.opType, fields: w.fields(call.args) }, emit, memCtx)
           if (!resolved.ok) {
             step.detail = `ناقص: ${resolved.missing ?? ''}`
+            if (resolved.pendingQuestion) {
+              // R41: the request is HELD, not failed — a follow-up will
+              // complete it. The question below REPLACES this turn's reply.
+              pendingQuestionFromWrite = resolved.pendingQuestion
+              report({
+                tool: call.tool,
+                ok: false,
+                pending: true,
+                error: `طلب معلق — تم حفظه والوكيل بيسأل المستخدم سؤال متابعة: ${resolved.pendingQuestion}`,
+              })
+              return
+            }
+            // Push the SPECIFIC failure first: report() seeds a generic
+            // «الإجراء لم ينفذ» line only while brainFailures is still empty.
+            brainFailures.push(resolved.failMessage ?? `ناقص ${resolved.missing ?? 'بيانات'} — ${TYPE_AR[resolved.opType] ?? resolved.opType} ماتسجلتش`)
             report({
               tool: call.tool,
               ok: false,
               error: `${resolved.failMessage ?? resolved.missing ?? 'ناقصة بيانات'} — العملية دي ماتسجلتش خالص، ولازم تقول للمستخدم كده بصراحة في ردك`,
             })
             replyParts.push(`طلب ناقص بيانات: ${resolved.failMessage ?? resolved.missing ?? ''}`)
-            brainFailures.push(resolved.failMessage ?? `ناقص ${resolved.missing ?? 'بيانات'} — ${TYPE_AR[resolved.opType] ?? resolved.opType} ماتسجلتش`)
             return
           }
           const idem = turnIdem(ctx, resolved.opType, resolved.summary)
@@ -3613,7 +3922,8 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     // إيه» and the owner never learned the operation was rejected. Any tool
     // failure the model's prose does not acknowledge is stated verbatim.
     if (brainFailures.length > 0 && executedResults.size > 0 && [...executedResults.values()].every((r) => r.ok === false)) {
-      finalText = [...new Set(brainFailures)].join('\n\n')
+      const uniq = [...new Set(brainFailures)]
+      finalText = uniq.filter((f) => f !== GENERIC_TOOL_FAIL || uniq.length <= 1).join('\n\n')
       meta.fallback = true
     }
     if (brainFailures.length > 0) {
@@ -3663,6 +3973,13 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
 
     if (!anyDraft && confirmedMutationReplies.length > 0) finalText = [...confirmedMutationReplies, ...new Set(brainFailures)].join('\n\n')
 
+    // R41 «موظف حقيقي»: a write that OPENED a pending request — its question
+    // OWNS this turn's reply. Deterministic, in the employee's voice; the
+    // model's small talk never rephrases the follow-up question.
+    if (pendingQuestionFromWrite) {
+      finalText = pendingQuestionFromWrite
+      meta.fallback = true
+    }
     // ---------- final reply: verify BEFORE streaming, then pace it ----------
     if (!finalText.trim()) {
       meta.fallback = true
@@ -3728,11 +4045,16 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     }
   }
 
-  // All user queries flow through the genuine Gemini model via runBrainTurn() first.
-  // Rule-based intent patterns are preserved strictly as an offline fallback when the LLM
-  // is unreachable or times out, never intercepting when the model is operational.
-  const brainTurn = await runBrainTurn()
-  if (brainTurn) return brainTurn
+  // R41: a COMPLETED pending request is a deterministic write — it bypasses
+  // the brain loop so the model cannot re-interpret the follow-up sentence
+  // («المورد … والحساب 2000» is slots for the open request, not a new command).
+  if (!pendingWriteIntent) {
+    // All user queries flow through the genuine Gemini model via runBrainTurn() first.
+    // Rule-based intent patterns are preserved strictly as an offline fallback when the LLM
+    // is unreachable or times out, never intercepting when the model is operational.
+    const brainTurn = await runBrainTurn()
+    if (brainTurn) return brainTurn
+  }
 
   // Offline fallback helper patterns (used ONLY when LLM call fails or times out)
   const arithmeticRule = (() => {
@@ -3780,6 +4102,11 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   // ---- PASS 1: Understand (LLM with deterministic multi-split + rule fallback) ----
   let llmRaws: RawIntentJson[] = []
   let llmSingle: ExtractedIntent | null = null
+  if (pendingWriteIntent) {
+    // R41: the completed pending request OWNS this turn — no model, no rules.
+    llmSingle = pendingWriteIntent
+    done(IDX.understand, 'طلب معلق اكتمل — بجهّز المسودة من معلوماتك')
+  } else {
   try {
     const baseSystem = buildSystemPrompt({ business, user, items, customers, suppliers, memories: promptMemories, rules, history: ctx.history, userToolsLine })
     // «ورقة وقلم» — the employee's OWN working notes ride along every prompt
@@ -3796,11 +4123,20 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     console.error('[harness] intent pass failed → rule-based fallback:', err)
     done(IDX.understand, 'فهمت الطلب بالقواعد المحلية (الموديل مش متاح)')
   }
+  }
+
+  // R41: a completed pending request is exactly ONE deterministic write — the
+  // splitter must not fan the follow-up into a multi-intent turn.
+  if (pendingWriteIntent) llmRaws = []
 
   const detSubs = splitSubIntents(text, business.type)
 
   let subs: SubIntent[] = []
-  if (llmRaws.length >= 2) {
+  if (pendingWriteIntent) {
+    // R41: the completed pending request OWNS the turn — no multi-split, no
+    // rule fallback. The follow-up sentence is slots for the open request,
+    // never a new command (deterministic guarantee).
+  } else if (llmRaws.length >= 2) {
     subs = normalizeMultiIntents(llmRaws, text)
     if (subs.length === 1) {
       // the array collapsed to one valid request → single path with it
@@ -3916,6 +4252,13 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           steps[1 + memStep.length + i].state = 'done'
           pushThinking()
           emit({ event: 'step', label: stepLabel, state: 'done' })
+          // R41: a part that OPENED a pending request — its follow-up
+          // question is quoted verbatim in the combined reply.
+          if (resolved.pendingQuestion) {
+            situationParts.push(`الطلب ${AR_ORDINALS[i]}/${Math.min(N, 4)} — طلب معلق مفتوح`)
+            replyParts.push(resolved.pendingQuestion)
+            continue
+          }
           situationParts.push(`الطلب ${AR_ORDINALS[i]}/${Math.min(N, 4)} — ناقص ${resolved.missing ?? ''}: ${resolved.failMessage ?? ''}`)
           replyParts.push(`طلب رقم ${AR_ORDINALS[i]} ناقص بيانات: ${resolved.failMessage ?? resolved.missing ?? ''}`)
           continue
@@ -4043,6 +4386,13 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       done(IDX.search, 'بمشي على الأصناف والأسماء الحقيقية')
       const resolved = await resolveWrite(ctx, llmSingle, emit, memCtx)
       if (!resolved.ok) {
+        if (resolved.pendingQuestion) {
+          // R41: pending multi-turn request — the question IS the turn.
+          done(IDX.verify, 'طلب معلق — بكمّل الناقص')
+          done(IDX.reply)
+          await streamDeterministic(resolved.pendingQuestion, emit, 900)
+          return { replyText: resolved.pendingQuestion, card: null, cards: null, thinking: steps, modelLabel, actions: null }
+        }
         done(IDX.verify, resolved.failMessage ?? '')
         situation = `معلومات ناقصة: ${resolved.missing ?? ''} — ${resolved.failMessage ?? ''}`
         replyInstruction = 'اسأل سؤال واحد قصير يطلب أهم حقل ناقص. متاخدش أي قرار.'

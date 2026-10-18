@@ -39,6 +39,7 @@ model Business {
   usageEvents    UsageEvent[]
   quickCommands  QuickCommand[]
   agentNotes     AgentNote[]
+  pendingRequests PendingRequest[]
   subscriptions Subscription?
   invitations Invitation[]
   settings       AgentSettings?
@@ -179,6 +180,7 @@ model Conversation {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
   cashbookDialogue CashbookDialogue?
+  pendingRequest PendingRequest?
   messages      Message[]
   notes         AgentNote[]
 
@@ -555,6 +557,29 @@ model CashbookDialogue {
   version Int @default(0)
   expiresAt DateTime
   updatedAt DateTime @updatedAt
+}
+
+// R41 — «موظف حقيقي»: an open multi-turn request the employee is holding while
+// the owner feeds it information across messages (e.g. a new-item purchase
+// whose supplier/total arrive after the quantity). One active request per
+// conversation; expires like CashbookDialogue (20 min) so a stale «سجله كصنف
+// جديد» never hijacks next week's question.
+model PendingRequest {
+  id             String   @id @default(cuid())
+  businessId     String
+  business       Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  conversationId String   @unique
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  userId         String
+  kind           String // purchase_new_item
+  slots          String @default("{}") // JSON: { itemName, qty, unit, unitLabel, paid, supplierName, total, unitPrice }
+  question       String @default("") // the exact question currently outstanding
+  status         String @default("awaiting") // awaiting | resolved | cancelled
+  createdAt      DateTime @default(now())
+  expiresAt      DateTime
+  updatedAt      DateTime @updatedAt
+
+  @@index([businessId, status])
 }
 
 // Explicit deployment-admin-selected ASR; never assume a chat model transcribes audio.

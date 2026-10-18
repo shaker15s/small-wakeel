@@ -60,13 +60,21 @@ export async function validateOperationPayload(
       if (p.total != null && p.total !== total) throw new OperationValidationError('الإجمالي لا يطابق البنود')
       p.total = total
     } else {
-      if (!p.itemId) throw new OperationValidationError('الصنف مطلوب')
+      // R41: a NEW-item purchase is drafted WITHOUT an itemId (the item is
+      // born at approval, cashbook-style: «إنشاء الحساب عند اعتماد أول حركة»).
+      const isNewItem = p.newItem === true && String(p.itemName ?? '').trim().length >= 2
+      if (!p.itemId && !isNewItem) throw new OperationValidationError('الصنف مطلوب')
       integer(p.qty, 'qty', 1)
       integer(p.total, 'total', 1)
     }
     p.paid = integer(p.paid ?? p.total, 'paid')
     if (Number(p.paid) > Number(p.total)) throw new OperationValidationError('المدفوع أكبر من الإجمالي')
-    if (Number(p.paid) < Number(p.total) && !(type === 'sale' ? p.customerId : p.supplierId)) {
+    if (
+      Number(p.paid) < Number(p.total) &&
+      !(type === 'sale'
+        ? p.customerId
+        : p.supplierId || (p.newSupplier === true && String(p.supplierName ?? '').trim().length >= 2))
+    ) {
       throw new OperationValidationError('الحركة الآجلة محتاجة عميل أو مورد من النشاط الحالي')
     }
   }

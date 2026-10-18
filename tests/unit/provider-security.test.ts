@@ -7,11 +7,12 @@ import { encryptProviderKey, decryptProviderKey } from '@/lib/security/provider-
 const oldKey = process.env.WAKIL_SECRETS_KEY
 const oldEnv = process.env.NODE_ENV
 const oldLocal = process.env.ALLOW_LOCAL_WEBHOOKS
+const oldAllowLocal = process.env.WAKIL_ALLOW_LOCAL_PROVIDERS
 const restore = (name: string, value: string | undefined) => {
   if (value === undefined) delete process.env[name]
   else process.env[name] = value
 }
-afterEach(() => { restore('WAKIL_SECRETS_KEY', oldKey); restore('NODE_ENV', oldEnv); restore('ALLOW_LOCAL_WEBHOOKS', oldLocal) })
+afterEach(() => { restore('WAKIL_SECRETS_KEY', oldKey); restore('NODE_ENV', oldEnv); restore('ALLOW_LOCAL_WEBHOOKS', oldLocal); restore('WAKIL_ALLOW_LOCAL_PROVIDERS', oldAllowLocal) })
 
 describe('provider SSRF defence', () => {
   for (const address of ['127.0.0.1', '10.0.0.1', '172.16.0.1', '192.168.1.1', '169.254.169.254',
@@ -23,11 +24,27 @@ describe('provider SSRF defence', () => {
     expect(publicAddress('8.8.8.8')).toBe(true)
     expect(publicAddress('2606:4700:4700::1111')).toBe(true)
   })
-  for (const url of ['http://api.example.com/v1', 'file:///etc/passwd', 'https://localhost/v1',
-    'https://127.1/v1', 'https://2130706433/v1', 'https://[::1]/v1',
+  for (const url of ['http://api.example.com/v1', 'file:///etc/passwd',
     'https://user:password@api.example.com/v1', 'https://api.example.com/v1?redirect=x',
     'https://api.example.com/v1#fragment']) {
     test(`rejects unsafe URL ${url}`, () => { expect(() => providerUrl(url)).toThrow() })
+  }
+  // Loopback URLs are the DEV-ONLY demo-provider escape hatch (the preview's
+  // local mock LLM on 127.0.0.1 must be reachable). The hatch requires the
+  // EXPLICIT WAKIL_ALLOW_LOCAL_PROVIDERS=1 flag — never the environment alone.
+  for (const url of ['https://localhost/v1', 'https://127.1/v1', 'https://2130706433/v1', 'https://[::1]/v1']) {
+    test(`rejects loopback URL without the local-providers flag ${url}`, () => {
+      delete process.env.WAKIL_ALLOW_LOCAL_PROVIDERS
+      expect(() => providerUrl(url)).toThrow('Non-public')
+    })
+    test(`rejects loopback URL in production even with the flag ${url}`, () => {
+      Object.assign(process.env, { NODE_ENV: 'production', WAKIL_ALLOW_LOCAL_PROVIDERS: '1' })
+      expect(() => providerUrl(url)).toThrow('Non-public')
+    })
+    test(`allows loopback URL with the local-providers flag ${url}`, () => {
+      process.env.WAKIL_ALLOW_LOCAL_PROVIDERS = '1'
+      expect(() => providerUrl(url)).not.toThrow()
+    })
   }
   test('production webhooks cannot enable the development local-network escape hatch', async () => {
     Object.assign(process.env, { NODE_ENV: 'production', ALLOW_LOCAL_WEBHOOKS: '1' })

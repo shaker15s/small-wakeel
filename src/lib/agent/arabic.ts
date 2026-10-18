@@ -7,6 +7,13 @@
 export function normalizeAr(input: string): string {
   return input
     .trim()
+    // R41: invisible chars that break exact-match greeting/keyword patterns. IMEs
+    // and web copy-paste leak zero-width + bidi controls («عامل\u200Fايه ؟»
+    // used to miss the greeting). Formatting controls that SPLIT words become
+    // a space (deleting them would glue «عامل\u200Fايه» into «عاملايه»);
+    // the true joiners (ZWNJ/ZWJ) are removed — they live INSIDE a word.
+    .replace(/[\u200B\u200E\u200F\u202A-\u202E\u2060\u2061\u2062\u2063\u2064\u2065\u206A-\u206F\uFEFF\u00AD]/g, ' ')
+    .replace(/[\u200C\u200D]/g, '')
     .replace(/[\u064B-\u0652\u0670\u0640]/g, '') // tashkeel + tatweel
     .replace(/[أإآٱ]/g, 'ا')
     .replace(/ى/g, 'ي')
@@ -15,6 +22,7 @@ export function normalizeAr(input: string): string {
     .replace(/ة/g, 'ه')
     .replace(/\s+/g, ' ')
     .toLowerCase()
+    .trim() // invisible chars became spaces — a leading/trailing one must not survive
 }
 
 const AR_DIGITS = '٠١٢٣٤٥٦٧٨٩'

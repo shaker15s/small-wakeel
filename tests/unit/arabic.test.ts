@@ -27,6 +27,18 @@ describe('arabic.normalizeAr', () => {
   test('lowercases latin text', () => {
     expect(normalizeAr('Pepsi')).toBe('pepsi')
   })
+
+  test('invisible bidi/zero-width chars become spaces, joiners are removed (R41)', () => {
+    // RLM/ZWSP between words must keep the words separate (gluing them broke
+    // the «عامل ايه ؟» greeting in the live preview).
+    expect(normalizeAr('عامل\u200fايه ؟')).toBe(normalizeAr('عامل ايه ؟'))
+    expect(normalizeAr('ازيك\u200b')).toBe('ازيك')
+    expect(normalizeAr('\u200eصباح الخير\u200f')).toBe('صباح الخير')
+    // the true joiners live INSIDE a word — removed, not space-padded
+    expect(normalizeAr('مح\u200cمد')).toBe('محمد')
+    // trailing punctuation survives the space-collapse
+    expect(normalizeAr('عامل ايه\u200f ؟')).toBe('عامل ايه ؟')
+  })
 })
 
 describe('arabic.digits', () => {

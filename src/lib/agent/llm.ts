@@ -150,28 +150,57 @@ export async function resolveModel(modelKey: string | null | undefined): Promise
   }
 
   // If built-in requested or default (auto), but GEMINI_API_KEY is not set in environment:
-  // Dynamically bridge to the active remote external provider (like kiosapi) so the agent NEVER starves!
+  // Dynamically bridge to an active provider so the agent NEVER starves.
+  // Dev order: the LOCAL demo provider first (the preview must answer even when
+  // no external network is reachable), then external providers. Production
+  // keeps the external-only bridge (loopback is not a provider in prod).
   if (!process.env.GEMINI_API_KEY) {
+    const isDev = process.env.NODE_ENV !== 'production'
     const targetTier = modelKey === 'builtin-deep' || modelKey === 'gemini-pro' ? 'deep' : 'air'
+    // Loopback demo providers register with a port+path («http://localhost:3031/v1»)
+    // — exact-match lists never hit them, so the bridge silently fell through to
+    // a real external provider the sandbox cannot reach. Match by containment.
+    const localCandidate = isDev
+      ? await db.modelConfig.findFirst({
+          where: {
+            enabled: true,
+            tier: targetTier,
+            OR: [
+              { provider: { baseUrl: { contains: 'localhost' } } },
+              { provider: { baseUrl: { contains: '127.0.0.1' } } },
+            ],
+          },
+          include: { provider: true },
+          orderBy: { id: 'desc' },
+        })
+      : null
+    const externalWhere = {
+      enabled: true,
+      AND: [
+        { provider: { baseUrl: { not: { contains: 'localhost' } } } },
+        { provider: { baseUrl: { not: { contains: '127.0.0.1' } } } },
+      ],
+    }
     const activeExternal =
       (await db.modelConfig.findFirst({
-        where: { enabled: true, tier: targetTier, provider: { baseUrl: { not: { contains: 'localhost' } } } },
+        where: { ...externalWhere, tier: targetTier },
         include: { provider: true },
         orderBy: { id: 'desc' },
       })) ??
       (await db.modelConfig.findFirst({
-        where: { enabled: true, provider: { baseUrl: { not: { contains: 'localhost' } } } },
+        where: externalWhere,
         include: { provider: true },
         orderBy: { id: 'desc' },
       }))
-    if (activeExternal) {
+    const chosen = localCandidate ?? activeExternal
+    if (chosen) {
       return {
-        key: `ext:${activeExternal.id}`,
-        label: `${activeExternal.label} (تلقائي)`,
-        tier: activeExternal.tier as 'air' | 'balanced' | 'deep',
+        key: `ext:${chosen.id}`,
+        label: `${chosen.label} (تلقائي)`,
+        tier: chosen.tier as 'air' | 'balanced' | 'deep',
         source: 'external',
-        remoteModel: activeExternal.remoteId,
-        baseUrl: activeExternal.provider.baseUrl,
+        remoteModel: chosen.remoteId,
+        baseUrl: chosen.provider.baseUrl,
       }
     }
   }
@@ -241,12 +270,36 @@ async function* streamBuiltin(messages: LLMMessage[], modelKey: string | undefin
     }
   }
 
-  // Fallback to active external provider if GEMINI_API_KEY is not present or all Gemini candidates failed
-  const activeExternal = await db.modelConfig.findFirst({
-    where: { enabled: true, provider: { baseUrl: { not: { contains: 'localhost' } } } },
-    include: { provider: true },
-    orderBy: { id: 'desc' },
-  })
+  // Fallback to active external provider if GEMINI_API_KEY is not present or all Gemini candidates failed.
+  // Dev prefers the local demo provider (same rule as the resolveModel bridge) so the
+  // preview never bridges to an external the sandbox cannot reach.
+  const isDev = process.env.NODE_ENV !== 'production'
+  const localFallback = isDev
+    ? await db.modelConfig.findFirst({
+        where: {
+          enabled: true,
+          OR: [
+            { provider: { baseUrl: { contains: 'localhost' } } },
+            { provider: { baseUrl: { contains: '127.0.0.1' } } },
+          ],
+        },
+        include: { provider: true },
+        orderBy: { id: 'desc' },
+      })
+    : null
+  const activeExternal =
+    localFallback ??
+    (await db.modelConfig.findFirst({
+      where: {
+        enabled: true,
+        AND: [
+          { provider: { baseUrl: { not: { contains: 'localhost' } } } },
+          { provider: { baseUrl: { not: { contains: '127.0.0.1' } } } },
+        ],
+      },
+      include: { provider: true },
+      orderBy: { id: 'desc' },
+    }))
   if (activeExternal) {
     yield* streamExternal({
       key: `ext:${activeExternal.id}`,

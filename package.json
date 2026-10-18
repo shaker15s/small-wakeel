@@ -3,7 +3,7 @@
   "version": "0.2.1",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 3000 -H 0.0.0.0",
+    "dev": "WAKIL_ALLOW_LOCAL_PROVIDERS=1 next dev -p 3000 -H 0.0.0.0",
     "build": "bun run build:maintenance && next build && node -e \"const fs=require('fs'); if(fs.existsSync('.next/standalone')){fs.cpSync('.next/static','.next/standalone/.next/static',{recursive:true});fs.cpSync('public','.next/standalone/public',{recursive:true});}\"",
     "start": "NODE_ENV=production HOSTNAME=0.0.0.0 node .next/standalone/server.js",
     "postinstall": "bash scripts/prisma-generate.sh",
