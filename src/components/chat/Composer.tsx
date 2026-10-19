@@ -602,7 +602,7 @@ export function Composer({
                 className={cn(
                   'relative flex size-10 items-center justify-center overflow-hidden rounded-full transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50',
                   canSend || bowPhase !== 'idle'
-                    ? 'bg-primary text-primary-foreground shadow-md shadow-primary/25 cursor-pointer'
+                    ? '[background:linear-gradient(135deg,var(--primary),color-mix(in_oklab,var(--primary)_65%,var(--wakil-amber)))] text-primary-foreground shadow-md shadow-primary/30 cursor-pointer hover:shadow-lg hover:shadow-primary/35 transition-shadow'
                     : 'bg-muted text-muted-foreground/50 cursor-not-allowed',
                 )}
               >

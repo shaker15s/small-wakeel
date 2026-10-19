@@ -6,7 +6,7 @@
 // animated states: idle, thinking, listening, calculating, analyzing_tools,
 // replying, writing, searching, executing, success, and error.
 
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import { sfx } from '@/lib/sound-effects'
 
@@ -98,6 +98,17 @@ export function AgentAvatar({
   const antennaActive = ANTENNA_ON.includes(state) || hovered
   const effectiveState: AgentState = hovered && state === 'idle' ? 'success' : state
 
+  // «Codex-pets» behavior: the agent JUMPS with joy the moment it starts
+  // working (idle → any active state), and blinks while at rest.
+  const prevStateRef = useRef<AgentState>(state)
+  const [jumpNonce, setJumpNonce] = useState(0)
+  useEffect(() => {
+    const prev = prevStateRef.current
+    prevStateRef.current = state
+    if (prev === 'idle' && state !== 'idle' && interactive) setJumpNonce((n) => n + 1)
+  }, [state, interactive])
+  const blinking = interactive && (state === 'idle' || state === 'thinking' || state === 'searching')
+
   // Dynamic glow color per state
   const auraColor =
     state === 'analyzing_tools' || state === 'executing'
@@ -165,6 +176,12 @@ export function AgentAvatar({
         }}
       >
         <svg viewBox="0 0 64 64" width="100%" height="100%" aria-hidden="true" focusable="false">
+          <motion.g
+            key={jumpNonce}
+            initial={jumpNonce > 0 ? { y: 0 } : false}
+            animate={jumpNonce > 0 ? { y: [0, -5.5, 1.5, 0] } : { y: 0 }}
+            transition={{ duration: 0.55, times: [0, 0.35, 0.62, 1], ease: 'easeOut' }}
+          >
           {/* Outer orbital ring when thinking, analyzing tools, or listening */}
           {(state === 'thinking' || state === 'analyzing_tools' || state === 'calculating' || state === 'listening') && (
             <circle
@@ -294,9 +311,12 @@ export function AgentAvatar({
             opacity={state === 'error' ? 0.15 : hovered || state === 'success' ? 0.75 : 0.42}
           />
 
-          <Eyes state={effectiveState} hovered={hovered} lookOffset={lookOffset} />
+          <g className={blinking ? 'avatar-blink' : undefined}>
+            <Eyes state={effectiveState} hovered={hovered} lookOffset={lookOffset} />
+          </g>
           <Mouth state={effectiveState} hovered={hovered} />
           <StateBadge state={state} hovered={hovered} />
+          </motion.g>
         </svg>
       </motion.span>
 

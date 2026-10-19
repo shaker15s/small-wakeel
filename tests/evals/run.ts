@@ -18,79 +18,14 @@ import { copyFileSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-interface EvalCase {
-  /** What the owner types. */
-  text: string
-  /** The seeded business type to run it in. */
-  vertical: 'supermarket' | 'gym' | 'pharmacy' | 'attar'
-  /** What must be true about the turn result. */
-  expect: string
-   
-  check: (r: any) => boolean
-}
 
-const CASES: EvalCase[] = [
-  {
-    text: 'انت مين؟',
-    vertical: 'supermarket',
-    expect: 'بيرد بتعريف بنفسه من غير ما يحتاج موديل',
-    check: (r) => typeof r.replyText === 'string' && r.replyText.length > 20 && !r.card,
-  },
-  {
-    text: 'الخزنة فيها كام؟',
-    vertical: 'supermarket',
-    expect: 'قراءة حقيقية من السجل (كروت بيانات)',
-    check: (r) => Array.isArray(r.cards) && r.cards.length > 0,
-  },
-  {
-    text: 'ايه النواقص عندي؟',
-    vertical: 'supermarket',
-    expect: 'قراءة قايمة النواقص',
-    check: (r) => Array.isArray(r.cards) && r.cards.length > 0,
-  },
-  {
-    text: 'بعت ٢ علبة لبن لأم حسن بـ٩٥ جنيه',
-    vertical: 'supermarket',
-    expect: 'مسودة بيع محتاجة اعتماد (مش تنفيذ فوري)',
-    check: (r) => r.card?.kind === 'draft' && r.card?.type === 'sale' && r.card?.status === 'AWAITING_APPROVAL',
-  },
-  {
-    text: 'صرفت ٣٠٠ جنيه كهربا النهاردة',
-    vertical: 'supermarket',
-    expect: 'مسودة مصروف',
-    check: (r) => r.card?.kind === 'draft' && r.card?.type === 'expense',
-  },
-  {
-    text: 'حسن دفع ٥٠ من اللي عليه',
-    vertical: 'supermarket',
-    expect: 'مسودة تحصيل من عميل',
-    check: (r) => r.card?.kind === 'draft' && r.card?.type === 'collection',
-  },
-  {
-    text: 'اشتركت هدى في الجيم شهر بـ٤٠٠',
-    vertical: 'gym',
-    expect: 'مسودة اشتراك/تجديد عضوية في النشاط الصح',
-    check: (r) => r.card?.kind === 'draft' && (r.card?.type === 'membership' || r.card?.type === 'sale'),
-  },
-  {
-    text: 'اشتركت نادية في الجيم شهر بـ٤٠٠',
-    vertical: 'gym',
-    expect: 'اسم مش مسجّل → يسمّيه ويقول الحل، مش يسأل «لمين؟» تاني',
-    check: (r) => typeof r.replyText === 'string' && r.replyText.includes('نادية') && !r.card,
-  },
-  {
-    text: 'حسن دفع ٥٠ من اللي عليه',
-    vertical: 'supermarket',
-    expect: '«اللي عليه» فيها «ليه» — لازم تفضل تحصيل ومتعملش بحث',
-    check: (r) => r.card?.kind === 'draft' && r.card?.type === 'collection' && !r.research,
-  },
-  {
-    text: 'احفظ إن أم حسن بتسدد كل خميس',
-    vertical: 'supermarket',
-    expect: 'يتحفظ في الذاكرة طويلة المدى',
-    check: (r) => /حفظ|فاكر|ذكرت|سجل/i.test(r.replyText),
-  },
-]
+
+import { CASES as BASE_CASES } from './cases'
+import { generateCases } from './case-generator'
+import type { EvalCase } from './cases'
+
+// R46: 1000+ scenario battery = hand-written base + generated cross-product.
+const CASES: EvalCase[] = [...BASE_CASES, ...generateCases()]
 
 async function main() {
   const asJson = process.argv.includes('--json')
@@ -109,14 +44,15 @@ async function main() {
   const businesses = await db.business.findMany()
   const results: { text: string; expect: string; ok: boolean; ms: number; note: string }[] = []
 
-  for (const c of CASES) {
+  // R46: parallel pool (6) — each case is independent (own scratch
+  // conversation), results keep case order. 1000+ cases in seconds.
+  const runOne = async (c: EvalCase): Promise<{ text: string; expect: string; ok: boolean; ms: number; note: string }> => {
     const business = businesses.find((b: { type: string }) => b.type === c.vertical)
     const user = business
       ? await db.user.findFirst({ where: { businessId: business.id, role: 'owner' } })
       : null
     if (!business || !user) {
-      results.push({ text: c.text, expect: c.expect, ok: false, ms: 0, note: `مفيش نشاط من نوع ${c.vertical}` })
-      continue
+      return { text: c.text, expect: c.expect, ok: false, ms: 0, note: `مفيش نشاط من نوع ${c.vertical}` }
     }
     const conversation = await db.conversation.create({
       data: { businessId: business.id, userId: user.id, title: 'تقييم آلي' },
@@ -136,7 +72,7 @@ async function main() {
         () => {},
       )
       const ok = c.check(result)
-      results.push({
+      return {
         text: c.text,
         expect: c.expect,
         ok,
@@ -144,19 +80,24 @@ async function main() {
         note: ok
           ? r_note(result)
           : `جاب: card=${result.card?.type ?? '—'} cards=${result.cards?.length ?? 0} رد=«${String(result.replyText).slice(0, 60)}»`,
-      })
+      }
     } catch (err) {
-      results.push({
+      return {
         text: c.text,
         expect: c.expect,
         ok: false,
         ms: Date.now() - started,
         note: `استثناء: ${err instanceof Error ? err.message : String(err)}`,
-      })
+      }
     } finally {
       // the eval conversation is scratch data — keep the copy clean
       await db.conversation.delete({ where: { id: conversation.id } }).catch(() => null)
     }
+  }
+  const POOL = 12
+  for (let i = 0; i < CASES.length; i += POOL) {
+    const chunk = CASES.slice(i, i + POOL)
+    results.push(...(await Promise.all(chunk.map(runOne))))
   }
 
   await db.$disconnect()

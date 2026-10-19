@@ -11,7 +11,8 @@ import type { ResultCardDTO } from '@/lib/types'
 import { egp, qty as fmtQty, arDate, arTime } from '@/lib/format'
 import { arUnit } from '@/lib/verticals'
 import { cairoIsoDay, startOfCairoDay } from '@/app/api/_lib/dates'
-import { inspectDesktopApplication, scanRunningApplications } from './cli-anything/bridge'
+import { inspectDesktopApplication, scanRunningApplications, executeBridgedTool } from './cli-anything/bridge'
+import { pythonProbe, cliHubProbe, hubSearch, hubInstall, locateSkillMd, parseSkillMd, registerHarness, generatePipeline, readFileBounded } from './cli-anything/harness-installer'
 
 export type ReadTool =
   | 'get_daily_summary'
@@ -50,6 +51,8 @@ export type ReadTool =
   | 'cli_inspect_app'
   | 'cli_sync_desktop_data'
   | 'cli_list_desktop_apps'
+  | 'cli_control_app'
+  | 'cli_harness_install'
 
 /** Valid read-tool names — validation set for intent parsing (multi-intent). */
 export const READ_TOOLS: ReadonlySet<string> = new Set<string>([
@@ -887,7 +890,7 @@ export async function runReadTool(
       return [
         {
           kind: 'table',
-          title: 'المديونيات — اللي علينا للعملاء... يعني اللي ليّ عليهم',
+          title: 'المديونيات — العملاء اللي لسه ليه فلوس عندنا',
           columns: [
             { key: 'name', label: 'العميل' },
             { key: 'balance', label: 'المديونية' },
@@ -1752,6 +1755,81 @@ export async function runReadTool(
     case 'cli_sync_desktop_data': {
       const appName = String(args.appName ?? args.name ?? 'البرنامج الخارجي')
       const res = await inspectDesktopApplication(appName, businessId)
+      return res.cards
+    }
+
+    case 'cli_harness_install': {
+      // R46 Mode 2 — the REAL CLI-Anything (github.com/HKUDS/CLI-Anything) integrated —
+      // not copied, not imitated: with the owner's EXPLICIT permission we run the real
+      // tooling on the owner's machine (CLI-Hub prebuilt or the 7-phase generation
+      // pipeline), parse the produced SKILL.md, and register the executable surface
+      // so cli_control_app drives the owner's actual program from then on.
+      const harnessApp = String(args.app ?? '').trim()
+      if (!harnessApp) {
+        return [{ kind: 'text', title: 'بنى هارنس CLI', body: 'قل ما تقولي بسم البرنامج (مثل: daftra أو excel).' }]
+      }
+      const confirmed = args.confirmed === true
+      const py = await pythonProbe()
+      if (!confirmed) {
+        const hub = py.ok ? await cliHubProbe() : null
+        return [{ kind: 'kv', title: `إذن البنى: هارنس «${harnessApp}»`, rows: [
+          { label: 'الأداة', value: 'CLI-Anything الحقيقي (مش نسخة منه)' },
+          { label: 'البيئة', value: py.ok ? py.detail : 'مفيش بيئان على الجهاز', tone: py.ok ? 'good' : 'bad' },
+          { label: 'CLI-Hub', value: hub ? hub.detail : 'لم يتثتتت', tone: hub?.ok ? 'good' : 'neutral' },
+          { label: 'الخطوات', value: 'إثبات CLI-Anything على جهازك → حرك هارنس تنفذ أوامر برنامجك → تسجيله في الدب → أنا أشغله مباشرة' },
+        ] }]
+      }
+      if (!py.ok) {
+        return [{ kind: 'text', title: 'بنى هارنس CLI', body: `مش قدر اتشغل: ${py.detail}.\nCLI-Anything بيعمل من Python — ثبّته أول في جهاز المستشري وبعدك \u0623رجع.` }]
+      }
+      const owner = (await db.user.findFirst({ where: { businessId, role: 'owner' } })) ?? (await db.user.findFirst({ where: { businessId } }))
+      const ownerUserId = owner?.id ?? businessId
+      const sourcePath = args.source ? String(args.source) : undefined
+      if (sourcePath) {
+        const r = await generatePipeline(harnessApp, sourcePath)
+        if (!r.ok) {
+          return [{ kind: 'text', title: `بنى هارنس «${harnessApp}»`, body: r.detail }]
+        }
+        const skillMd = locateSkillMd(`cli-anything-${harnessApp}`)
+        if (!skillMd) {
+          return [{ kind: 'text', title: `بنى هارنس «${harnessApp}»`, body: `\u0627لتنفيز كامل \u0628نجاح \u0645باشرة \u0645ا \u0644قيت \u0644دي \u0645لف SKILL.md \u2014 \u0639ري \u0627لنتائج: ${r.detail.slice(0, 400)}` }]
+        }
+        const rawSkill = await readFileBounded(skillMd)
+        const skill = parseSkillMd(rawSkill, harnessApp)
+        const reg = await registerHarness({ businessId, userId: ownerUserId, app: harnessApp, display: harnessApp, source: 'generated', skill })
+        return [{ kind: 'text', title: `مبي: هارنس «${harnessApp}» اتبنى من \u0627لمصدر`, body: `${reg.detail}\n\u0627ل\u0623وامر \u0627لمتحددة: ${skill.commands.map((c) => c.command).join(' \u00b7 ') || '\u2014'}` }]
+      }
+      const search = await hubSearch(harnessApp)
+      if (!search.ok) {
+        return [{ kind: 'text', title: `بنى هارنس «${harnessApp}»`, body: `${search.detail}.\n\u0627لحل: \u0645ش \u0641ي CLI-Hub \u0647ارنس \u062cاهز \u0644ه \u2014 \u064aمكن \u0627لبنى \u0645ن \u0627لمصدر \u0628استخدام \u0627ل\u200b pipeline \u0627ل\u200b 7-phases: \u0627قرب \u0645سار \u0643ود \u0627لبرنامج (source) \u0648\u0623عيد \u0628\u060c confirmed=true.` }]
+      }
+      const inst = await hubInstall(search.slug ?? `cli-anything-${harnessApp}`)
+      if (!inst.ok || !inst.skillMdPath) {
+        return [{ kind: 'text', title: `بنى \u0647ارنس \u00ab${harnessApp}\u00bb`, body: `\u0627لتثقيق \u0645ن \u0627ل\u200b hub \u0641شل: ${inst.detail}` }]
+      }
+      const rawSkill2 = await readFileBounded(inst.skillMdPath)
+      const skill2 = parseSkillMd(rawSkill2, harnessApp)
+      const reg2 = await registerHarness({ businessId, userId: ownerUserId, app: harnessApp, display: harnessApp, source: 'prebuilt', skill: skill2 })
+      return [{ kind: 'text', title: `\u0645بي: \u0647ارنس \u00ab${harnessApp}\u00bb \u0645ن \u0627ل\u200b CLI-Hub \u0627ل\u062d\u0642ي\u0642ي`, body: `${reg2.detail}\n\u0627ل\u0623\u0648\u0627\u0645\u0631 \u0627لم\u062a\u062d\u062f\u062f\u0629: ${skill2.commands.map((c) => c.command).join(' \u00b7 ') || '\u2014'}\n\u0627نت \u062fي \u0623\u0634\u0648\u0641 \u0623\u0648\u0627\u0645\u0631 \u0627ل\u0628\u0631\u0646\u0627\u0645\u062c \u0645\u0628\u0627\u0634\u0631\u0629 \u0639\u0628\u0631 cli_control_app.` }]
+    }
+
+        case 'cli_control_app': {
+      // R45 (CLI-Anything merge): drive an app through its CLI surface.
+      // Excel is a REAL engine (COM on Windows / CSV anywhere); other apps
+      // stay fail-closed with an honest status — never synthetic data.
+      const appName = String(args.app ?? args.appName ?? 'excel')
+      const res = await executeBridgedTool({
+        businessId,
+        appName,
+        command: String(args.command ?? 'list-recent'),
+        args: {
+          file: args.file ?? args.path,
+          sheet: args.sheet,
+          range: args.range,
+          value: args.value ?? args.text,
+          maxRows: args.maxRows,
+        },
+      })
       return res.cards
     }
 

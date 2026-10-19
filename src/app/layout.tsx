@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { Toaster } from "@/components/ui/toaster";
+import { AmbientBackground } from "@/components/app/AmbientBackground";
 import { ThemeProvider } from "next-themes";
 
 export const metadata: Metadata = {
@@ -11,7 +12,7 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   themeColor: [
     { media: "(prefers-color-scheme: light)", color: "#faf7f1" },
-    { media: "(prefers-color-scheme: dark)", color: "#0f1a2b" },
+    { media: "(prefers-color-scheme: dark)", color: "#101318" },
   ],
   width: "device-width",
   initialScale: 1,
@@ -88,6 +89,7 @@ export default function RootLayout({
         suppressHydrationWarning
         className="antialiased bg-background text-foreground"
       >
+        <AmbientBackground />
         <ThemeProvider attribute="class" defaultTheme="light" enableSystem={true}>
           {children}
           <Toaster />

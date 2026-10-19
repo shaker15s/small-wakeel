@@ -14,6 +14,15 @@ export function publicAddress(address: string): boolean {
 
 function publicUrl(raw: string, allowQuery = false): URL {
   const url = new URL(raw)
+  // Explicit opt-in (dev script sets it): the local demo provider (mock LLM on
+  // 127.0.0.1/localhost) must be reachable so the preview answers in sandboxes
+  // where no external provider is. Production and CI keep the strict
+  // HTTPS-public contract with ZERO loopback exceptions — the flag must be set
+  // deliberately, never by environment alone.
+  if (process.env.NODE_ENV !== 'production' && process.env.WAKIL_ALLOW_LOCAL_PROVIDERS === '1') {
+    const host = url.hostname.replace(/^\[|\]$/g, '')
+    if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return url
+  }
   if (url.protocol !== 'https:' || url.username || url.password || url.hash || (!allowQuery && url.search)) {
     throw new Error('Provider URL must be HTTPS, without credentials, query or fragment')
   }
@@ -39,10 +48,29 @@ export async function publicAddresses(host: string, resolve: Resolver = (name) =
   return addresses
 }
 
+// Same explicit opt-in as publicUrl: in dev with the flag, loopback hostnames
+// serve the local demo provider — resolve them normally, skip the publicness
+// gate. (Node's undici enforces this lookup; bun's fetch does not, which is
+// why the guard only bites in the real server.)
+const loopbackDevBypass = (host: string): boolean =>
+  process.env.NODE_ENV !== 'production' &&
+  process.env.WAKIL_ALLOW_LOCAL_PROVIDERS === '1' &&
+  (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '0.0.0.0')
+
 const transport = new Agent({
   connect: {
     timeout: 8_000,
     lookup(hostname, options, callback) {
+      const host = String(hostname).replace(/^\[|\]$/g, '')
+      if (loopbackDevBypass(host)) {
+        lookup(host, { all: true })
+          .then((answers) => {
+            if (options.all) callback(null, answers)
+            else callback(null, answers[0].address, answers[0].family)
+          })
+          .catch((e) => callback(e, '', 0))
+        return
+      }
       publicAddresses(hostname).then((addresses) => {
         const family = Number(options.family)
         const eligible = family ? addresses.filter((a) => a.family === family) : addresses

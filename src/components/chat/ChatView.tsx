@@ -669,8 +669,8 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
               >
                 <AgentAvatar state="idle" size="lg" />
                 <div>
-                  <h2 className="text-lg font-bold">أهلاً بيك 👋</h2>
-                  <p className="mt-1.5 max-w-md text-sm leading-relaxed text-muted-foreground">{vertical.welcome}</p>
+                  <h2 className="text-2xl font-bold tracking-tight sm:text-[1.75rem]">أهلاً بيك 👋</h2>
+                  <p className="mx-auto mt-2 max-w-md text-[15px] leading-7 text-muted-foreground">{vertical.welcome}</p>
                 </div>
                 <div className="flex flex-wrap justify-center gap-1.5">
                   {suggestionsQ.isPending ? (

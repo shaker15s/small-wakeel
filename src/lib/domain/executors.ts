@@ -5,10 +5,11 @@ import { executeCashbook, reverseCashbook, assertCashbookRole } from './cashbook
 // The LLM extracts intent; THESE functions are the only writers of business truth.
 // Every write: idempotency key, state machine, verification read-back, audit event.
 
-import type { Operation, Prisma } from '@prisma/client'
+import type { Item, Operation, Prisma } from '@prisma/client'
 import { db } from '@/lib/db'
 import type { OpType, Risk } from '@/lib/types'
 import { invalidateCatalog } from '@/lib/agent/catalog'
+import { normalizeAr } from '@/lib/agent/arabic'
 import { arUnit } from '@/lib/verticals'
 import { egp, qty as fmtQty, arDate } from '@/lib/format'
 import { canApproveOperation, canDraft, computeRisk } from './risk'
@@ -239,6 +240,49 @@ function executorsFor(db: Prisma.TransactionClient): Record<OpType, Executor> {
     return biz.openingCash + inn - out
   }
 
+  // R41 «موظف حقيقي»: a NEW item / supplier drafted without IDs (the pending
+  // new-item flow registers them at draft time) is resolved or created at
+  // approval — the counterparty is born with its first operation,
+  // cashbook-style. Matching uses the canonical app normalization (tatweel,
+  // alif/hamza, Arabic-Indic digits) so «السمانة المصرية» and «السمانة
+  // المصريه» are the same party and a retried approval never duplicates.
+  const normName = (s: string) => normalizeAr(String(s ?? '')).replace(/\s+/g, ' ').trim()
+  async function resolveItem(businessId: string, p: Record<string, unknown>): Promise<Item> {
+    if (p.itemId) {
+      const it = await db.item.findUnique({ where: { id: String(p.itemId) } })
+      if (!it) throw new OperationValidationError('الصنف مش موجود')
+      return it
+    }
+    const name = String(p.itemName ?? '').trim()
+    if (!name) throw new OperationValidationError('اسم الصنف الجديد ناقص')
+    const all = await db.item.findMany({ where: { businessId } })
+    const found = all.find(
+      (i) => normName(i.name) === normName(name) || (i.aliases ?? '').split(',').some((a) => a.trim() && normName(a) === normName(name)),
+    )
+    if (found) return found
+    const created = await db.item.create({
+      data: {
+        businessId,
+        name,
+        unit: String(p.unit ?? 'piece'),
+        costPrice: Math.round(Number(p.unitPrice ?? 0)),
+        sellPrice: Math.round(Number(p.sellPrice ?? p.unitPrice ?? 0)),
+        stockQty: 0,
+        lowStockThreshold: 0,
+      },
+    })
+    invalidateCatalog()
+    return created
+  }
+  async function resolveSupplierId(businessId: string, p: Record<string, unknown>): Promise<string | null> {
+    if (p.supplierId) return String(p.supplierId)
+    const name = String(p.supplierName ?? '').trim()
+    if (!name) return null
+    const all = await db.supplier.findMany({ where: { businessId } })
+    const found = all.find((s) => normName(s.name) === normName(name))
+    if (found) return found.id
+    return (await db.supplier.create({ data: { businessId, name, balance: 0 } })).id
+  }
   return {
     debt_promise: (businessId, ref, p) => executeDebtPromise(db, businessId, ref, p),
     cashbook: (businessId, ref, p) => executeCashbook(db, businessId, ref, p),
@@ -340,8 +384,17 @@ function executorsFor(db: Prisma.TransactionClient): Record<OpType, Executor> {
         type Res = { itemId: string; name: string; qty: number; unit: string; unitPrice: number; total: number; before: number }
         const resolved: Res[] = []
         for (const l of rawLines) {
-          const item = await db.item.findUnique({ where: { id: String(l.itemId) } })
-          if (!item) return { ok: false, checks: [], effects: [], failReason: 'الصنف مش موجود' }
+          let item: Item | null
+          if (l.itemId) {
+            item = await db.item.findUnique({ where: { id: String(l.itemId) } })
+            if (!item) return { ok: false, checks: [], effects: [], failReason: 'الصنف مش موجود' }
+          } else {
+            try {
+              item = await resolveItem(businessId, l)
+            } catch (e) {
+              return { ok: false, checks: [], effects: [], failReason: (e as Error).message }
+            }
+          }
           const qty = Number(l.qty ?? 0)
           if (!(qty > 0)) return { ok: false, checks: [], effects: [], failReason: `كمية ${item.name} لازم تكون أكبر من صفر` }
           const unitPrice = Number(l.unitPrice ?? item.costPrice)
@@ -351,7 +404,7 @@ function executorsFor(db: Prisma.TransactionClient): Record<OpType, Executor> {
         if (total <= 0) return { ok: false, checks: [], effects: [], failReason: 'الإجمالي لازم يكون أكبر من صفر' }
         const paid = Math.min(Number(p.paid ?? total), total)
         const remaining = total - paid
-        const supplierId = p.supplierId ? String(p.supplierId) : null
+        const supplierId = await resolveSupplierId(businessId, p)
 
         // ONE transaction: stock movements, the cash entry and the supplier
         // balance either all land or none do (no half-executed purchase).
@@ -360,6 +413,17 @@ function executorsFor(db: Prisma.TransactionClient): Record<OpType, Executor> {
           db.cashEntry.create({ data: { businessId, direction: 'out', amount: paid, reason: `شرا — ${resolved.map((r) => r.name).join(' + ')}`, ref } }),
           ...(supplierId && remaining !== 0 ? [db.supplier.update({ where: { id: supplierId }, data: { balance: { increment: remaining } } })] : []),
         ])
+        // R41: new lines (drafted without IDs) get theirs IN THE PAYLOAD
+        // itself — the in-memory object is what the debt ledger, the
+        // accounting verification and the final SUCCEEDED write all read,
+        // and it is what a later reversal re-reads by ref.
+        for (const l of rawLines) {
+          if (!l.itemId) {
+            const r = resolved.find((x) => x.name === l.name)
+            if (r) l.itemId = r.itemId
+          }
+        }
+        if (supplierId) p.supplierId = supplierId
 
         const checks: { label: string; expected: string; actual: string; pass: boolean }[] = []
         const effects: { label: string; value: string; tone: 'good' | 'bad' | 'neutral' }[] = []
@@ -378,15 +442,29 @@ function executorsFor(db: Prisma.TransactionClient): Record<OpType, Executor> {
         return { ok: allOk, checks, effects }
       }
 
-      const itemId = String(p.itemId)
-      const item = await db.item.findUnique({ where: { id: itemId } })
-      if (!item) return { ok: false, checks: [], effects: [], failReason: 'الصنف مش موجود' }
+      // R41: a new-item purchase (itemId null, itemName set) resolves or
+      // creates the item HERE — the item is born at approval of its first
+      // operation, and a retried approval finds it by name instead of
+      // duplicating it.
+      let item: Item
+      if (p.itemId) {
+        const found = await db.item.findUnique({ where: { id: String(p.itemId) } })
+        if (!found) return { ok: false, checks: [], effects: [], failReason: 'الصنف مش موجود' }
+        item = found
+      } else {
+        try {
+          item = await resolveItem(businessId, p)
+        } catch (e) {
+          return { ok: false, checks: [], effects: [], failReason: (e as Error).message }
+        }
+      }
+      const itemId = item.id
       const qtyN = Number(p.qty ?? 0)
       const total = Number(p.total ?? 0)
       if (total <= 0) return { ok: false, checks: [], effects: [], failReason: 'الإجمالي لازم يكون أكبر من صفر' }
       const paid = Number(p.paid ?? total)
       const remaining = total - paid
-      const supplierId = p.supplierId ? String(p.supplierId) : null
+      const supplierId = await resolveSupplierId(businessId, p)
       const before = await stockBefore(itemId)
 
       const txOps: Prisma.PrismaPromise<unknown>[] = [
@@ -397,6 +475,12 @@ function executorsFor(db: Prisma.TransactionClient): Record<OpType, Executor> {
         txOps.push(db.supplier.update({ where: { id: supplierId }, data: { balance: { increment: remaining } } }))
       }
       await apply(txOps)
+      // R41: the draft was saved without IDs — write the resolved ones back
+      // INTO the payload. The in-memory object is what the debt ledger, the
+      // accounting verification and the final SUCCEEDED write all read, and
+      // it is what a later reversal re-reads by ref.
+      p.itemId = item.id
+      if (supplierId) p.supplierId = supplierId
 
       const after = await stockBefore(itemId)
       const checks = [

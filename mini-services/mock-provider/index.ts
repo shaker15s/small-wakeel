@@ -44,13 +44,18 @@ const CORS: Record<string, string> = {
 // Arabic intent detection — the same vocabulary the real model is asked for.
 // [regex, opType, agent tool]
 const WRITE_MAP: [RegExp, string, string][] = [
+  // «اعكس الشرا…» — reversal FIRST: «شرا» inside it would otherwise read as
+  // a brand-new purchase (live R41).
+  [/اعكس|اعكسي|اعكسلي|العكس|ارجع العملية|ارجع الشرا|ارجع البيع|امسح العملية/, "reversal", "reverse_operation"],
   [/تعيين|عدل مخزون|مخزون.*يبقى|الجرد/, "stock_adjustment", "record_stock_adjustment"],
   [/تحصيل|قبضت|استلمت من|حصلت/, "collection", "record_collection"],
   [/اشتراك|عضوية|تجديد|جددت/, "membership", "register_member"],
   [/حضر|حضور|لعب حصة|خلص تدريب/, "attendance", "record_attendance"],
   [/سددت|سداد|دفعت للمورد|دفع للمورد/, "payment", "record_payment"],
   [/مصروف|مصاريف|صرفت/, "expense", "record_expense"],
-  [/اشتريت|شرا|جبت من المورد/, "purchase", "record_purchase"],
+  // «جبت 100 صفيحه سمنه» — جبت + a number is a purchase too (R41: the owner
+  // reports a delivery, not always «جبت من المورد»).
+  [/اشتريت|شرا|جبت من المورد|جبت\s+[\d٠-٩]/, "purchase", "record_purchase"],
   [/بيع|بعت/, "sale", "record_sale"],
   [/ضيف (عميل|عضو)|اضف (عميل|عضو)/, "customer_add", "register_customer"],
   // «ضيف أحمد كمان من اللي عليهم فلوس» — a NAME after ضيف/اضف is a new party
@@ -74,6 +79,10 @@ const READ_MAP: [RegExp, string][] = [
   // «الجبنة الرومي عندي كام كيلو؟»
   [/عندي كام|معايا كام|فاضل كام|باقي كام|رصيد (?:ال)?[^\s]+/, "get_item_stock"],
   [/اللي علينا|الموردين|مستحقات الموردين/, "list_payables"],
+  // «مين خد بضاعه؟» — goods that went out on account = receivables.
+  [/خد بضاعه|اخد بضاعه|بضاعه على حساب|خدها على حساب/, "list_receivables"],
+  // «مين سدد؟» — who settled: the activity history shows it.
+  [/مين سدد|مين دفع|من سدد|السدادات|سدادات/, "get_activity_history"],
   [/اللي ليا|عليها فلوس|عليهم فلوس|مديون|مين عليه|عليه كام|عليها كام|باقي عليه/, "list_receivables"],
   [/بربح|هامش|مكسب|بكسب/, "get_profit_margin"],
   [/هينقص|معدل البيع|متوقع/, "forecast_stockout"],
@@ -115,11 +124,37 @@ function toNum(raw: string): number {
   return Number(out.replace(/[^\d.]/g, ""));
 }
 
-const lastUser = (messages: Msg[]): string => ([...messages].reverse().find((m) => m.role === "user")?.content ?? "").trim();
-/** The OWNER's sentence — the first user message. The harness appends tool
- *  results and instructions as later user messages, and reading THOSE as «the
- *  request» made the fixture answer small talk on write turns (R29 bug). */
-const firstUser = (messages: Msg[]): string => (messages.find((m) => m.role === "user")?.content ?? "").trim();
+// R41: IMEs and web copy-paste leak zero-width + bidi controls INTO words
+// («تقد\u200cر», «عامل\u200fايه»). The fixture's keyword regexes matched the raw
+// text, so a single invisible char turned a real question into «unknown» →
+// canned small-talk — exactly what felt like «البرومبت مبيروح للموديل».
+// Same hygiene as the app's normalizeAr (src/lib/agent/arabic.ts):
+// word-separators become a space, true joiners are removed, tashkeel/tatweel
+// and Arabic-Indic digits are folded so the patterns can see the words.
+const stripInvisible = (t: string): string =>
+  t
+    .replace(/[\u200B\u200E\u200F\u202A-\u202E\u2060\u2061\u2062\u2063\u2064\u2065\u206A-\u206F\uFEFF\u00AD]/g, " ")
+    .replace(/[\u200C\u200D]/g, "")
+    .replace(/[\u064B-\u0652\u0670\u0640]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const lastUser = (messages: Msg[]): string => stripInvisible([...messages].reverse().find((m) => m.role === "user")?.content ?? "");
+/** The OWNER's CURRENT ask — the last user message that is not a tool-result
+ *  injection. Real dialogue history rides as EARLIER user messages, and the
+ *  harness appends tool results + instructions as LATER ones (prefixed «نتايج
+ *  الأدوات»); reading either as «the request» made the fixture answer about a
+ *  stale turn (R29 first-user bug, R41 history leak). */
+const ownerAsk = (messages: Msg[]): string => {
+  const users = messages.filter((m) => m.role === "user");
+  for (let i = users.length - 1; i >= 0; i--) {
+    const c = (users[i].content ?? "").trim();
+    if (!c) continue;
+    if (/^نتايج الأدوات/.test(c)) continue;
+    return stripInvisible(c);
+  }
+  return lastUser(messages);
+};
 /**
  * Tool results the harness fed BACK to us — the messages after the owner's
  * first one. Scanning the system prompt too was a live bug: the agent's
@@ -146,7 +181,7 @@ function passOf(messages: Msg[]): "intent" | "brain" | "reply" {
 }
 
 /** Detect the write/read intent of an Arabic sentence (shared by both passes). */
-function detect(text: string): { kind: "write" | "read" | "chat"; opType?: string; tool?: string; qty?: number; amount?: number; name?: string; itemName?: string } {
+function detect(text: string): { kind: "write" | "read" | "chat" | "schedule"; opType?: string; tool?: string; qty?: number; amount?: number; name?: string; itemName?: string; schedule?: { title: string; when: string; recurrence?: string; tool: string } } {
   const isQuestion = /[؟?]/.test(text);
   // «انصحني إزاي أقلل المصاريف» is ADVICE, not an expense entry — the word
   // «مصاريف» alone used to make the fixture draft a payment (live R29).
@@ -175,8 +210,16 @@ function detect(text: string): { kind: "write" | "read" | "chat"; opType?: strin
         .replace(/[،,؟?].*$/, "")
         .trim()
     : undefined;
-  const nameMatch = addName ? [addName, addName] : (text.match(/(?:من|لـ|ل|لأ|الى|إلى|على)\s+([^،,.؟?\d]+)$/) ?? text.match(/^(?:ضيف|اضف)\s+([^\s،,]+)/));
-  const itemMatch = text.match(/(?:بعت|بيع|اشتريت|شرا|جبت)\s+[\d٠-٩.]*\s*[^\s]*\s*([^،,]+?)(?:\s+(?:لـ|ل|لأ|من|بـ)|$)/);
+  const nameMatch = addName ? [addName, addName] : (text.match(/(?:من|لـ|ل|لأ|الى|إلى|على)\s+([^،,.؟?\d]+)$/) ?? text.match(/(?:^|\s)ل\s*([^،,.؟?\d][^،,.؟?\d]*)$/) ?? text.match(/^(?:ضيف|اضف)\s+([^\s،,]+)/)); // glued «لكابتن حسام» / «ضيف فلان»
+  // Item name: qty + unit consumed, name captured up to a ROLE preposition
+  // (ل/لأ/من/بـ) or a و-continuation («جبت 100 صفيحه سمنه ودفعتله 1000»).
+  const itemMatch = text.match(/(?:بعت|بيع|اشتريت|شرا|جبت)\s+[\d٠-٩.]*\s*[^\s]*\s*([^،,]+?)(?=\s+(?:لـ|ل|لأ|من|بـ|و)|$)/);
+  // an explicit reminder verb owns the sentence («فكرني بفلان بكرة 10 الصبح»)
+  const sched = parseSchedule(text);
+  if (sched) return { kind: "schedule" as const, schedule: sched };
+  if (/(فكرني|فكريني|ذكرني|ذكريني|تذكيرني|تذكيري)/.test(text)) {
+    return { kind: "schedule" as const, schedule: null }; // verb, no clock → ask
+  }
   // a QUESTION about an operation is a READ (unless it is clearly an instruction)
   if (write && !isQuestion) {
     return { kind: "write", opType: write[1], tool: write[2], qty, amount, name: nameMatch?.[1]?.trim(), itemName: itemMatch?.[1]?.trim() };
@@ -209,6 +252,53 @@ function intentJson(text: string): string {
   }
   if (d.kind === "read") return JSON.stringify({ intent: "read", tool: d.tool, fields: queryArgs(text, d.tool!) });
   return JSON.stringify({ intent: "chat", fields: {} });
+}
+
+/** «فكرني بجرد المخزون بكرة 10 الصبح» → a scheduled task. The harness
+ *  re-validates (Cairo clock must be explicit + future; recurrence whitelisted)
+ *  — we only parse, we never assume a time. Evening parts of day shift the
+ *  hour («2 العصر» = 14:00), quarters map to 15/30/45. */
+function parseSchedule(text: string): { title: string; when: string; recurrence?: string; tool: string } | null {
+  if (!/(فكرني|فكريني|ذكرني|ذكريني|تذكيرني|تذكيري)/.test(text)) return null;
+  const recurrence = /كل يوم|يومياً|يومي/.test(text) ? "daily"
+    : /كل اسبوع|اسبوعي|اسبوعيا/.test(text) ? "weekly"
+    : /كل شهر|شهري|شهريا/.test(text) ? "monthly" : undefined;
+  const dayWords = /بعد بكره|بكره|بكرة|النهارده|النهاردة|اليوم|غدًا|غدا|السبت|الاحد|الاثنين|التلات|الاربع|الخميس|الجمعه/;
+  const explicitDay = text.match(/بعد بكره/)?.[0] ?? text.match(dayWords)?.[0] ?? null;
+  // clock: a bare number in the middle of a sentence is NOT a time — the hour
+  // must be followed by a colon, a quarter/half word, a day-part word, or EOL
+  // NOTE: JS \b does NOT work for Arabic letters (they are not \w) — guard
+  // with an explicit Arabic-letter lookahead instead.
+  const hm = text.match(/(?<!\d)([1-9]|1[0-2])(?::([0-5]\d))?\s*(?:والربع|و ربع|ونص|والنص)?\s*(?=\s+(?:الصبح|صباح|العصر|المساء|الليل)(?![\u0600-\u06FF])|$)/);
+  if (!hm) return null; // no clock → the harness asks for a clear future time
+  let hour = parseInt(hm[1], 10);
+  let minute = hm[2] ? parseInt(hm[2], 10) : /والربع|و ربع/.test(text) ? 15 : /ونص|والنص/.test(text) ? 30 : 0;
+  if (/المساء|الليل|بالليل|بتاعة الليل/.test(text) && hour < 12) hour += 12;
+  if (/العصر|بالعصر/.test(text) && hour < 12) hour += 12;
+  const clock = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+  // day: explicit word wins. Without one a one-shot means today (the harness
+  // rejects a past time with a clear message); a RECURRING task whose time
+  // already passed today rolls to tomorrow — «كل يوم 9 الصبح» at night means
+  // the next morning, never the one that just went by.
+  const now = new Date();
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+  const day = explicitDay ?? (recurrence && hour * 60 + minute <= nowMin ? "بكره" : "النهارده");
+  // title = whatever survives after removing the schedule machinery
+  let title = text
+    .replace(/فكرني|فكريني|ذكرني|ذكريني|تذكيرني|تذكيري/g, " ")
+    .replace(/كل يوم|يومياً|يومي|كل اسبوع|اسبوعي|اسبوعيا|كل شهر|شهري|شهريا/g, " ")
+    .replace(/بعد بكره|بكره|بكرة|النهارده|النهاردة|اليوم|غدًا|غدا|السبت|الاحد|الاثنين|التلات|الاربع|الخميس|الجمعه/g, " ")
+    .replace(hm[0], " ")
+    .replace(/والربع|و ربع|ونص|والنص|تلات ارباع|الصبح|صباح|العصر|المساء|الليل|بالليل|بتاعة الليل|بالعصر/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!title) title = "تذكير";
+  // a topic that maps to a real read report runs that report; else a plain reminder
+  const tool = /مخزون|نواقص|ناقص/.test(title) ? "list_low_stock"
+    : /خزانه|خزنة|كاش|رصيدها/.test(title) ? "get_cash_position"
+    : /مديون|عليهم|تحصيل|لهم/.test(title) ? "list_receivables"
+    : "remind";
+  return { title, when: `${day} ${clock}`, recurrence, tool };
 }
 
 /** Tool arguments for a read tool (query/name/days where they apply). */
@@ -246,8 +336,8 @@ function queryArgs(text: string, tool: string): Record<string, unknown> {
 
 /** The brain loop expects tool calls, or a final Arabic sentence. */
 function brainReply(rawText: string, model: string): string {
-  // the owner's ask is the FIRST user message; later user messages are tool
-  // results + instructions from the harness (see firstUser)
+  // the owner's CURRENT ask (see ownerAsk) — history and tool-result
+  // injections are user messages too and must not be read as the request
   const text = rawText;
   const d = detect(text);
   if (d.kind === "write") {
@@ -262,7 +352,53 @@ function brainReply(rawText: string, model: string): string {
       const mb = text.match(/(?:وعليه|وعليها|عليه|عليها|رصيده|مديونيته)\s*(?:بـ|ب)?\s*([\d٠-٩]+)/);
       if (mb) args.balance = toNum(mb[1]);
     }
-    return JSON.stringify({ tool_calls: [{ tool: d.tool, args }] });
+    // «اشتراك سنوي» — the plan word is a field, not the name
+    if (d.opType === "membership") {
+      const plan = /سنوي|سنه/.test(text) ? "سنوي" : /شهري|شهرا/.test(text) ? "شهري" : /ربع/.test(text) ? "ربع" : undefined;
+      if (plan) args.plan = plan;
+    }
+    // «جبت 100 صفيحه سمنه ودفعتله 1000 بس» — the number after a payment verb
+    // is the CASH handed over (a partial payment is fine), never the total.
+    if (d.opType === "purchase" && d.amount != null && /دفع|دفعت|دفعتله|خلصت|ادفع/.test(text)) {
+      args.paid = d.amount;
+    }
+    // reversal: a WKL ref, if the owner typed one — otherwise the harness
+    // resolves the most recent matching operation from the summary.
+    if (d.opType === "reversal") {
+      const r = text.match(/WKL-\d+/);
+      if (r) args.ref = r[0];
+    }
+    // R41 multi-intent: one sentence, two jobs — «ملخص اليوم وبعت ٥ عود».
+    // The read word must sit at a segment boundary (start / after و / كمان /
+    // comma) so a write continuation («…ودفعتله 1000 بس النهارده») never
+    // fans out into a spurious second tool.
+    const calls: { tool: string; args: Record<string, unknown> }[] = [{ tool: d.tool, args }];
+    const READ_BOUNDARY =
+      /(^|[و،,]|\sو\s*)(?:ملخص|النهارده|النهارده|الوضع|الخزنه|الخزنة|كاش|نواقص|ناقص|مبيعات|مصاريف|مصروفات|اللي ليا|اللي عليهم|اللي علينا|مستحقات|مديون)/;
+    if (READ_BOUNDARY.test(text)) {
+      const readHit = READ_MAP.find(([re]) => re.test(text));
+      if (readHit) calls.push({ tool: readHit[1], args: queryArgs(text, readHit[1]) });
+    }
+    return JSON.stringify({ tool_calls: calls });
+  }
+  if (d.kind === "schedule" && !d.schedule) {
+    return "تمام — بس اكتبلي الموعد بالتفصيل وأنا أحتفظ بالمهمة: «فكرني بمراجعة الحسابات بكرة 5 العصر».";
+  }
+  if (d.kind === "schedule" && d.schedule) {
+    const sc = d.schedule;
+    return JSON.stringify({
+      tool_calls: [{
+        tool: "schedule_task",
+        args: {
+          title: sc.title,
+          whenLabel: sc.when,
+          when: sc.when,
+          ...(sc.recurrence ? { recurrence: sc.recurrence } : {}),
+          tool: sc.tool,
+          fields: {},
+        },
+      }],
+    });
   }
   if (d.kind === "read") {
     // A compound request («الخزنة والنواقص») becomes ONE programmatic plan call —
@@ -280,9 +416,24 @@ function brainReply(rawText: string, model: string): string {
     }
     return JSON.stringify({ tool_calls: [{ tool: d.tool, args: queryArgs(text, d.tool!) }] })
   }
-  const cfg = TIERS[model] ?? TIERS["wakil-mock-balanced"]
-  void cfg
-  return "تحت أمرك يا فندم — أنا وكيل الشغل بتاعك. قولّي تحب نعمل إيه: بيع، شرا، تحصيل، أو سؤال عن المخزون والخزنة؟";
+  // ---- no tool matched: CONVERSE like an employee, never a wall. ----
+  // A rude probe gets a calm human answer, a capability question gets the
+  // real capabilities, and anything else is echoed + steered to what works —
+  // with rotation so the fixture never sounds like a broken record.
+  const hash = [...text].reduce((s, c) => s + c.codePointAt(0), 0)
+  if (/اهبل|هبل|غبي|مسخرة|تافه|عديم|.useless/.test(text)) {
+    return "ههه — مش اهبل يا فندم، بس لو في حاجة عملتها غلط اكتبها بالظبط وأنا أصلحها فورًا. اعملي خير: اكتب اللي عايزه وأنا شغال."
+  }
+  if (/مهمه مجدوله|مهام مجدوله|تقدر|تعمل (?:مهمه|اكتر|أكتر)|اكتر من (?:مهمه|طلب|شغل)|تسألني|تسألنى|وتكمل شغل|وسالني/.test(text)) {
+    return "إيه طبعًا يا فندم — ده شغلي بالضبط: (١) أجدول مهمة بوقتها وتنفذ لوحدها (قولي: «فكرني بجرد المخزون كل يوم 9 الصبح»). (٢) أعمل أكتر من طلب في رسالة واحدة — زي «ملخص النهارده وبعت 5 عود». (٣) لو ناقصني رقم أو اسم، أكمّلك سؤال واحد وأكمّل الشغل من غير ما نبدأ من الأول. جرب دلوقتي — اكتب «فكرني بفلان بكرة 10 الصبح»."
+  }
+  const echo = text.replace(/[؟?]+$/, "").trim().slice(0, 70)
+  const fallbacks = [
+    `فهمتك — «${echo}». من سجلك أقدر أطلعك على: الخزنة، المخزون والنواقص، مين خد بضاعه ومين سدد (مديونيات العملاء والموردين)، وملخص اليوم والأسبوع. اكتب أي واحدة بالكلام العادي وأنا أعملها فورًا.`,
+    `وصلتني — «${echo}». لو دي عن أرقام الشغل (خزنة، مخزون، مديونيات، ملخص) اكتبها وأنا أجيبها من السجل. ولو سؤال عام — في الديمو ده شغلي الأساسي هو أرقام سجلك.`,
+    `قصدك «${echo}»؟ في الديمو ده شغال على أرقام سجلك: الخزنة، المخزون، مديونيات العملاء والموردين، والملخصات — اطلب أي واحد بالكلام العادي.`,
+  ]
+  return fallbacks[hash % fallbacks.length]
 }
 
 function buildReply(model: string, messages: Msg[]): { reasoning: string[]; content: string } {
@@ -291,9 +442,9 @@ function buildReply(model: string, messages: Msg[]): { reasoning: string[]; cont
   const reasoning = [...REASONING_POOL].sort(() => Math.random() - 0.5).slice(0, n);
   const text = lastUser(messages);
   const pass = passOf(messages);
-  // The OWNER's ask is always the first user message; the harness appends tool
-  // results + instructions afterwards.
-  const ownerText = firstUser(messages) || text;
+  // The OWNER's current ask — the last real user message (ownerAsk skips
+  // history + tool-result injections).
+  const ownerText = ownerAsk(messages) || text;
 
   if (pass === "intent") return { reasoning, content: intentJson(ownerText) };
   if (pass === "brain") return { reasoning, content: brainReply(isFinalAsk(messages) ? text : ownerText, model) };
@@ -329,7 +480,7 @@ function buildReply(model: string, messages: Msg[]): { reasoning: string[]; cont
 }
 
 async function chat(req: Request) {
-  let body: { model?: string; messages?: Msg[]; stream?: boolean };
+  let body: { model?: string; messages?: Msg[]; stream?: boolean; tools?: unknown[] };
   try {
     body = await req.json();
   } catch {
@@ -338,11 +489,42 @@ async function chat(req: Request) {
   const messages = Array.isArray(body?.messages) ? body.messages : [];
   if (messages.length === 0) return json({ error: { message: "messages[] is required" } }, 400);
   const model = (MODELS as readonly string[]).includes(body.model ?? "") ? body.model! : "wakil-mock-balanced";
+  // Audit trail: one line per request so «is my prompt reaching the provider?»
+  // is answerable from the process log, not guessed.
+  const lastUser = [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
+  const sysChars = messages.filter((m) => m.role === "system").reduce((n, m) => n + String(m.content ?? "").length, 0);
+  const toolsN = Array.isArray(body.tools) ? body.tools.length : 0;
+  console.log(`[mock] model=${model} msgs=${messages.length} sysChars=${sysChars} tools=${toolsN} user="${String(lastUser).slice(0, 90).replace(/\n/g, " ")}"`);
   const { reasoning, content } = buildReply(model, messages);
   const id = uid();
   const created = Math.floor(Date.now() / 1000);
 
   if (!body.stream) {
+    // Native tool calling: when the harness sent a `tools` schema array and
+    // this is a tool-call answer, return REAL OpenAI tool_calls (not JSON in
+    // text) — exactly what DeepSeek/OpenAI/OpenRouter do on the wire.
+    if (toolsN > 0 && typeof content === "string" && content.trim().startsWith("{") && content.includes('"tool_calls"')) {
+      try {
+        const parsed = JSON.parse(content) as { tool_calls?: { tool?: string; args?: Record<string, unknown> }[] };
+        const native = (parsed.tool_calls ?? []).filter((c) => typeof c?.tool === "string").map((c, i) => ({
+          id: `call_${i + 1}`,
+          type: "function",
+          function: { name: c.tool, arguments: JSON.stringify(c.args ?? {}) },
+        }));
+        if (native.length > 0) {
+          return json({
+            id,
+            object: "chat.completion",
+            created,
+            model,
+            choices: [{ index: 0, message: { role: "assistant", content: null, tool_calls: native }, finish_reason: "tool_calls" }],
+            usage: { prompt_tokens: 96, completion_tokens: 48, total_tokens: 144 },
+          });
+        }
+      } catch {
+        /* not tool JSON after all — fall through to text */
+      }
+    }
     return json({
       id,
       object: "chat.completion",

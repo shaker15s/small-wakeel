@@ -73,6 +73,7 @@ export const AGENT_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   'record_expense',
   'register_member',
   'record_attendance',
+  'reverse_operation',
   'memory_save',
   'memory_forget',
   // R18 brain tools

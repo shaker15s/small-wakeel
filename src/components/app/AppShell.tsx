@@ -242,16 +242,26 @@ export function AppShell() {
               const active = view === key
               return (
                 <button
-                  key={key}
-                  onClick={() => setView(key)}
-                  aria-current={active ? 'page' : undefined}
-                  className={`press focus-warm flex min-h-[52px] flex-col items-center justify-center gap-0.5 text-[10px] font-medium transition-transform active:scale-95 ${
-                    active ? 'text-primary' : 'text-muted-foreground'
-                  }`}
-                >
-                  <Icon className={`size-5 transition-transform ${active ? 'scale-110' : ''}`} />
-                  {VIEW_LABELS[key]}
-                </button>
+                    key={key}
+                    onClick={() => setView(key)}
+                    aria-current={active ? 'page' : undefined}
+                    className={`press focus-warm relative flex min-h-[52px] flex-col items-center justify-center gap-0.5 text-[10px] font-medium transition-colors active:scale-95 ${
+                      active ? 'text-primary' : 'text-muted-foreground'
+                    }`}
+                  >
+                    {active ? (
+                      <motion.span
+                        layoutId="mobile-tab-pill"
+                        transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+                        className="absolute top-1.5 flex h-7 items-center justify-center rounded-full bg-primary/10 px-3"
+                        aria-hidden
+                      />
+                    ) : null}
+                    <span className="relative flex h-7 items-center justify-center">
+                      <Icon className={`relative size-5 transition-transform duration-200 ${active ? 'scale-110' : ''}`} />
+                    </span>
+                    {VIEW_LABELS[key]}
+                  </button>
               )
             })}
           </nav>
@@ -269,7 +279,7 @@ export function AppShell() {
       <BusinessBuilderModal />
       <PluginAndTaskStudioModal />
       {/* ===== header ===== */}
-      <header className="relative z-40 shrink-0 border-b border-border/70 bg-card/80 backdrop-blur-md">
+      <header className="glass-strong relative z-40 shrink-0 border-b border-border/70">
         <div className="mx-auto flex h-14 w-full max-w-none items-center gap-2 px-3 sm:px-4">
           {/* business switcher — instant portal popover (R18) */}
           <BusinessMenu
@@ -416,7 +426,7 @@ export function AppShell() {
                   <motion.span
                     layoutId="nav-active-pill"
                     transition={{ type: 'spring', stiffness: 400, damping: 34 }}
-                    className="absolute inset-0 -z-10 rounded-full bg-primary shadow-sm"
+                    className="absolute inset-0 -z-10 rounded-full shadow-[0_4px_14px_-4px_rgb(24_47_82/0.5)] [background:linear-gradient(135deg,var(--primary),color-mix(in_oklab,var(--primary)_70%,var(--wakil-amber)))]"
                     aria-hidden
                   />
                 )}
@@ -431,17 +441,24 @@ export function AppShell() {
       {/* ===== main — other views scroll inside ===== */}
       <main className="mx-auto min-h-0 w-full max-w-none flex-1 overflow-hidden">
         <div className="scroll-warm h-full overflow-y-auto overflow-x-clip px-3 pb-24 pt-4 sm:px-0 sm:pb-10">
-          {view === 'today' && <TodayView businessId={activeBusiness.id} userId={activeUser.id} onNavigate={setView} />}
-          {view === 'inventory' && <InventoryView businessId={activeBusiness.id} userId={activeUser.id} onNavigate={setView} />}
-          {view === 'journal' && <JournalView businessId={activeBusiness.id} userId={activeUser.id} onNavigate={setView} />}
-          {view === 'accounts' && <AccountsView businessId={activeBusiness.id} userId={activeUser.id} onNavigate={setView} />}
-          {view === 'stats' && <StatsView businessId={activeBusiness.id} userId={activeUser.id} onNavigate={setView} />}
-          {view === 'reports' && <ReportsView businessId={activeBusiness.id} userId={activeUser.id} businessName={activeBusiness.name} />}
-          {view === 'memory' && <MemoryView businessId={activeBusiness.id} userId={activeUser.id} onNavigate={setView} />}
-          {view === 'settings' && <SettingsView businessId={activeBusiness.id} userId={activeUser.id} onNavigate={setView} />}
-          <p className="hidden pt-8 text-center text-[11px] text-muted-foreground sm:block">
-            وكيل — مساعد شغلك اليومي · كل عملية بتتحقق قبل ما تتسجل
-          </p>
+          <motion.div
+            key={view}
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+          >
+            {view === 'today' && <TodayView businessId={activeBusiness.id} userId={activeUser.id} onNavigate={setView} />}
+            {view === 'inventory' && <InventoryView businessId={activeBusiness.id} userId={activeUser.id} onNavigate={setView} />}
+            {view === 'journal' && <JournalView businessId={activeBusiness.id} userId={activeUser.id} onNavigate={setView} />}
+            {view === 'accounts' && <AccountsView businessId={activeBusiness.id} userId={activeUser.id} onNavigate={setView} />}
+            {view === 'stats' && <StatsView businessId={activeBusiness.id} userId={activeUser.id} onNavigate={setView} />}
+            {view === 'reports' && <ReportsView businessId={activeBusiness.id} userId={activeUser.id} businessName={activeBusiness.name} />}
+            {view === 'memory' && <MemoryView businessId={activeBusiness.id} userId={activeUser.id} onNavigate={setView} />}
+            {view === 'settings' && <SettingsView businessId={activeBusiness.id} userId={activeUser.id} onNavigate={setView} />}
+            <p className="hidden pt-8 text-center text-[11px] text-muted-foreground sm:block">
+              وكيل — مساعد شغلك اليومي · كل عملية بتتحقق قبل ما تتسجل
+            </p>
+          </motion.div>
         </div>
       </main>
 
@@ -454,16 +471,26 @@ export function AppShell() {
             const active = view === key
             return (
               <button
-                key={key}
-                onClick={() => setView(key)}
-                aria-current={active ? 'page' : undefined}
-                className={`press focus-warm flex min-h-[52px] flex-col items-center justify-center gap-0.5 text-[10px] font-medium transition-transform active:scale-95 ${
-                  active ? 'text-primary' : 'text-muted-foreground'
-                }`}
-              >
-                <Icon className={`size-5 transition-transform ${active ? 'scale-110' : ''}`} />
-                {VIEW_LABELS[key]}
-              </button>
+                  key={key}
+                  onClick={() => setView(key)}
+                  aria-current={active ? 'page' : undefined}
+                  className={`press focus-warm relative flex min-h-[52px] flex-col items-center justify-center gap-0.5 text-[10px] font-medium transition-colors active:scale-95 ${
+                    active ? 'text-primary' : 'text-muted-foreground'
+                  }`}
+                >
+                  {active ? (
+                    <motion.span
+                      layoutId="mobile-tab-pill"
+                      transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+                      className="absolute top-1.5 flex h-7 items-center justify-center rounded-full bg-primary/10 px-3"
+                      aria-hidden
+                    />
+                  ) : null}
+                  <span className="relative flex h-7 items-center justify-center">
+                    <Icon className={`relative size-5 transition-transform duration-200 ${active ? 'scale-110' : ''}`} />
+                  </span>
+                  {VIEW_LABELS[key]}
+                </button>
             )
           })}
         </nav>

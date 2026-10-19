@@ -7,6 +7,13 @@
 export function normalizeAr(input: string): string {
   return input
     .trim()
+    // R41: invisible chars that break exact-match greeting/keyword patterns. IMEs
+    // and web copy-paste leak zero-width + bidi controls («عامل\u200Fايه ؟»
+    // used to miss the greeting). Formatting controls that SPLIT words become
+    // a space (deleting them would glue «عامل\u200Fايه» into «عاملايه»);
+    // the true joiners (ZWNJ/ZWJ) are removed — they live INSIDE a word.
+    .replace(/[\u200B\u200E\u200F\u202A-\u202E\u2060\u2061\u2062\u2063\u2064\u2065\u206A-\u206F\uFEFF\u00AD]/g, ' ')
+    .replace(/[\u200C\u200D]/g, '')
     .replace(/[\u064B-\u0652\u0670\u0640]/g, '') // tashkeel + tatweel
     .replace(/[أإآٱ]/g, 'ا')
     .replace(/ى/g, 'ي')
@@ -15,6 +22,7 @@ export function normalizeAr(input: string): string {
     .replace(/ة/g, 'ه')
     .replace(/\s+/g, ' ')
     .toLowerCase()
+    .trim() // invisible chars became spaces — a leading/trailing one must not survive
 }
 
 const AR_DIGITS = '٠١٢٣٤٥٦٧٨٩'
@@ -92,7 +100,7 @@ const UNIT_WORD_TO_CODE: [RegExp, string][] = [
   [/علبه?|علب|صندوق|صناديق|كرتونه?|كراتين/, 'box'],
   [/شريط|شرايط|شرائط/, 'strip'],
   [/كبسوله?|كبسولات/, 'capsule'],
-  [/قطعه?|قطع|عدد|حبه?|حبات/, 'piece'],
+  [/قطعه?|قطع|عدد|حبه?|حبات|زجاجه?|زجاجات|برطمان/, 'piece'],
   [/حصص?|جلسه?|جلسات/, 'session'],
 ]
 
@@ -224,18 +232,51 @@ export function matchEntity<T extends { name: string; aliases?: string | null }>
         // the typed sentence contains the catalog name («بعت ٢ كيلو رز مصري»)
         score = 0.8 - (Math.abs(nn.length - q.length) / Math.max(nn.length, q.length, 8)) * 0.2
       } else {
-        // word overlap only — a shared 3-letter fragment is never a match
+        // word overlap only — a shared 3-letter fragment is never a match.
+        // R44: counter/measure and function words never count as evidence —
+        // «بعت ١٠ حبة بن محوج» used to match «زيت حبة البركة» on the bare
+        // counter word «حبة» (live R44).
         const qt = wordSet(q)
         const nt = wordSet(nn)
+        let meaningful = 0
         let hits = 0
-        for (const t of qt) if (nt.has(t)) hits++
-        if (qt.size > 0 && hits > 0) score = 0.6 + 0.2 * (hits / qt.size)
+        for (const t of qt) {
+          if (GENERIC_MATCH_WORDS.has(t)) continue
+          meaningful++
+          if (nt.has(t)) {
+            hits++
+          } else if (t.length >= 4) {
+            // R44: a truncated spelling is still evidence — «كوكا» for
+            // «كوكاكولا» (half a hit, and only for 4+ letter words so tiny
+            // tokens can't create false bridges).
+            for (const n of nt) {
+              if (n.length >= 4 && (n.startsWith(t) || t.startsWith(n))) {
+                hits += 0.5
+                break
+              }
+            }
+          }
+        }
+        if (meaningful > 0 && hits > 0) score = 0.6 + 0.2 * (hits / meaningful)
       }
       if (score > 0 && (!best || score > best.score)) best = { entity: c, score }
     }
   }
   return best && best.score >= 0.55 ? best : null
 }
+
+/** Words that are never entity evidence: counters/measures, money, questions,
+ * verbs and connectors (R44). A match on these alone is a false positive. */
+const GENERIC_MATCH_WORDS = new Set([
+  'حبه', 'حبة', 'قطعه', 'قطعة', 'كيس', 'اكياس', 'علبه', 'علبة', 'علب', 'شريط', 'طبق', 'اطباق',
+  'زجاجه', 'زجاجة', 'برطمان', 'باكيت', 'سلفه', 'صفيحه', 'كرتون', 'كرتونه', 'جركن', 'براد',
+  'ربطه', 'سرفه', 'دوزه', 'جمله', 'جمله',
+  'جنيه', 'جنيه', 'ج.م', 'الف', 'آلاف', 'قبرص', 'قرص', 'اقراص', 'اطلاع',
+  'كام', 'قد', 'قدايه', 'ايه', 'إيه', 'مين', 'من', 'في', 'ف', 'علي', 'على', 'عن', 'مع', 'ول', 'او',
+  'بعت', 'بيع', 'بع', 'شرا', 'اشتريت', 'جبت', 'حصلت', 'قبضت', 'استلمت', 'سددت', 'دفعت', 'صرفت',
+  'سجل', 'سجلت', 'ضيف', 'اضف', 'ضف', 'اعمل', 'عملي', 'اعكس',
+  'اليوم', 'النهارده', 'امبارح', 'الاسبوع', 'الشهر', 'دلوقتي', 'بس', 'فقط', 'تمام',
+])
 
 /** Extract candidate entities mentioned in free text (for multi-item messages). */
 export function findMentions<T extends { name: string; aliases?: string | null }>(
@@ -248,7 +289,9 @@ export function findMentions<T extends { name: string; aliases?: string | null }
     const names = [c.name, ...(c.aliases ? c.aliases.split(',').map((a) => a.trim()) : [])]
     for (const n of names) {
       const nn = normalizeAr(n)
-      if (nn && nn.length >= 3 && s.includes(nn)) {
+      // R44 audit: word-bounded containment — a plain includes() lets the
+      // alias «كولا» fire inside «شوكولاتة» (the R29 live bug class).
+      if (nn && nn.length >= 3 && wordBounded(s, nn)) {
         found.push(c)
         break
       }

@@ -8,6 +8,7 @@
 
 import type { LucideIcon } from 'lucide-react'
 import { AlertCircle, RefreshCw } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
 import { motion, useReducedMotion } from 'framer-motion'
 
 import { AgentAvatar } from '@/components/chat/AgentAvatar'
@@ -109,6 +110,42 @@ export const RECURRENCE_AR: Record<string, string> = {
 }
 
 export const arNum = (n: number): string => new Intl.NumberFormat('ar-EG').format(n)
+
+// ---------------------------------------------------------------------------
+// Count-up — a KPI number that MEASURES itself into place (easeOutQuart,
+// ~650ms). Reduced-motion users get the final value instantly. Re-animates
+// from the previous value when the target changes, so refetches read as
+// «the number moved», not as a page repaint.
+// ---------------------------------------------------------------------------
+function useCountUp(target: number, duration = 650): number {
+  const reduced = useReducedMotion()
+  const [val, setVal] = useState(target)
+  const fromRef = useRef(target)
+  const first = useRef(true)
+  useEffect(() => {
+    if (reduced || duration <= 0) {
+      fromRef.current = target
+      setVal(target)
+      return
+    }
+    // first paint starts from zero — the number is «counted in»
+    const from = first.current ? 0 : fromRef.current
+    first.current = false
+    const t0 = performance.now()
+    let raf = 0
+    const tick = (t: number) => {
+      const p = Math.min(1, (t - t0) / duration)
+      const e = 1 - Math.pow(1 - p, 4)
+      const v = from + (target - from) * e
+      setVal(v)
+      if (p < 1) raf = requestAnimationFrame(tick)
+      else fromRef.current = target
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [target, duration, reduced])
+  return val
+}
 
 // ---------------------------------------------------------------------------
 // Money
@@ -223,6 +260,8 @@ export function KpiCard({
   tone = 'navy',
   title,
   index,
+  rawValue,
+  formatValue,
 }: {
   label: string
   value: React.ReactNode
@@ -231,11 +270,16 @@ export function KpiCard({
   title?: string
   /** position in the grid — staggers the enter animation by 40ms */
   index?: number
+  /** when given (with formatValue), the number counts itself into place */
+  rawValue?: number
+  formatValue?: (n: number) => string
 }) {
+  const animated = rawValue != null && formatValue
+  const counted = useCountUp(rawValue ?? 0)
   return (
     <div
       className={cn(
-        'chip-lift group relative flex h-24 flex-col justify-between overflow-hidden rounded-xl border bg-gradient-to-b from-card to-card/60 p-4 shadow-sm sm:h-28 sm:p-5',
+        'surface surface-lift group relative flex h-24 flex-col justify-between overflow-hidden rounded-xl p-4 sm:h-28 sm:p-5',
         index != null ? 'list-enter' : 'card-enter',
       )}
       style={index != null ? { animationDelay: `${index * 40}ms` } : undefined}
@@ -249,7 +293,7 @@ export function KpiCard({
         <span className="text-xs font-medium text-muted-foreground sm:text-[13px]">{label}</span>
         <span
           className={cn(
-            'icon-wiggle flex size-7 shrink-0 items-center justify-center rounded-lg transition-transform duration-200 group-hover:scale-110',
+            'icon-wiggle icon-seat-tinted size-8 shrink-0 transition-transform duration-200 group-hover:scale-110',
             KPI_ICON_BG[tone],
           )}
         >
@@ -258,11 +302,11 @@ export function KpiCard({
       </div>
       <div
         className={cn(
-          'num truncate text-xl font-bold leading-none tabular-nums sm:text-[1.7rem]',
+          'num truncate text-xl font-bold leading-none tracking-tight tabular-nums sm:text-[1.7rem]',
           KPI_TONE_TEXT[tone],
         )}
       >
-        {value}
+        {animated ? formatValue!(counted) : value}
       </div>
     </div>
   )
@@ -401,7 +445,7 @@ export function SectionCard({
   return (
     <section
       className={cn(
-        'card-enter card-sheen rounded-xl border bg-card shadow-sm',
+        'card-enter card-sheen surface rounded-xl',
         accent && 'relative overflow-hidden',
         className,
       )}
@@ -418,8 +462,12 @@ export function SectionCard({
       <div className="flex items-start justify-between gap-2 border-b px-4 py-3 sm:px-6">
         <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-2">
-            {Icon && <Icon className="size-4 shrink-0 text-wakil-amber" aria-hidden />}
-            <h2 className="truncate text-sm font-semibold">{title}</h2>
+            {Icon ? (
+              <span className="icon-seat-tinted size-6 shrink-0 bg-wakil-amber/10 text-wakil-amber">
+                <Icon className="size-3.5" aria-hidden />
+              </span>
+            ) : null}
+            <h2 className="truncate text-[15px] font-bold tracking-tight">{title}</h2>
           </div>
           {subtitle && (
             <p className="mt-0.5 ps-6 text-xs leading-relaxed text-muted-foreground">{subtitle}</p>
@@ -456,8 +504,14 @@ export function ViewHeader({
   return (
     <header className="flex flex-wrap items-end justify-between gap-3 pb-1">
       <div className="min-w-0">
-        <h1 className="text-2xl font-bold tracking-tight sm:text-[1.7rem]">{title}</h1>
-        {subtitle && <p className="mt-1 text-sm text-muted-foreground">{subtitle}</p>}
+        <div className="flex items-center gap-2.5">
+          <span
+            aria-hidden
+            className="h-7 w-1 shrink-0 rounded-full bg-gradient-to-b from-wakil-amber to-wakil-amber/30 sm:h-8"
+          />
+          <h1 className="text-[1.6rem] font-bold leading-tight tracking-tight sm:text-3xl">{title}</h1>
+        </div>
+        {subtitle && <p className="mt-1.5 ps-3.5 text-sm text-muted-foreground">{subtitle}</p>}
       </div>
       {action}
     </header>
