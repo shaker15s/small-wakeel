@@ -34,6 +34,7 @@ export type ReadTool =
   | 'get_customer_history'
   | 'get_supplier_history'
   | 'get_contact_info'
+  | 'get_financial_position'
   | 'compare_periods'
   | 'expense_breakdown'
   | 'get_period_totals'
@@ -75,6 +76,7 @@ export const READ_TOOLS: ReadonlySet<string> = new Set<string>([
   'get_customer_history',
   'get_supplier_history',
   'get_contact_info',
+  'get_financial_position',
   'compare_periods',
   'expense_breakdown',
   'search_web',
@@ -456,6 +458,42 @@ export async function runReadTool(
       ]
     }
 
+    case 'get_financial_position': {
+      // R55 — «فلوسي واقفين فين؟» — the owner's single snapshot of where the
+      // money sits: cash + at the customers + on the shelves − owed to
+      // suppliers = working capital. Same readers as get_cash_position and
+      // get_stock_value so every screen adds the ledger the same way.
+      const [cashEntries, customers, suppliers, items] = await Promise.all([
+        db.cashEntry.findMany({ where: { businessId }, select: { direction: true, amount: true } }),
+        db.customer.findMany({ where: { businessId }, select: { balance: true } }),
+        db.supplier.findMany({ where: { businessId }, select: { balance: true } }),
+        db.item.findMany({ where: { businessId } }),
+      ])
+      const cash =
+        biz.openingCash + cashEntries.reduce((s, e) => s + (e.direction === 'in' ? e.amount : -e.amount), 0)
+      const receivables = customers.reduce((s, c) => s + Math.max(0, c.balance), 0)
+      const payables = suppliers.reduce((s, sp) => s + Math.max(0, sp.balance), 0)
+      const stock = items.reduce((s, it) => s + it.stockQty * it.costPrice, 0)
+      const net = cash + receivables + stock - payables
+      return [
+        {
+          kind: 'kv',
+          title: 'المركز المالي — فلوسي واقفين فين',
+          rows: [
+            { label: 'كاش في الخزنة', value: egp(cash) },
+            { label: 'فلوسي عند العملاء', value: egp(receivables) },
+            { label: 'بضاعة على الرف (تكلفة)', value: egp(stock) },
+            { label: 'علينا للموردين', value: `- ${egp(payables)}` },
+            { label: 'رأس المال العامل التقريبي', value: egp(net) },
+          ],
+        },
+        {
+          kind: 'text',
+          title: 'ببساطة',
+          body: `فلوسك دلوقتي: ${egp(cash)} كاش في الخزنة + ${egp(receivables)} عند العملاء + ${egp(stock)} بضاعة على الرف، ومعنا ${egp(payables)} عند الموردين. الصافي التقريبي ${egp(net)}.`,
+        },
+      ]
+    }
     case 'get_stock_value': {
       // «المخزون ده مكلّفني كام؟» — the capital asleep on the shelves. The
       // owner asks this before every restock, and it must be exact: cost basis

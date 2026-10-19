@@ -255,6 +255,10 @@ export const CASES: EvalCase[] = [
   { text: 'رقم تليفون سمير غنيم', vertical: 'supermarket', expect: 'رقم مش مسجل: نتيجة صادقة (مش رقم من عند واحد تاني)', check: (r) => String(JSON.stringify(r.cards)).includes('مش مسجل') },
   { text: 'رقم تليفون عميل مش موجود؟', vertical: 'supermarket', expect: 'اسم مش في السجل: نتيجة صادقة (ملقيتش)', check: (r) => cards(1)(r) && String(JSON.stringify(r.cards)).includes('ملقيتش') },
 
+  // ---- R55: the whole-money question — where is my money sitting? ----
+  { text: 'فلوسي واقفين فين؟', vertical: 'supermarket', expect: 'المركز المالي: كاش + عند العملاء + المخزون - الموردين', check: (r) => String(JSON.stringify(r.cards)).includes('رأس المال') && String(JSON.stringify(r.cards)).includes('كاش في الخزنة') },
+  { text: 'المركز المالي', vertical: 'supermarket', expect: 'نفس السؤال بصيغة رسمية: نفس الكارت', check: (r) => String(JSON.stringify(r.cards)).includes('فلوسي عند العملاء') },
+
 
   // ---- R51: the everyday balance question must not die offline ----
   { text: 'كم علي أم حسن؟', vertical: 'supermarket', expect: 'رصيد العميل (مش «النت تقيل»)', check: (r) => all(noCard, saysNot('النت شكله تقيل'))(r) && String(r.replyText).length >= 30 },

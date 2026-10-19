@@ -279,6 +279,7 @@ const TOOL_ACTIONS: Record<string, ChatActionDTO[]> = {
   list_payables: [{ id: 'act-list_payables', label: 'حسابات الموردين', view: 'accounts', icon: 'users', tone: 'primary' }],
   get_supplier_history: [{ id: 'act-get_supplier_history', label: 'حسابات الموردين', view: 'accounts', icon: 'users', tone: 'primary' }],
   get_contact_info: [{ id: 'act-get_contact_info', label: 'جهات الاتصال', view: 'accounts', icon: 'users', tone: 'primary' }],
+  get_financial_position: [{ id: 'act-get_financial_position', label: 'المركز المالي', view: 'reports', icon: 'wallet', tone: 'primary' }],
   get_activity_history: [{ id: 'act-get_activity_history', label: 'سجل العمليات', view: 'journal', icon: 'journal', tone: 'primary' }],
   search_catalog: [{ id: 'act-search_catalog', label: 'افتح المخزون', view: 'inventory', icon: 'boxes', tone: 'primary' }],
   get_item_stock: [{ id: 'act-get_item_stock', label: 'افتح المخزون', view: 'inventory', icon: 'boxes', tone: 'primary' }],
@@ -300,6 +301,7 @@ const TOOL_LABEL_AR: Record<string, string> = {
   list_payables: 'مستحقات الموردين',
   get_supplier_history: 'ملف المورد',
   get_contact_info: 'رقم التليفون',
+  get_financial_position: 'المركز المالي',
   list_expiring: 'الصلاحيات القريبة',
   search_catalog: 'بحث في الكتالوج',
   get_item_stock: 'رصيد صنف',
@@ -537,6 +539,11 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
       }
     }
   }
+  // R55: «فلوسي واقفين فين؟» / «المركز المالي» / «ماليي كام؟» — the whole money
+  // picture (cash + receivables + stock − payables). The cashbox rule owns
+  // «الخزنة/كاش» alone, so any sentence that names the cashbox skips us.
+  if (/(المركز المالي|فلوسي (واقفين فين|فين|كام|اتعمل)|اموالي (فين|كام)|ماليي)/.test(s) && !/خزنه|كاش/.test(s))
+    return { intent: 'read', tool: 'get_financial_position', fields: {} }
   if (/(وضع|رصيد|حاله) الخزنه|الخزنه|كاش/.test(s)) return { intent: 'read', tool: 'get_cash_position', fields: {} }
   // ---- R36: the weekly ledger questions, answered deterministically -------
   // They must sit BEFORE the generic «مخزون/ناقص» rule: «المخزون ده مكلّفني
@@ -4773,6 +4780,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       'get_profit_by_item',
       'get_supplier_history',
       'get_contact_info',
+      'get_financial_position',
     ])
     if (!SAFE.has(r.tool)) return null
     const hasDigits = /[0-9٠-٩۰-۹]/.test(text)

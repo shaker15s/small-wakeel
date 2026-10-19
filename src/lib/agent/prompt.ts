@@ -16,6 +16,7 @@ import type { OpType } from '@/lib/types'
 import type { Item, Customer, Supplier, Business, User } from '@prisma/client'
 import { egp } from '@/lib/format'
 import { getVertical } from '@/lib/verticals'
+import { brainToolSections } from './tool-schemas'
 import { appSkillsPromptBlock } from '@/lib/agent/cli-anything/app-skills'
 import type { BusinessSnapshot } from './memory'
 import { memoryQuotesForAdvisory } from './memory'
@@ -60,39 +61,6 @@ export function cairoNowAr(): string {
   } catch {
     return new Date().toISOString()
   }
-}
-
-/** Read tools available per vertical — SORTED ALPHABETICALLY (prompt discipline). */
-function readToolsFor(businessType: string): string[] {
-  const v = getVertical(businessType)
-  const gym = v.features.memberships
-  const expiry = v.features.expiry
-  return [
-    'analyze_profitability',
-    'forecast_stock',
-    'get_activity_history',
-    'get_cash_position',
-    'get_daily_summary',
-    'get_item_stock',
-    ...(gym ? ['get_member_status'] : []),
-    'get_proactive_insights',
-    'get_supplier_balance',
-    'get_transaction_status',
-    ...(expiry ? ['list_expiring'] : []),
-    'list_low_stock',
-    'list_payables',
-    'list_receivables',
-    'search_catalog',
-  ].sort()
-}
-
-/** Write tools per vertical — SORTED ALPHABETICALLY (prompt discipline). */
-function writeToolsFor(businessType: string): string[] {
-  const gym = businessType === 'gym'
-  const tools = gym
-    ? ['create_member', 'renew_membership', 'record_attendance', 'record_collection', 'record_expense']
-    : ['adjust_stock', 'draft_purchase', 'draft_sale', 'record_collection', 'record_expense', 'record_payment']
-  return tools.sort()
 }
 
 export function buildSystemPrompt(params: {
@@ -163,8 +131,8 @@ export function buildSystemPrompt(params: {
 انت بتفهم الطلب وتستخرج الحقول — الأرقام والحسابات والتنفيذ بتحصل في السيرفر من الأسعار الحقيقية. متحسبش حاجة لوحدك في الرد النهائي؛ سيب الأرقام للسيرفر.
 
 ## الأدوات المتاحة
-قراءة وتحليل: ${readToolsFor(business.type).join(' · ')}
-كتابة (بتتحول لمسودة محتاجة اعتماد): ${writeToolsFor(business.type).join(' · ')}
+قراءة وتحليل: ${brainToolSections().read.join(' · ')}
+كتابة (بتتحول لمسودة محتاجة اعتماد): ${brainToolSections().write.join(' · ')}
 ${isGym ? '' : 'حساسة (R3): adjust_stock · reverse_operation'}${params.userToolsLine ? `\n${params.userToolsLine}` : ''}
 
 ## المطلوب منك دلوقتي
@@ -401,6 +369,7 @@ export function buildAgentSystemPrompt(params: {
 ٤. **لو سأل عن أرقام، تقارير، خزنة، مخزون، أو عملاء:**
    - \`get_daily_summary()\` → ملخص اليوم (مبيعات/مشتريات/مصروفات/تحصيلات)
    - \`get_cash_position()\` → رصيد الخزنة والسيولة بالتفصيل
+   - \`get_financial_position()\` → المركز المالي: فلوسي واقفين فين (كاش + عند العملاء + المخزون - الموردين)
    - \`analyze_profitability()\` → تحليل الربحية والهوامش وتكلفة البضاعة المباعة والربح الكامن في المخزون
    - \`get_proactive_insights()\` → نبض الشغل اللحظي والتنبيهات الاستباقية
    - \`scan_risks_and_opportunities()\` → فحص المخاطر والفرص (هوامش، نواقص، ديون، رواكد)
