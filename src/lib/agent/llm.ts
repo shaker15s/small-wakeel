@@ -482,15 +482,64 @@ async function* streamWithBudget(model: ModelInfo, messages: LLMMessage[], budge
       return
     } catch (err) {
       if (emittedContent || strictInference()) throw err
-      console.error('[llm] external provider failed, falling back to builtin:', err)
+      console.error('[llm] external provider failed — trying fallback providers:', err)
       llmHealth.fellBack = true
-      yield { type: 'reasoning', text: 'المزوّد الخارجي مش متاح حاليًا — هرجع للموديل الداخلي.' }
+      let rescued = false
+      for (const alt of await externalAlternatives(model)) {
+        try {
+          const started = await startStream(() => streamExternal(alt, messages, budget), `stream:${alt.key}`, `stream-fallback:${alt.key}`)
+          rescued = true
+          if (!started.first.done) yield started.first.value
+          yield* started.gen
+          break
+        } catch {
+          // keep climbing the ladder
+        }
+      }
+      if (!rescued) {
+        yield { type: 'reasoning', text: 'المزوّد الخارجي مش متاح حاليًا — هرجع للموديل الداخلي.' }
+      }
     }
   }
   const builtinKey = model.source === 'builtin' ? `builtin:${model.key}` : 'builtin:fallback'
   const started = await startStream(() => streamBuiltin(messages, model.key, budget), builtinKey, `stream:${model.key}`)
   if (!started.first.done) yield started.first.value
   yield* started.gen
+}
+
+/** DeepSeek-harness «pinned fallback provider» pattern: when the SELECTED
+ *  external provider fails, do not dead-end into a builtin the sandbox may
+ *  not have — try the other enabled external providers (same tier first),
+ *  max two, then give up to the normal fallback. */
+async function externalAlternatives(model: ModelInfo): Promise<ModelInfo[]> {
+  if (model.source !== 'external') return []
+  const out: ModelInfo[] = []
+  try {
+    const configs = await db.modelConfig.findMany({
+      where: { enabled: true },
+      include: { provider: true },
+      orderBy: { id: 'desc' },
+      take: 8,
+    })
+    const ranked = [...configs].sort(
+      (a, b) => Number(b.tier === model.tier) - Number(a.tier === model.tier),
+    )
+    for (const c of ranked) {
+      if (`ext:${c.id}` === model.key) continue
+      out.push({
+        key: `ext:${c.id}`,
+        label: c.label,
+        tier: c.tier as 'air' | 'balanced' | 'deep',
+        source: 'external',
+        remoteModel: c.remoteId,
+        baseUrl: c.provider.baseUrl,
+      })
+      if (out.length >= 2) break
+    }
+  } catch {
+    return []
+  }
+  return out
 }
 
 /** Non-streaming completion (intent extraction / research synthesis / judge) —
@@ -513,8 +562,16 @@ async function completeWithBudget(model: ModelInfo, messages: LLMMessage[], budg
         }),
       )
     } catch (err) {
-      console.warn('[llm] external completeChat failed, falling back to builtin:', err)
+      console.warn('[llm] external completeChat failed — trying fallback providers:', err)
       llmHealth.fellBack = true
+      for (const alt of await externalAlternatives(model)) {
+        try {
+          const out = await completeChatOnce(alt, messages, budget)
+          if (out.trim()) return out
+        } catch {
+          // keep climbing the ladder
+        }
+      }
       const fallbackModel = BUILTIN_MODELS[0]
       return completeChatOnce(fallbackModel, messages, budget)
     }

@@ -116,7 +116,12 @@ test('external provider: the real prompt goes out and the real answer comes back
   expect(seen.lastUser).toBe(question)
 }, 20_000)
 
-test('unreachable provider: it THROWS, it never invents an answer', async () => {
+test('unreachable provider with NO reachable alternative: it THROWS, it never invents an answer', async () => {
+  // Hermetic ladder: park every other enabled external config so the ONLY
+  // options are the dead provider and the builtin (no key in CI). With the
+  // DeepSeek-harness fallback ladder, a reachable sibling provider rescues
+  // the call — that rescue is proven by the stub test above.
+  const others = await db.modelConfig.findMany({ where: { enabled: true } })
   const dead = await db.modelProvider.create({
     data: { name: `dead-${randomUUID()}`, baseUrl: `http://127.0.0.1:1/v1`, apiKey: encryptProviderKey('x') },
   })
@@ -124,6 +129,7 @@ test('unreachable provider: it THROWS, it never invents an answer', async () => 
     data: { providerId: dead.id, remoteId: 'dead-model', label: 'dead', tier: 'air', enabled: true },
   })
   try {
+    await db.modelConfig.updateMany({ where: { id: { in: others.map((o) => o.id) } }, data: { enabled: false } })
     await expect(
       completeChat(
         { key: `ext:${deadConfig.id}`, label: 'dead', tier: 'air', source: 'external', remoteModel: 'dead-model', baseUrl: 'http://127.0.0.1:1/v1' },
@@ -131,6 +137,7 @@ test('unreachable provider: it THROWS, it never invents an answer', async () => 
       ),
     ).rejects.toBeInstanceOf(Error)
   } finally {
+    await db.modelConfig.updateMany({ where: { id: { in: others.map((o) => o.id) } }, data: { enabled: true } })
     await db.modelConfig.deleteMany({ where: { providerId: dead.id } })
     await db.modelProvider.deleteMany({ where: { id: dead.id } })
   }

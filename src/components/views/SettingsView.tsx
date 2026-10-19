@@ -7,6 +7,7 @@ import { AccountPanel } from '@/components/app/AccountPanel'
 import { useState } from 'react'
 import { motion } from 'framer-motion'
 import {
+  Activity,
   BrainCog,
   CalendarClock,
   Check,
@@ -209,6 +210,35 @@ export default function SettingsView({ businessId, userId }: ViewProps) {
   const [saveBusy, setSaveBusy] = useState(false)
   const [busyModelKey, setBusyModelKey] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
+
+  // — provider health (DeepSeek-harness «provider-check»): probe each
+  //   external provider's live endpoint before trusting it
+  const [health, setHealth] = useState<Array<{
+    id: string; name: string; ok: boolean; status: number | null; ms: number
+    modelCount: number; enabledModels: number; detail?: string
+  }> | null>(null)
+  const [healthBusy, setHealthBusy] = useState(false)
+
+  async function runProviderHealth() {
+    setHealthBusy(true)
+    try {
+      const res = await fetch('/api/providers/health', { cache: 'no-store' })
+      if (!res.ok) throw new Error(`السيرفر رد ${res.status}`)
+      const json = (await res.json()) as { providers: Array<{
+        id: string; name: string; ok: boolean; status: number | null; ms: number
+        modelCount: number; enabledModels: number; detail?: string
+      }> }
+      setHealth(json.providers)
+    } catch (err) {
+      toast({
+        title: 'مش قادر أفحص المزودين',
+        description: err instanceof Error ? err.message : 'جرّب تاني',
+        variant: 'destructive',
+      })
+    } finally {
+      setHealthBusy(false)
+    }
+  }
 
   // — tasks form
   const [taskTitle, setTaskTitle] = useState('')
@@ -455,10 +485,45 @@ export default function SettingsView({ businessId, userId }: ViewProps) {
 
           {/* المزوّدين الخارجيين: مدير النشر فقط */}
           {canManageProviders && <div className="space-y-3">
-            <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-              <Server className="size-3.5" aria-hidden />
-              مزوّديك الخارجيين (OpenAI-compatible)
-            </p>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+                <Server className="size-3.5" aria-hidden />
+                مزوّديك الخارجيين (OpenAI-compatible)
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void runProviderHealth()}
+                disabled={healthBusy}
+                className="h-8 gap-1.5 text-xs"
+              >
+                {healthBusy ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : <Activity className="size-3.5" aria-hidden />}
+                فحص الاتصال بالمزودين
+              </Button>
+            </div>
+
+            {health && (
+              <div className="space-y-1.5 rounded-xl border border-border/70 bg-muted/30 p-3" role="status" aria-label="نتيجة فحص المزودين">
+                <p className="text-[11px] font-bold text-muted-foreground">
+                  فحص مباشر — كل مزوّد بيتست على نته endpoint الفعلي (المفتاح مش بيتعرض)
+                </p>
+                {health.map((h) => (
+                  <div key={h.id} className="flex flex-wrap items-center gap-2 text-xs">
+                    <span className={cn('size-2 shrink-0 rounded-full', h.ok ? 'bg-wakil-teal' : 'bg-destructive')} aria-hidden />
+                    <span className="min-w-0 flex-1 truncate font-medium">{h.name}</span>
+                    {h.ok ? (
+                      <span className="num text-[11px] text-wakil-teal">
+                        شغال · {arNum(h.ms)}ms · {arNum(h.modelCount)} موديل عند المزوّد / {arNum(h.enabledModels)} مفعّل عندك
+                      </span>
+                    ) : (
+                      <span className="num max-w-full truncate text-[11px] text-destructive" title={h.detail}>
+                        مش متوصّل ({h.status ?? 'بدون رد'}){h.detail ? ` — ${h.detail.slice(0, 60)}` : ''}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
 
             {providersQ.isPending ? (
               <div className="space-y-2" aria-busy="true">
