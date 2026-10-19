@@ -90,7 +90,8 @@ import { factsFromCards, verifyReply, type VerifyFact } from './verify'
 import { buildAdvisoryPrompt, buildAgentSystemPrompt, buildReplyPrompt, buildSystemPrompt, roleTitle, TONE_AR } from './prompt'
 import { harnessesPromptBlock } from './cli-anything/harness-installer'
 import { brainToolSchemas } from './tool-schemas'
-import { READ_TOOLS, runReadTool, TYPE_AR, isQuestionWord, type ReadTool } from './tools'
+import { READ_TOOLS, runReadTool, TYPE_AR, isQuestionWord, opMoney, type ReadTool } from './tools'
+import { startOfCairoDay } from '@/app/api/_lib/dates'
 import {
   budgetToolHistory,
   logContextPressure,
@@ -3503,15 +3504,49 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   // weak model it could get small-talk instead of work. A greeting is a
   // greeting: warm, brief, and steered straight back to the job.
   if (isGreeting(norm)) {
-    const replyText = greetingReply(user.name)
+    let replyText = greetingReply(user.name)
     done(IDX.understand, 'تحية — برد فور من غير موديل')
+    // R62: a greeting is the day's ritual — answer the hi, then hand over a
+    // zero-LLM snapshot: yesterday's sales, cash in hand, items at the
+    // shortage line, and any draft waiting on the owner's approval.
+    const today = startOfCairoDay(0)
+    const yesterdayFrom = startOfCairoDay(1)
+    const [salesYesterday, cashEntries, pendingOps] = await Promise.all([
+      db.operation.findMany({
+        where: { businessId: business.id, status: 'SUCCEEDED', type: { in: ['sale', 'membership'] }, createdAt: { gte: yesterdayFrom, lt: today } },
+      }),
+      db.cashEntry.findMany({ where: { businessId: business.id }, select: { direction: true, amount: true } }),
+      db.operation.findMany({ where: { businessId: business.id, status: 'AWAITING_APPROVAL' } }),
+    ])
+    const ySales = salesYesterday.reduce((s2, o) => s2 + opMoney(o.payload), 0)
+    const cash = business.openingCash + cashEntries.reduce((s2, e) => s2 + (e.direction === 'in' ? e.amount : -e.amount), 0)
+    const lowStock = items.filter((i) => i.stockQty <= i.lowStockThreshold).length
+    replyText += ' وشلتلك نظرة النهارده تحت 👇'
     done(IDX.reply)
     await streamDeterministic(replyText, emit, 600)
     const actions: ChatActionDTO[] = [
       { id: 'act-today', label: 'لوحة اليوم', view: 'today', icon: 'today', tone: 'primary' },
     ]
     emit({ event: 'actions', actions })
-    return { replyText, card: null, cards: null, thinking: steps, modelLabel, actions }
+    return {
+      replyText,
+      card: null,
+      cards: [
+        {
+          kind: 'kv' as const,
+          title: 'نظرة سريعة على الشغل',
+          rows: [
+            { label: 'بعت امبارح', value: egp(ySales) },
+            { label: 'كاش في الخزنة', value: egp(cash) },
+            { label: 'أصناف على حدود النقص', value: fmtQty(lowStock) },
+            ...(pendingOps.length > 0 ? [{ label: 'مسودات مستنية اعتماد', value: fmtQty(pendingOps.length) }] : []),
+          ],
+        },
+      ],
+      thinking: steps,
+      modelLabel,
+      actions,
+    }
   }
 
   // ---- PASS 0a: Identity question → instant, deterministic, zero LLM ----

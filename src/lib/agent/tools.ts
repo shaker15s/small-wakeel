@@ -239,6 +239,11 @@ function opLines(payload: string): { itemId: string; qty: number; total: number 
   }
 }
 
+/** Money value of an operation payload, whatever shape it stored. */
+export function opMoney(payload: string): number {
+  return payloadMoney(readPayload(payload))
+}
+
 /** Sales rows (SUCCEEDED) inside a window, newest first. */
 // ---------------------------------------------------------------------------
 // Payload readers shared by the aggregate tools.
