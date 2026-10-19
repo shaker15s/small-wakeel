@@ -259,6 +259,10 @@ export const CASES: EvalCase[] = [
   { text: 'فلوسي واقفين فين؟', vertical: 'supermarket', expect: 'المركز المالي: كاش + عند العملاء + المخزون - الموردين', check: (r) => String(JSON.stringify(r.cards)).includes('رأس المال') && String(JSON.stringify(r.cards)).includes('كاش في الخزنة') },
   { text: 'المركز المالي', vertical: 'supermarket', expect: 'نفس السؤال بصيغة رسمية: نفس الكارت', check: (r) => String(JSON.stringify(r.cards)).includes('فلوسي عند العملاء') },
 
+  // ---- R61: «رصيدي كام؟» = the whole picture; «جبت كام» = purchases ----
+  { text: 'رصيدي كام؟', vertical: 'supermarket', expect: 'رصيد صاحبه = كل الصورة مش الخزنة بس', check: (r) => String(JSON.stringify(r.cards)).includes('كاش في الخزنة') },
+  { text: 'جبت كام الشهر ده؟', vertical: 'supermarket', expect: '«جبت» فعل الشرا اليومي → إجماليات المشتريات', check: (r) => String(JSON.stringify(r.cards)).includes('مشتريات') },
+
   // ---- R59: the planning number — average per day ----
   { text: 'متوسط البيع في اليوم كام؟', vertical: 'supermarket', expect: 'إجماليات الفترة بتعرض متوسط اليوم العادي', check: (r) => String(JSON.stringify(r.cards)).includes('المتوسط اليومي') },
 

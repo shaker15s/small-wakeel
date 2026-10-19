@@ -542,7 +542,7 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
   // R55: «فلوسي واقفين فين؟» / «المركز المالي» / «ماليي كام؟» — the whole money
   // picture (cash + receivables + stock − payables). The cashbox rule owns
   // «الخزنة/كاش» alone, so any sentence that names the cashbox skips us.
-  if (/(المركز المالي|فلوسي (واقفين فين|فين|كام|اتعمل)|اموالي (فين|كام)|ماليي)/.test(s) && !/خزنه|كاش/.test(s))
+  if (/(المركز المالي|فلوسي (واقفين فين|فين|كام|اتعمل)|اموالي (فين|كام)|ماليي|رصيدي)/.test(s) && !/خزنه|كاش/.test(s))
     return { intent: 'read', tool: 'get_financial_position', fields: {} }
   if (/(وضع|رصيد|حاله) الخزنه|الخزنه|كاش/.test(s)) return { intent: 'read', tool: 'get_cash_position', fields: {} }
   // ---- R36: the weekly ledger questions, answered deterministically -------
@@ -577,7 +577,7 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
   if (/(كام|قد\s*ايه|قدايه)/.test(s)) {
     const metric = /(حصلت|تحصيل|قبضت|استلمت)/.test(s)
       ? 'collections'
-      : /(اشتريت|مشتريات|الشرا|شراء)/.test(s)
+      : /(اشتريت|مشتريات|الشرا|شراء|جبت)/.test(s)
         ? 'purchases'
         : /(صرفت|مصروف|مصاريف|مصروفات)/.test(s)
           ? 'expenses'
@@ -594,7 +594,7 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
       const isToday = /النهارده|دلوقتي/.test(sNoPerDay) || /(^|\s)اليوم(?=\s|$|[؟?])/.test(sNoPerDay)
       const days = isYesterday ? 1 : isToday ? 1 : /(اسبوع|الأسبوع|7 ايام|سبعة ايام)/.test(s) ? 7 : 30
       const query = s
-        .replace(/(بعت|مبيعات|اتبيع|بيع|حصلت|تحصيل|قبضت|استلمت|اشتريت|مشتريات|الشرا|شراء|صرفت|مصروفات|مصاريف|مصروف)/g, ' ')
+        .replace(/(بعت|مبيعات|اتبيع|بيع|حصلت|تحصيل|قبضت|استلمت|اشتريت|مشتريات|الشرا|شراء|جبت|صرفت|مصروفات|مصاريف|مصروف)/g, ' ')
         .replace(/(كام|قد\s*ايه|قدايه|النهارده|اليوم|امبارح|امبارح|الشهر|هذا|ده|دي|الاسبوع|الأسبوع|الفتره|الفترة|الماضي|الجاي|علبه|علبة|كرتونه|كرتونة|كيلو|قطعه|قطعة|جرام|شريط|لتر)/g, ' ')
         // connectors + generic nouns are not names: «اشتريت كام من الموردين؟»
         // must not filter by a customer/supplier called «من المور ن» (the
