@@ -151,6 +151,8 @@ function InventoryTodayView({ businessId, userId, onNavigate }: ViewProps) {
             index={0}
             label="رصيد الخزنة"
             value={egp(data.cash.net)}
+            rawValue={data.cash.net}
+            formatValue={egp}
             icon={Wallet}
             tone={data.cash.net >= 0 ? 'teal' : 'red'}
             title={`افتتاحي ${egp(data.cash.opening)} — داخل ${egp(data.cash.in)} — خارج ${egp(data.cash.out)}`}
@@ -159,6 +161,8 @@ function InventoryTodayView({ businessId, userId, onNavigate }: ViewProps) {
             index={1}
             label="مبيعات اليوم"
             value={egp(data.today.sales)}
+            rawValue={data.today.sales}
+            formatValue={egp}
             icon={ShoppingCart}
             tone="navy"
             title={data.today.sales === 0 && data.recentOps[0] ? `آخر حركة: ${arAgo(data.recentOps[0].createdAt)}` : undefined}
@@ -170,6 +174,8 @@ function InventoryTodayView({ businessId, userId, onNavigate }: ViewProps) {
             // الشغل اللي خلص فعلاً — والملغي بيبان في السطر اللي تحت.
             label="عمليات مكتملة"
             value={arNum(data.today.doneCount)}
+            rawValue={data.today.doneCount}
+            formatValue={arNum}
             icon={Activity}
             tone="navy"
           />
@@ -177,6 +183,8 @@ function InventoryTodayView({ businessId, userId, onNavigate }: ViewProps) {
             index={3}
             label="مستنيات اعتماد"
             value={arNum(pendingOps.length)}
+            rawValue={pendingOps.length}
+            formatValue={arNum}
             icon={Clock}
             tone={pendingOps.length > 0 ? 'amber' : 'muted'}
           />

@@ -130,7 +130,7 @@ export function MessageBubble({
           initial={optimistic ? { opacity: 0, y: 24, scale: 0.92 } : false}
           animate={{ opacity: 1, y: 0, scale: 1 }}
           transition={{ type: 'spring', stiffness: 440, damping: 24 }}
-          className="max-w-[85%] whitespace-pre-wrap break-words rounded-[1.25rem] rounded-tl-md bg-[var(--wakil-amber-soft)] px-4 py-2.5 text-[15px] leading-7 text-accent-foreground shadow-sm"
+          className="max-w-[85%] whitespace-pre-wrap break-words rounded-[1.25rem] rounded-tl-md px-4 py-2.5 text-[15px] leading-7 text-accent-foreground [background:linear-gradient(180deg,color-mix(in_oklab,var(--wakil-amber)_14%,var(--card)),color-mix(in_oklab,var(--wakil-amber)_22%,var(--card)))] [border:1px_solid_color-mix(in_oklab,var(--wakil-amber)_26%,transparent)] shadow-[0_2px_12px_-6px_rgb(185_109_29/0.35)]"
         >
           {withNums(userDisplayText ?? turn.text)}
         </motion.div>

@@ -1,5 +1,14 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+/* Self-hosted Arabic type — NO remote font fetch (offline-safe, instant paint,
+   no third-party request). IBM Plex Sans Arabic: a professional grotesque with
+   a full Arabic subset — it is what makes the interface stop reading as
+   «system font». Weights 300–700 cover display → caption. */
+@import "@fontsource/ibm-plex-sans-arabic/300.css";
+@import "@fontsource/ibm-plex-sans-arabic/400.css";
+@import "@fontsource/ibm-plex-sans-arabic/500.css";
+@import "@fontsource/ibm-plex-sans-arabic/600.css";
+@import "@fontsource/ibm-plex-sans-arabic/700.css";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -7,8 +16,9 @@
   /* Arabic-first stacks. «Segoe UI»/«SF Arabic»/«Noto Naskh Arabic» are the
      native faces on Windows/macOS/Linux+Android; Thmanyah/Tajawal are used when
      the user has them installed (common on Arabic-language machines). */
-  --font-wakil-sans: "Thmanyah", "Tajawal", "SF Arabic", "Segoe UI", "Noto Naskh Arabic",
-    "Noto Sans Arabic", "Helvetica Neue", Arial, system-ui, sans-serif;
+  --font-wakil-sans: "IBM Plex Sans Arabic", "Thmanyah", "Tajawal", "SF Arabic",
+    "Segoe UI", "Noto Naskh Arabic", "Noto Sans Arabic", "Helvetica Neue", Arial,
+    system-ui, sans-serif;
   --font-wakil-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
     "Liberation Mono", monospace;
 }
@@ -69,24 +79,24 @@
    Deep navy primary + warm amber accent on warm paper. Light + dark. */
 :root {
   --radius: 0.75rem;
-  --background: #faf7f1; /* warm paper */
+  --background: #f7f4ec; /* warm paper — a shade deeper so white cards lift */
   --foreground: #1c2b3a;
   --card: #ffffff;
   --card-foreground: #1c2b3a;
   --popover: #ffffff;
   --popover-foreground: #1c2b3a;
-  --primary: #1f3a5f; /* deep navy */
+  --primary: #182f52; /* deep navy — more confident */
   --primary-foreground: #f8fafc;
   --secondary: #f1ece2;
   --secondary-foreground: #2c3e50;
   --muted: #f3efe6;
-  --muted-foreground: #75706a;
+  --muted-foreground: #6e675e; /* AA on paper */
   --accent: #fdf3e3; /* soft amber tint */
   --accent-foreground: #7c4a12;
   --destructive: #c0392b;
-  --border: #e7e0d2;
-  --input: #e7e0d2;
-  --ring: #b8873a;
+  --border: #e6dfd0;
+  --input: #e6dfd0;
+  --ring: #c07f27;
   --chart-1: #1f3a5f;
   --chart-2: #c2762a;
   --chart-3: #2e7d6b;
@@ -100,33 +110,37 @@
   --sidebar-accent-foreground: #1f3a5f;
   --sidebar-border: #e7e0d2;
   --sidebar-ring: #b8873a;
-  --wakil-amber: #c2762a;
-  --wakil-amber-soft: #f5e3c8;
-  --wakil-navy: #1f3a5f;
+  --wakil-amber: #b96d1d; /* premium gold — deeper, still warm */
+  --wakil-amber-soft: #f4e4c9;
+  --wakil-navy: #182f52;
   --wakil-teal: #2e7d6b;
-  --wakil-paper: #faf7f1;
+  --wakil-paper: #f7f4ec;
   --success: #2e7d6b;
   --warning: #b8873a;
+  /* elevation — layered, low-spread, warm-tinted (never a single hard shadow) */
+  --shadow-card: 0 1px 2px rgb(28 32 40 / 0.05), 0 4px 16px -8px rgb(28 32 40 / 0.10);
+  --shadow-lift: 0 2px 4px rgb(28 32 40 / 0.06), 0 16px 34px -14px rgb(28 32 40 / 0.18);
+  --shadow-float: 0 4px 12px rgb(28 32 40 / 0.08), 0 30px 64px -24px rgb(28 32 40 / 0.28);
 }
 
 .dark {
-  --background: #0f1a2b; /* deep navy ink */
-  --foreground: #e8e4da;
-  --card: #16243a;
-  --card-foreground: #e8e4da;
-  --popover: #16243a;
-  --popover-foreground: #e8e4da;
-  --primary: #d9b57c; /* soft gold for dark mode CTAs */
+  --background: #0d1726; /* deep navy ink — richer */
+  --foreground: #ece7db;
+  --card: #152238;
+  --card-foreground: #ece7db;
+  --popover: #152238;
+  --popover-foreground: #ece7db;
+  --primary: #dfbc85; /* soft gold for dark mode CTAs */
   --primary-foreground: #131f30;
   --secondary: #1f3049;
   --secondary-foreground: #e8e4da;
   --muted: #1f3049;
-  --muted-foreground: #9aa3ad;
+  --muted-foreground: #a6b0bb; /* AA on ink */
   --accent: #2a2416;
   --accent-foreground: #e3c98f;
   --destructive: #e0654f;
-  --border: #243650;
-  --input: #243650;
+  --border: #263a55;
+  --input: #263a55;
   --ring: #d9b57c;
   --chart-1: #7ea6d9;
   --chart-2: #d9a05c;
@@ -141,13 +155,16 @@
   --sidebar-accent-foreground: #e8e4da;
   --sidebar-border: #243650;
   --sidebar-ring: #d9b57c;
-  --wakil-amber: #d9a05c;
+  --wakil-amber: #dda45f;
   --wakil-amber-soft: #3a2f1c;
   --wakil-navy: #7ea6d9;
   --wakil-teal: #5cb99a;
-  --wakil-paper: #0f1a2b;
+  --wakil-paper: #0d1726;
   --success: #5cb99a;
-  --warning: #d9a05c;
+  --warning: #dda45f;
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.35), 0 4px 16px -8px rgb(0 0 0 / 0.45);
+  --shadow-lift: 0 2px 4px rgb(0 0 0 / 0.4), 0 16px 34px -14px rgb(0 0 0 / 0.55);
+  --shadow-float: 0 4px 12px rgb(0 0 0 / 0.45), 0 30px 64px -24px rgb(0 0 0 / 0.65);
 }
 
 @layer base {
@@ -166,13 +183,70 @@
     @apply bg-background text-foreground;
     font-feature-settings: "tnum" 1; /* tabular numbers for money */
     -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
     overflow-x: clip;
     max-width: 100%;
+    /* Layered ambient light — the screen is never a flat wall:
+       a navy wash from the top corner, a warm gold breath from the
+       bottom corner, and a 3% grain so large surfaces read as paper,
+       not as a CSS rectangle. */
+    background-image:
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E"),
+      radial-gradient(1100px 560px at 88% -12%, color-mix(in oklab, var(--primary) 7%, transparent), transparent 62%),
+      radial-gradient(900px 520px at -6% 112%, color-mix(in oklab, var(--wakil-amber) 6%, transparent), transparent 60%);
+    background-attachment: fixed, fixed, fixed;
+  }
+  .dark body {
+    background-image:
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E"),
+      radial-gradient(1100px 560px at 88% -12%, rgb(126 166 217 / 0.07), transparent 62%),
+      radial-gradient(900px 520px at -6% 112%, rgb(221 164 95 / 0.06), transparent 60%);
   }
   ::selection {
     background: var(--wakil-amber-soft);
     color: var(--accent-foreground);
   }
+}
+
+/* ============================================================
+   R42 — «سطح» surface system: gradient hairline + layered elevation
+   ============================================================
+   A flat `border: 1px solid` reads as «wireframe». Every real product
+   surface has (a) a 1px edge that is LIGHTEST at the top — a rim of light,
+   not a fence — and (b) two stacked soft shadows (a contact shadow + a
+   wide ambient one). `.surface` gives both, and `.surface-lift` promotes
+   the shadow on hover so the card reads as physically lifting. */
+.surface {
+  border: 1px solid transparent;
+  background:
+    linear-gradient(color-mix(in oklab, var(--card) 96%, transparent), var(--card)) padding-box,
+    linear-gradient(
+        180deg,
+        color-mix(in oklab, var(--foreground) 16%, transparent),
+        color-mix(in oklab, var(--foreground) 7%, transparent) 30%,
+        color-mix(in oklab, var(--foreground) 5%, transparent)
+      )
+      border-box;
+  box-shadow: var(--shadow-card);
+}
+.surface-lift {
+  transition:
+    transform var(--dur-2, 200ms) var(--ease-out-quint, cubic-bezier(0.22, 1, 0.36, 1)),
+    box-shadow var(--dur-2, 200ms) var(--ease-out-quint, cubic-bezier(0.22, 1, 0.36, 1));
+}
+@media (hover: hover) {
+  .surface-lift:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-lift);
+  }
+}
+/* an icon in a tinted circular seat — the house style for KPI glyphs */
+.icon-seat-tinted {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  flex-shrink: 0;
 }
 
 @layer utilities {
@@ -399,6 +473,11 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .surface-lift:hover {
+    transform: none !important;
   }
 }
 
