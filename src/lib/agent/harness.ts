@@ -624,7 +624,8 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
     const amount = extractStatedPrice(s)
     return { intent: 'write', opType: 'payment', fields: { ...(mSup?.[1] ? { supplierName: mSup[1].trim() } : {}), ...(amount != null ? { amount } : {}) } }
   }
-  if (/(اللي علينا|للمورد|الموردين|مستحق)/.test(s)) return { intent: 'read', tool: 'list_payables', fields: {} }
+  // R51: «كام علينا لمحمد تاجر الجملة؟» — the everyday payables question.
+  if (/(اللي علينا|للمورد|الموردين|مستحق|كام علينا|كم علينا|كام على المورد|كم على الموردين)/.test(s)) return { intent: 'read', tool: 'list_payables', fields: {} }
   // «النهارده عملت ايه؟» is the same question in a different word order — the
   // owner's first sentence of the day, and it used to fall through to chat.
   if (/(ملخص|كويس اليوم|حال اليوم|عملت\s*ايه|ايه\s*اللي\s*عملته|اخبار\s*اليوم)/.test(s))
@@ -638,11 +639,16 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
   if (/(هيخلص|هينقص|هتخلص|توقع|متوقع|نفض|معدل البيع|كم يوم باقي|يخلص قريب|هيخلص مع|ينتهي قريب)/.test(s)) {
     return { intent: 'read', tool: 'forecast_stockout', fields: {} }
   }
-  // «بيحاسب إزاي؟ / بيسدد كل قد إيه؟ / ملف العميل»
-  if (/(بيسدد|بيحاسب|ملف العميل|تاريخ العميل|بيدفع كل)/.test(s)) {
-    // name = the words after «العميل»/«ملف» or after the verb, e.g.
-    // «ملف العميل أم حسن» / «أم حسن بتسدد كل قد إيه؟»
-    const mName = s.match(/(?:ملف|تاريخ)\s+(?:العميل\s+)?([^ ،,؟?]+(?:\s+[^ ،,؟?]+)?)/) ?? s.match(/^\s*([^ ،,؟?]+(?:\s+[^ ،,؟?]+)?)\s+(?:بتسدد|بيسدد|بيحاسب|بيدفع)/)
+  // «بيحاسب إزاي؟ / بيسدد كل قد إيه؟ / ملف العميل / كم علي أم حسن؟»
+  // R51: «كم علي/كام عليه + name» is THE everyday balance question — it used
+  // to die into the generic «النت تقيل» reply offline.
+  if (/(بيسدد|بيحاسب|ملف العميل|تاريخ العميل|بيدفع كل|كم علي(?:ه|ها)?(?: |$)|كام علي(?:ه|ها)?(?: |$)|كم عليها|كام عليها|عليه قد ايه|عليها قد ايه|رصيده كام|رصيدها كام)/.test(s)) {
+    // name = the words after «العميل»/«ملف»/«كم علي» or before the verb, e.g.
+    // «ملف العميل أم حسن» / «أم حسن بتسدد» / «كم علي أم حسن؟» / «أم حسن عليه كام؟»
+    const mName =
+      s.match(/(?:ملف|تاريخ)\s+(?:العميل\s+)?([^ ،,؟?]+(?:\s+[^ ،,؟?]+)?)/) ??
+      s.match(/^(?:كم|كام) علي(?:ه|ها)?\s+([^ ،,؟?]+(?:\s+[^ ،,؟?]+)?)/) ??
+      s.match(/^\s*([^ ،,؟?]+(?:\s+[^ ،,؟?]+)?)\s+(?:بتسدد|بيسدد|بيحاسب|بيدفع|عليه (?:كام|قد ايه)|عليها (?:كام|قد ايه))/)
     const name = mName ? mName[1].replace(/^(العميل|بتاع|من)\s*/, '').trim() : ''
     return { intent: 'read', tool: 'get_customer_history', fields: name && name.length >= 2 ? { name } : {} }
   }
@@ -1510,7 +1516,7 @@ async function suggestSupplierForItem(businessId: string, itemName: string): Pro
 const COUNTER_WORDS = new Set([
   'حبه', 'حبة', 'قطعه', 'قطعة', 'كيس', 'اكياس', 'علبه', 'علبة', 'علب', 'شريط', 'اطباق', 'طبق',
   'زجاجه', 'زجاجة', 'برطمان', 'باكيت', 'سلفه', 'صفيحه', 'صفيحة', 'كرتون', 'كرتونه', 'كرتونة',
-  'جركن', 'براد', 'كيسه', 'ربطه', 'ربطة', 'حبهان', 'سرفه', 'دوزه', 'جرعه', 'حبه',
+  'جركن', 'براد', 'كيسه', 'ربطه', 'ربطة', 'حبهان', 'سرفه', 'دوزه', 'جرعه', 'حبه', 'كونه', 'كونة',
 ])
 /** Dialect word variants for item matching (word-level, R44): the owner's
  *  word vs the catalog's word. First variant replaces the canonical. */
@@ -1561,7 +1567,17 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
       // operation (a single basket the cashier approves once), like the real POS.
       // Longest-alias-first + overlap rejection: «بانادول» alone can never fan
       // out into «بانادول أكتيف» + «بانادول شرائط» — the more specific name wins.
-      const segments = scanText.split(/\s*(?:،|,|\+|؛|;)\s*|\s+و\s+|\s+و(?=[٠-٩0-9])/).filter(Boolean)
+      // R51: a GLUED «و» before a counter word is still a conjunction:
+      // «٢ تونة وكونة زيت» = 2 tuna + 1 oil — the leading quantity must not
+      // leak into the second item (live R51: it drafted 2+2). A pre-pass inserts
+      // a space after the glued و so the «و»-splitter below sees a clean join.
+      // Counter words are pure Arabic, so this needs no regex escaping.
+      let prepped = scanText
+      for (const w of COUNTER_WORDS) {
+        prepped = prepped.split('و' + w).join('و ' + w)
+      }
+      const segments = prepped.split(/\s*(?:،|,|\+|؛|;)\s*|\s+و\s+|\s+و(?=[٠-٩0-9])/).filter(Boolean)
+
       const byItem = new Map<string, { item: Item; qty: number | null; unit: string | null }>()
       for (const seg of segments) {
         const segNorm = normalizeAr(seg)
@@ -1664,18 +1680,57 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
         const lexCustomer = type === 'sale' ? lexiconResolve(norm, memCtx.lexicon, customers)?.entity : null
         if (lexCustomer) memCtx.referencedIds.push(...memCtx.lexicon.filter((l) => l.entityRef === lexCustomer.id).map((l) => l.id))
         const customer = lexCustomer ?? (f.customerName ? matchEntity(String(f.customerName), customers)?.entity : null) ?? (type === 'sale' ? findPartyMention(text, customers) : null)
+        // R51: a basket can carry an explicitly typed name too («… لعميل اسمه
+        // أحمد زكي») — same contract as the single-item path: cash drafts
+        // under the name, credit asks to register first (the whole basket is
+        // held as a pending request; the completion re-scans the ORIGINAL
+        // text, so the lines are rebuilt identically).
+        const basketExplicitName = cleanTypedName(norm.match(/اسمه\s+([ء-ي][ء-ي\s]{1,25})/)?.[1] ?? '')
+        const basketTypedName = !customer && type === 'sale' && lexCustomer == null && (String(f.customerName ?? '').trim() || basketExplicitName)
+        if (basketTypedName && total - paid > 0 && !f.creditNewCustomer) {
+          const creditAsk = `«${basketTypedName}» مش مسجل في حسابات العملاء — عليه كام من قبل؟ قولي رقمه وأنا أسجله وأنزل عليه البيعة، أو قولي «جديد» لو من عندنا.`
+          if (ctx.conversationId) {
+            await savePendingRequest({
+              businessId: business.id,
+              conversationId: ctx.conversationId,
+              userId: user.id,
+              kind: 'credit_new_customer',
+              slots: {
+                itemId: null,
+                itemName: lines.map((l) => l.item.name).join(' + '),
+                qty: null,
+                unit: null,
+                unitLabel: null,
+                paid: 0,
+                supplierName: null,
+                suggestedSupplier: null,
+                total,
+                unitPrice: null,
+                customerName: basketTypedName,
+                openingBalance: null,
+                sourceText: text,
+              },
+              question: creditAsk,
+            })
+          }
+          return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'العميل', failMessage: creditAsk }
+        }
         const supplier = (f.supplierName ? matchEntity(String(f.supplierName), suppliers)?.entity : null) ?? (type === 'purchase' ? findPartyMention(text, suppliers, 'من') : null)
 
         const payload: Record<string, unknown> = {
           lines: lines.map((l) => ({ itemId: l.item.id, name: l.item.name, qty: l.qty, unit: l.item.unit, unitPrice: l.unitPrice, total: l.total })),
           total,
           paid,
-          ...(type === 'sale' && customer ? { customerId: customer.id, customerName: customer.name } : {}),
+          ...(type === 'sale' && customer
+            ? { customerId: customer.id, customerName: customer.name }
+            : type === 'sale' && basketTypedName
+              ? { customerName: basketTypedName }
+              : {}),
           ...(type === 'purchase' && supplier ? { supplierId: supplier.id, supplierName: supplier.name } : {}),
         }
         const ref = `WKL-DRAFT` // replaced by real ref from createDraft
         const risk = computeRisk(type, total)
-        const summary = `${type === 'sale' ? 'بيع' : 'شرا'} ${lines.map((l) => `${fmtQty(l.qty, arUnit(l.item.unit))} ${l.item.name}`).join(' + ')} بـ${egp(total)}${type === 'sale' && customer ? ` — ${customer.name}` : ''}${type === 'purchase' && supplier ? ` — من ${supplier.name}` : ''}`
+        const summary = `${type === 'sale' ? 'بيع' : 'شرا'} ${lines.map((l) => `${fmtQty(l.qty, arUnit(l.item.unit))} ${l.item.name}`).join(' + ')} بـ${egp(total)}${type === 'sale' && (customer || basketTypedName) ? ` — ${customer?.name ?? basketTypedName}` : ''}${type === 'purchase' && supplier ? ` — من ${supplier.name}` : ''}`
         // BUSINESS_DNA credit-limit enforcement (آجل on a capped party)
         let dangerNote: string | undefined
         let creditField: { label: string; value: string; hint?: string } | undefined
@@ -1692,7 +1747,11 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
           { label: 'الإجمالي', value: egp(total) },
           { label: 'مدفوع', value: egp(paid) },
           ...(total - paid > 0 ? [{ label: 'باقي (آجل)', value: egp(total - paid) }] : []),
-          ...(type === 'sale' && customer ? [{ label: 'العميل', value: customer.name }] : []),
+          ...(type === 'sale' && customer
+            ? [{ label: 'العميل', value: customer.name }]
+            : type === 'sale' && basketTypedName
+              ? [{ label: 'العميل', value: `${basketTypedName} — مش مسجل`, hint: 'مسودة نقدي بالاسم. لو عايزه مسجل قولي «سجله» وأنا أسجله' }]
+              : []),
           ...(type === 'purchase' && supplier ? [{ label: 'المورد', value: supplier.name }] : []),
           ...(creditField ? [creditField] : []),
           ...issues.map((i) => ({ label: '⚠ مش ضمن المسودة', value: i })),
@@ -1700,6 +1759,32 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
           ...lines.map((l) => ({ label: `مخزون ${l.item.name}`, value: `${fmtQty(l.item.stockQty, arUnit(l.item.unit))} ← ${fmtQty(l.item.stockQty + (type === 'sale' ? -l.qty : l.qty), arUnit(l.item.unit))}`, tone: 'neutral' as const })),
           { label: 'الخزنة', value: egp(type === 'sale' ? paid : -paid), tone: type === 'sale' ? 'good' as const : 'bad' as const },
         ], dangerNote ?? RISK_META[risk].hint)
+        // R51: the cash basket keeps the R49 promise too — «سجله» next
+        // registers the typed name.
+        if (type === 'sale' && basketTypedName && ctx.conversationId) {
+          await savePendingRequest({
+            businessId: business.id,
+            conversationId: ctx.conversationId,
+            userId: user.id,
+            kind: 'cash_new_customer',
+            slots: {
+              itemId: null,
+              itemName: lines.map((l) => l.item.name).join(' + '),
+              qty: null,
+              unit: null,
+              unitLabel: null,
+              paid,
+              supplierName: null,
+              suggestedSupplier: null,
+              total,
+              unitPrice: null,
+              customerName: basketTypedName,
+              openingBalance: null,
+              sourceText: text,
+            },
+            question: '',
+          })
+        }
         return { ok: true, opType: type, payload, summary, card, issues: issues.length > 0 ? issues : undefined }
       }
 
@@ -2083,7 +2168,7 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
         ...(type === 'sale' && customer
           ? [{ label: 'العميل', value: customer.name }]
           : type === 'sale' && typedCustomerName
-            ? [{ label: 'العميل', value: `${typedCustomerName} — مش مسجل`, hint: 'مسودة نقدي بالاسم. لو عايزه مسجل قولي وأعد المسودة' }]
+            ? [{ label: 'العميل', value: `${typedCustomerName} — مش مسجل`, hint: 'مسودة نقدي بالاسم. لو عايزه مسجل قولي «سجله» وأنا أسجله' }]
             : []),
         ...(type === 'purchase' && (supplier || supplierIsNew)
           ? [{ label: 'المورد', value: `${supplier?.name ?? supplierName.trim()}${supplierIsNew ? ' — هيتسجل جديد' : ''}` }]
@@ -3610,9 +3695,14 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       const balance = parseCreditBalance(norm)
       if (balance == null) {
         // Release ONLY on a fresh work command («بعت ٢ تونة لأم حسن» / «الغيت
-        // اللي فات»). Confusion («ما ايه») or silence is NOT a new topic — a
-        // real employee simply repeats the one question he asked.
-        if (isCreditCommand(norm)) {
+        // اللي فات») or a real READ question («كم علي أم حسن؟»). Confusion
+        // («ما ايه») or silence is NOT a new topic — a real employee simply
+        // repeats the one question he asked.
+        const readQ = (() => {
+          const r = ruleBasedIntent(text, business.type)
+          return r.intent === 'read' && !!r.tool && !/[0-9٠-٩]/.test(text)
+        })()
+        if (isCreditCommand(norm) || readQ) {
           await markPendingDone(ctx.conversationId, 'cancelled')
         } else {
           const q = pendingQuestionText(s, 'credit_new_customer')

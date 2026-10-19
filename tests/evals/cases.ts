@@ -224,6 +224,33 @@ export const CASES: EvalCase[] = [
     check: (r) => draft('sale')(r) && !String(r.replyText).includes('مش مسجل في حسابات العملاء — عليه كام'),
   },
 
+  // ---- R51: baskets with a glued «و» + a typed name ----
+  {
+    text: 'بعت ٢ تونة وكونة زيت لعميل اسمه أحمد زكي',
+    vertical: 'supermarket',
+    expect: 'سلّة ٢+١ (مش ٢+٢) بالاسم «مش مسجل»',
+    check: (r) => draft('sale')(r) && String(r.replyText).includes('١١٣') && String(r.replyText).includes('احمد زكي') && !String(r.replyText).includes('٢ قطعة زيت'),
+  },
+  {
+    text: 'بعت ٢ تونة وكونة زيت لعميل اسمه محمد اللي مش معارفه آجل',
+    vertical: 'supermarket',
+    expect: 'سلّة آجل لغير مسجل: سؤال → تسجيل + مسودة السلّة',
+    followUp: 'عليه ٢٠',
+    check: (r) => r.card?.type === 'customer_add' && String(r.replyText).includes('تونة'),
+  },
+  { text: 'كام علينا لمحمد تاجر الجملة؟', vertical: 'supermarket', expect: 'مستحقات الموردين (مش «النت تقيل»)', check: (r) => cards(1)(r) },
+
+  // ---- R51: the everyday balance question must not die offline ----
+  { text: 'كم علي أم حسن؟', vertical: 'supermarket', expect: 'رصيد العميل (مش «النت تقيل»)', check: (r) => all(noCard, saysNot('النت شكله تقيل'))(r) && String(r.replyText).length >= 30 },
+  { text: 'ام حسن عليه كام؟', vertical: 'supermarket', expect: 'نفس السؤال بترتيب تاني', check: (r) => all(noCard, saysNot('النت شكله تقيل'))(r) && String(r.replyText).length >= 30 },
+  {
+    text: 'بعت ٣ كونة زيت لعميل اسمه محمد اللي مش معارفه آجل',
+    vertical: 'supermarket',
+    expect: 'سؤال شغل (قراءة) يطلّع من سؤال الرصيد ويجاوب',
+    followUp: 'كم علي أم حسن؟',
+    check: (r) => all(noCard, saysNot('مش مسجل في حسابات العملاء'))(r) && String(r.replyText).length >= 30,
+  },
+
   // ---- R49: the cash hint «لو عايزه مسجل قولي» is kept ----
   {
     text: 'بعت ٢ تونة لعميل اسمه أحمد زكي اللي مش معارفه',

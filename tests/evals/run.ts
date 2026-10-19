@@ -89,7 +89,10 @@ async function main() {
             () => {},
           )
         : turnOne
-      const ok = c.check(result)
+      // Explicit boolean: some legacy checks return a truthy non-boolean
+      // (a card object / a count) — it used to survive in-process but vanish
+      // in the JSON round-trip (suite saw ok=undefined → phantom failure).
+      const ok = Boolean(c.check(result))
       return {
         text: c.followUp ? `${c.text} → ${c.followUp}` : c.text,
         expect: c.expect,
