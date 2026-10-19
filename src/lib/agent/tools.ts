@@ -441,6 +441,21 @@ export async function runReadTool(
       // a gym «sells» memberships: call them مبيعات in the same number
       const total = matched.reduce((sum, o) => sum + money(o.payload), 0)
       const qty = metric === 'sales' ? matched.reduce((sum, o) => sum + payloadQty(readPayload(o.payload)), 0) : 0
+      // R56: of the money we SOLD, how much is actually in hand vs. on account?
+      // The owner manages exposure by this split every single day. Sales only
+      // (memberships settle in full).
+      let cashSold = 0
+      let creditSold = 0
+      if (metric === 'sales') {
+        for (const o of matched) {
+          if (o.type !== 'sale') continue
+          const p = readPayload(o.payload)
+          const t = Number(p.total ?? 0) || 0
+          const paid = Math.min(Math.max(0, Number(p.paid ?? 0)), t)
+          cashSold += paid
+          creditSold += t - paid
+        }
+      }
       const period = days === 1 ? 'النهارده' : days === 7 ? 'آخر ٧ أيام' : `آخر ${fmtQty(days)} يوم`
       return [
         {
@@ -449,6 +464,12 @@ export async function runReadTool(
           rows: [
             { label: 'الإجمالي', value: egp(total) },
             ...(qty > 0 ? [{ label: 'الكمية', value: fmtQty(qty) }] : []),
+            ...(metric === 'sales' && (cashSold > 0 || creditSold > 0)
+              ? [
+                  { label: 'كاش (في اليد)', value: egp(cashSold) },
+                  { label: 'على الحساب (عند العملاء)', value: egp(creditSold) },
+                ]
+              : []),
             { label: 'عدد العمليات', value: fmtQty(matched.length) },
           ],
           ...(matched.length === 0

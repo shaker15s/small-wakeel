@@ -259,6 +259,10 @@ export const CASES: EvalCase[] = [
   { text: 'فلوسي واقفين فين؟', vertical: 'supermarket', expect: 'المركز المالي: كاش + عند العملاء + المخزون - الموردين', check: (r) => String(JSON.stringify(r.cards)).includes('رأس المال') && String(JSON.stringify(r.cards)).includes('كاش في الخزنة') },
   { text: 'المركز المالي', vertical: 'supermarket', expect: 'نفس السؤال بصيغة رسمية: نفس الكارت', check: (r) => String(JSON.stringify(r.cards)).includes('فلوسي عند العملاء') },
 
+  // ---- R56: of the sales, how much is cash in hand vs. on account ----
+  { text: 'بعت كام الشهر ده؟', vertical: 'supermarket', expect: 'المبيعات تتقسم: كاش في اليد + على الحساب (عند العملاء)', check: (r) => String(JSON.stringify(r.cards)).includes('كاش (في اليد)') && String(JSON.stringify(r.cards)).includes('على الحساب') },
+  { text: 'بعت كام على الحساب؟', vertical: 'supermarket', expect: 'سؤال عن الحساب: نفس الأرقام، السطر بتاع الحساب موجود', check: (r) => String(JSON.stringify(r.cards)).includes('على الحساب') },
+
 
   // ---- R51: the everyday balance question must not die offline ----
   { text: 'كم علي أم حسن؟', vertical: 'supermarket', expect: 'رصيد العميل (مش «النت تقيل»)', check: (r) => all(noCard, saysNot('النت شكله تقيل'))(r) && String(r.replyText).length >= 30 },
