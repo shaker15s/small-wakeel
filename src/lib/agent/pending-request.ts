@@ -36,7 +36,7 @@ export interface NewItemSlots {
   sourceText?: string
 }
 
-export type PendingKind = 'purchase_new_item' | 'purchase_known_item' | 'credit_new_customer'
+export type PendingKind = 'purchase_new_item' | 'purchase_known_item' | 'credit_new_customer' | 'cash_new_customer'
 
 const PENDING_TTL_MS = 20 * 60 * 1000 // same grace as CashbookDialogue
 
@@ -345,6 +345,16 @@ export function parseCreditBalance(norm: string): number | null {
 /** R48 — is the message a fresh WORK command (so the credit request releases)? */
 export function isCreditCommand(norm: string): boolean {
   return CREDIT_CMD_RE.test(norm.trim())
+}
+
+/**
+ * R49 — the owner answered the cash-sale hint («لو عايزه مسجل قولي»):
+ * «سجله / زوده / ضيفه» — register the typed name as a customer.
+ */
+const REGISTER_CMD_RE =
+  /(?:^| )(?:سجل|سجله|سجلها|سجلته|سجلتها|سجللي|سجل لي|زود|زوده|زودته|زودتها|ضيف|ضفه|ضيفه|ضيفته)(?: |$)/
+export function isRegisterCommand(norm: string): boolean {
+  return REGISTER_CMD_RE.test(norm.trim())
 }
 
 /** The outstanding question, in the employee's voice (Egyptian, warm, precise). */

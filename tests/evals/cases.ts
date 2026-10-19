@@ -223,6 +223,29 @@ export const CASES: EvalCase[] = [
     followUp: 'بعت ٢ تونة لأم حسن بـ٥٠',
     check: (r) => draft('sale')(r) && !String(r.replyText).includes('مش مسجل في حسابات العملاء — عليه كام'),
   },
+
+  // ---- R49: the cash hint «لو عايزه مسجل قولي» is kept ----
+  {
+    text: 'بعت ٢ تونة لعميل اسمه أحمد زكي اللي مش معارفه',
+    vertical: 'supermarket',
+    expect: '«سجله» → عميل جديد بالاسم الصح (مش ضايقين ولا بحث)',
+    followUp: 'سجله عميل',
+    check: (r) => r.card?.type === 'customer_add' && String(r.replyText).includes('احمد زكي'),
+  },
+  {
+    text: 'بعت ٢ تونة لعميل اسمه أحمد زكي اللي مش معارفه',
+    vertical: 'supermarket',
+    expect: '«سجله عليه ٥٠» → عميل برصيد افتتاحي ٥٠',
+    followUp: 'سجله عليه ٥٠',
+    check: (r) => r.card?.type === 'customer_add' && (r.card?.fields ?? []).some((f: any) => String(f.value).includes('٥٠')),
+  },
+  {
+    text: 'بعت ٢ تونة لعميل اسمه أحمد زكي اللي مش معارفه',
+    vertical: 'supermarket',
+    expect: 'سؤال شغل تاني → الطلب يطلّع والرد طبيعي',
+    followUp: 'كم مخزون التونة؟',
+    check: (r) => !r.card || r.card.type !== 'customer_add',
+  },
   { text: 'ارفع سعر زيت عافية ٥ جنيه', vertical: 'supermarket', expect: 'تغيير سعر بدلتا', check: (r) => r.card?.kind === 'draft' || noCard(r) },
 
   // =======================================================================

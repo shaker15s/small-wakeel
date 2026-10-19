@@ -69,6 +69,7 @@ import {
   looksLikeNewTopic,
   markPendingDone,
   isCreditCommand,
+  isRegisterCommand,
   parseCreditBalance,
   pendingFollowUpText,
   pendingQuestionText,
@@ -2095,6 +2096,32 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
           ? [{ label: 'المستحق للمورد', value: egp(total - paid), tone: 'bad' as const }]
           : []),
       ], dangerNote ?? RISK_META[risk].hint)
+      // R49: the cash card's hint promised «لو عايزه مسجل قولي» — hold the
+      // typed name so the owner's NEXT message «سجله» knows who to register.
+      if (type === 'sale' && typedCustomerName && ctx.conversationId) {
+        await savePendingRequest({
+          businessId: business.id,
+          conversationId: ctx.conversationId,
+          userId: user.id,
+          kind: 'cash_new_customer',
+          slots: {
+            itemId: item.id,
+            itemName: item.name,
+            qty: qtyN,
+            unit: item.unit,
+            unitLabel: null,
+            paid,
+            supplierName: null,
+            suggestedSupplier: null,
+            total,
+            unitPrice: qtyN > 0 ? total / qtyN : null,
+            customerName: typedCustomerName,
+            openingBalance: null,
+            sourceText: text,
+          },
+          question: '',
+        })
+      }
       return { ok: true, opType: type, payload, summary, card }
     }
 
@@ -3622,6 +3649,22 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         done(IDX.understand, `طلب معلق اكتمل — بتسجيل «${name}» وأنزل عليه البيعة`)
       }
     }
+    // ---- R49: CASH sale drafted under a typed name («— مش مسجل») ----
+    // The card's hint promised «لو عايزه مسجل قولي» — hold the name so the
+    // owner's «سجله» knows WHO. No open question was asked, so: a register
+    // command completes it (one customer_add draft); ANYTHING else releases
+    // silently and is handled normally. Never a re-ask.
+    if (pending && pending.kind === 'cash_new_customer') {
+      if (isRegisterCommand(norm)) {
+        const name = pending.slots.customerName ?? ''
+        const balance = parseCreditBalance(norm) ?? 0
+        pendingWriteIntent = { intent: 'write', opType: 'customer_add', fields: { name, balance } }
+        await markPendingDone(ctx.conversationId, 'resolved')
+        done(IDX.understand, `«${name}» — بتسجله عميل`)
+      } else {
+        await markPendingDone(ctx.conversationId, 'cancelled')
+      }
+    }
   }
 
   // ---- PASS 0d: DEEP RESEARCH (user-toggled OR auto-detected) — R15 ----
@@ -3634,7 +3677,10 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   const wantsAutoResearch = ctx.deepResearch !== true && RESEARCH_TRIGGER_RE.test(text)
   const autoResearchBlocked =
     wantsAutoResearch &&
-    (isActionableIntent(ruleBasedIntent(text, business.type)) || !!creditSubs)
+    (isActionableIntent(ruleBasedIntent(text, business.type)) ||
+      !!creditSubs ||
+      // R49: «سجله عليه ٥٠» is a completed pending, not a research question
+      !!pendingWriteIntent)
   // R48: «عليه ٢٠» (a balance answer) must never trigger auto-research — a
   // completed credit request owns the turn (creditSubs), and an answer to the
   // open credit question is a slot fill, not a research question.
