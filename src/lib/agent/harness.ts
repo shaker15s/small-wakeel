@@ -3602,7 +3602,10 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   }
 
   // ---- PASS 0b: Memory save (preference OR BUSINESS_DNA rule) → instant, persisted, zero LLM ----
-  const saveRequest = extractSaveRequest(text, norm) ?? extractRuleRequest(text, norm)
+  // R65: forget wins over save — «انسى إنك حافظ إن X» carries «حافظ» and the
+  // save detector used to fire FIRST, saving the forget sentence as a rule.
+  const isForgetSentence = extractForgetRequest(text, norm) != null
+  const saveRequest = isForgetSentence ? null : (extractSaveRequest(text, norm) ?? extractRuleRequest(text, norm))
   if (saveRequest && containsMemorySecret(saveRequest.text)) {
     const replyText = 'لحمايتك، مش هحفظ كلمات مرور أو رموز أمان في ذاكرة المحادثة. استخدم مدير كلمات مرور أو إعدادات الأسرار المخصصة.'
     await streamDeterministic(replyText, emit, 400)
