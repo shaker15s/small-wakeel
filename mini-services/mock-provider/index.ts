@@ -489,6 +489,10 @@ async function chat(req: Request) {
   const messages = Array.isArray(body?.messages) ? body.messages : [];
   if (messages.length === 0) return json({ error: { message: "messages[] is required" } }, 400);
   const model = (MODELS as readonly string[]).includes(body.model ?? "") ? body.model! : "wakil-mock-balanced";
+  // Audit trail: one line per request so «is my prompt reaching the provider?»
+  // is answerable from the process log, not guessed.
+  const lastUser = [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
+  console.log(`[mock] model=${model} msgs=${messages.length} user="${String(lastUser).slice(0, 90).replace(/\n/g, " ")}"`);
   const { reasoning, content } = buildReply(model, messages);
   const id = uid();
   const created = Math.floor(Date.now() / 1000);

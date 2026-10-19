@@ -2788,6 +2788,20 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   const v = getVertical(business.type)
   const model = await resolveModel(ctx.modelKey)
   const modelLabel = modelLabelFor(model)
+  // «الشفافية»: when the SELECTED model cannot be reached, the user must not
+  // receive an unmarked local-engine reply as if it were the model's words.
+  // Set at the first provider failure; appended to the final reply.
+  let providerDownNote: string | null = null
+  const noteProviderDown = () => {
+    if (providerDownNote || model.source !== 'external') return
+    providerDownNote = `⚠️ موديل «${model.label}» مش متوصّل من السيرفر ده دلوقتي (شبكة أو مفتاح) — الرد اللي فات ده خرج من المحرك التحليلي المحلي.`
+  }
+  /** Append + stream the transparency note once; used on every reply path. */
+  const withProviderNote = (text: string): string => {
+    if (!providerDownNote || !meta.fallback) return text
+    emit({ event: 'delta', text: `\n\n${providerDownNote}` })
+    return `${text.trim()}\n\n${providerDownNote}`
+  }
 
   // Load context once (memories raised to 8; pending ops count for the persona;
   // R15: «ورقة وكيل» scratchpad notes for prompt injection; R16: «أدوات
@@ -3164,10 +3178,14 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         meta.notesJotted++
       },
     })
-    if (researchResult.llmFallback) meta.fallback = true
+    if (researchResult.llmFallback) {
+      meta.fallback = true
+      noteProviderDown() // the SELECTED model never produced the report
+    }
     // stream the VERIFIED report letter-by-letter (research already emitted
     // its thinking/step/cards events incl. the sources card BEFORE any delta)
     await streamDeterministic(researchResult.reportText, emit, 2600)
+    const researchFinal = withProviderNote(researchResult.reportText)
     const researchActions: ChatActionDTO[] = [
       { id: 'act-research-stats', label: 'افتح الإحصائيات', view: 'stats', icon: 'chart', tone: 'primary' },
       { id: 'act-research-journal', label: 'سجل العمليات', view: 'journal', icon: 'journal', tone: 'outline' },
@@ -3175,7 +3193,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     emit({ event: 'actions', actions: researchActions })
     await bumpMemoryUsage(memCtx.referencedIds)
     return {
-      replyText: researchResult.reportText,
+      replyText: researchFinal,
       card: null,
       cards: researchResult.cards,
       thinking: researchResult.steps,
@@ -3891,6 +3909,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         .trim()
     } catch (err) {
       console.error('[brain] loop failed → fallback ladder:', err)
+      noteProviderDown()
       if (!executedAnyTool) return null // clean bail-out — PASS 1 re-handles the turn
       finalText = '' // tools ran → finish here, deterministically
     }
@@ -4121,6 +4140,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     done(IDX.understand, llmSingle?.replyHint ? `فهمت: ${llmSingle.replyHint}` : llmRaws.length >= 2 ? `فهمت ${llmRaws.length} طلبات في رسالة واحدة` : 'فهمت الطلب')
   } catch (err) {
     console.error('[harness] intent pass failed → rule-based fallback:', err)
+      noteProviderDown()
     done(IDX.understand, 'فهمت الطلب بالقواعد المحلية (الموديل مش متاح)')
   }
   }
@@ -4585,6 +4605,8 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     } catch (err) {
       console.error('[harness] read reply stream failed → deterministic read reply:', err)
       meta.fallback = true
+      noteProviderDown()
+      meta.fallback = true
     }
     // Grounding is checked against the PRIMARY card (cards[0]) — the one that
     // answers the question. A reply that quotes a number from a SIDE card while
@@ -4614,6 +4636,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       }
     } catch (err) {
       console.error('[harness] reply stream failed:', err)
+      noteProviderDown()
       if (replyText.trim()) throw new Error('الرد اتقطع قبل ما يكتمل — النتيجة النهائية مش مؤكدة')
       meta.fallback = true
       if (!replyText) {
@@ -4659,6 +4682,9 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       replyText = postVerified.text
     }
   }
+
+  // ---- Transparency: an unreachable SELECTED model is never silent ----
+  replyText = withProviderNote(replyText)
 
   // ---- PASS 5: Deep-link action buttons (after deltas, before done) ----
   if (actions && actions.length > 0) {
