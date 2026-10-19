@@ -11,7 +11,7 @@ import type { ResultCardDTO } from '@/lib/types'
 import { egp, qty as fmtQty, arDate, arTime } from '@/lib/format'
 import { arUnit } from '@/lib/verticals'
 import { cairoIsoDay, startOfCairoDay } from '@/app/api/_lib/dates'
-import { inspectDesktopApplication, scanRunningApplications } from './cli-anything/bridge'
+import { inspectDesktopApplication, scanRunningApplications, executeBridgedTool } from './cli-anything/bridge'
 
 export type ReadTool =
   | 'get_daily_summary'
@@ -50,6 +50,7 @@ export type ReadTool =
   | 'cli_inspect_app'
   | 'cli_sync_desktop_data'
   | 'cli_list_desktop_apps'
+  | 'cli_control_app'
 
 /** Valid read-tool names — validation set for intent parsing (multi-intent). */
 export const READ_TOOLS: ReadonlySet<string> = new Set<string>([
@@ -1752,6 +1753,26 @@ export async function runReadTool(
     case 'cli_sync_desktop_data': {
       const appName = String(args.appName ?? args.name ?? 'البرنامج الخارجي')
       const res = await inspectDesktopApplication(appName, businessId)
+      return res.cards
+    }
+
+    case 'cli_control_app': {
+      // R45 (CLI-Anything merge): drive an app through its CLI surface.
+      // Excel is a REAL engine (COM on Windows / CSV anywhere); other apps
+      // stay fail-closed with an honest status — never synthetic data.
+      const appName = String(args.app ?? args.appName ?? 'excel')
+      const res = await executeBridgedTool({
+        businessId,
+        appName,
+        command: String(args.command ?? 'list-recent'),
+        args: {
+          file: args.file ?? args.path,
+          sheet: args.sheet,
+          range: args.range,
+          value: args.value ?? args.text,
+          maxRows: args.maxRows,
+        },
+      })
       return res.cards
     }
 

@@ -102,6 +102,11 @@ const SPECS: Record<string, [string, Record<string, unknown>]> = {
   run_scheduled_tasks: ['تشغيل المهام المجدولة اللي مستحقة.', P({ scope: 'string' })],
   dispatch_background_jobs: ['تشغيل مهام خلفية متوازية.', P({ jobs: 'string' }, [])],
   scan_risks_and_opportunities: ['فحص استباقي للمخاطر والفرص في السجل.', NONE],
+  // ---------- سطح الأجهزة والتطبيقات (CLI-Anything: كل برنامج له أوامر JSON) ----------
+  cli_list_desktop_apps: ['فحص البرامج شغالة على الجهاز دلوقتي (إكسل، دفتارة، الأمين، الكاشير…) وحالتها.', NONE],
+  cli_inspect_app: ['فحص عميق لتطبيق: شغال ولا لأ، ملفات البيانات وقاعدة بياناته المحلية.', P({ appName: 'string' }, ['appName'])],
+  cli_sync_desktop_data: ['مطابقة بيانات تطبيق خارجي مع السجل (فحص فقط — الكتابة المالية محتاجة موصل موثّق).', P({ appName: 'string' }, ['appName'])],
+  cli_control_app: ['تشغيل برنامج عبر سطح أوامره (نمط CLI-Anything). «إكسل» محركه حقيقي: list-recent/summary/read (read-only)/write. app = excel|daftra|ameen|easystore|quickbooks|browser. الناتج JSON موثّق.', P({ app: 'string', command: 'string', file: 'string', sheet: 'string', range: 'string', value: 'string', maxRows: 'number' }, ['app', 'command'])],
 }
 
 /** The OpenAI-compatible tools array for the brain. Stable order = stable

@@ -2654,6 +2654,108 @@ function safeCalculate(rawExpr: string): { ok: true; value: number } | { ok: fal
   }
 }
 
+// ---------------------------------------------------------------------------
+// PRE-STEP WATERFALL — dsh `agent/pre-step` semantics merged into Wakil (R45).
+// Every turn walks the hook list before admission; the first authoritative
+// reject wins and the turn ends with a deterministic safe reply. Hooks are
+// typed and ordered; adding a guard = adding one row (no core patching —
+// the same «no privileged core» principle as DeepSeek Harness).
+// ---------------------------------------------------------------------------
+
+type PreStepVerdict = { ok: true } | { ok: false; reason: string; reply: string }
+interface PreStepCtx {
+  business: Business
+  text: string
+  norm: string
+}
+
+/** Pure decision: is a stated money amount absurd for THIS business?
+ *  Baseline = average of recent committed ops; the flag fires at
+ *  max(50× baseline, 20,000 EGP). A live typo (1,000 typed as 1,000,000)
+ *  must produce a specific question, never a draft. */
+export function absurdAmountCheck(
+  text: string,
+  baselineEgp: number,
+  opts: { confirmed?: boolean } = {},
+): { amountEgp: number; baselineEgp: number; multiplier: number } | null {
+  if (opts.confirmed) return null
+  if (!/(^| )(بعت|بيع|اشتريت|جبت|حصلت|قبضت|سددت|سداد|دفعت|ادفع|صرفت|سجل)( |$)/.test(toWesternDigits(normalizeAr(text)))) return null
+  const nums = (toWesternDigits(text).match(/\d[\d,]*\.?\d*/g) ?? []).map((n) => Number(n.replace(/,/g, ''))).filter((n) => Number.isFinite(n))
+  if (nums.length === 0) return null
+  const amountEgp = Math.max(...nums)
+  if (amountEgp < 1000) return null // small amounts are never flagged
+  const hasBaseline = baselineEgp > 0
+  const baseline = hasBaseline ? baselineEgp : 0
+  // with a real baseline: 50× it, floored at 20k; without one: the 20k floor
+  const threshold = hasBaseline ? Math.max(50 * baseline, 20000) : 20000
+  if (amountEgp < threshold) return null
+  return { amountEgp, baselineEgp: baseline, multiplier: hasBaseline ? Math.round(amountEgp / baseline) : 0 }
+}
+
+const WRITE_VERB_CONFIRMED_RE = /(متأكد|متاكد|مؤكد|تاكيد|تأكيد|أكيد|أكيد كده)/
+
+async function absurdAmountHook({ business, text }: PreStepCtx): Promise<PreStepVerdict> {
+  if (!WRITE_VERB_CONFIRMED_RE.test(normalizeAr(text))) {
+    // baseline from the last 30 committed operations (payload totals, piastres)
+    const ops = await db.operation.findMany({
+      where: { businessId: business.id, status: 'COMMITTED' },
+      orderBy: { createdAt: 'desc' },
+      take: 30,
+      select: { payload: true },
+    })
+    let baselineEgp = 0
+    if (ops.length > 0) {
+      let sum = 0
+      for (const o of ops) {
+        try {
+          const p = JSON.parse(o.payload) as { total?: number; amount?: number }
+          const v = p.total ?? p.amount ?? 0
+          if (typeof v === 'number' && v > 0) sum += v
+        } catch { /* op without structured payload */ }
+      }
+      baselineEgp = sum / ops.length / 100
+    }
+    const hit = absurdAmountCheck(text, baselineEgp)
+    if (hit) {
+      const pretty = (v: number) => Math.round(v).toLocaleString('en-US')
+      return {
+        ok: false,
+        reason: 'absurd_amount',
+        reply: `واصف قبل ما أعمل أي حاجة: المبلغ اللي في الرسالة **${pretty(hit.amountEgp)} جنيه** — ده حوالي **${pretty(hit.multiplier)}×** متوسط حركاتك (${pretty(hit.baselineEgp)} جنيه). لو الرقم صح وقصدته بالظبط، قولي «متأكد» وأنا أشغّله فورًا، ولو فيه غلطة كتابية قولي الرقم الصح.`,
+      }
+    }
+  }
+  return { ok: true }
+}
+
+async function promptBudgetAuditHook({ text }: PreStepCtx): Promise<PreStepVerdict> {
+  // Audit seam (dsh `agent/request` context pressure): long turns get a
+  // telemetry mark so context growth is visible, never silently dropped.
+  if (text.length > 2000) {
+    console.log(`[pre-step] long-turn-admitted chars=${text.length}`)
+  }
+  return { ok: true }
+}
+
+const PRE_STEP_HOOKS: { id: string; run: (ctx: PreStepCtx) => Promise<PreStepVerdict> }[] = [
+  { id: 'absurd-amount', run: absurdAmountHook },
+  { id: 'prompt-budget-audit', run: promptBudgetAuditHook },
+]
+
+async function runPreStepWaterfall(ctx: PreStepCtx): Promise<PreStepVerdict> {
+  for (const h of PRE_STEP_HOOKS) {
+    try {
+      const v = await h.run(ctx)
+      if (!v.ok) return v
+    } catch {
+      // A crashing hook must never block the turn (fail-open, logged).
+      console.error(`[pre-step] hook ${h.id} crashed — skipped`)
+    }
+  }
+  return { ok: true }
+}
+
+
 /** R44 — desk calculator, zero LLM: «حسبلي ٢٠٠ ضرب ١٥» / «١٥٪ من ٥٠ كام؟».
  * A real employee does this in his head; offline used to return a network
  * apology for the most trivial ask in the shop. Returns null when the text
@@ -3057,6 +3159,20 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   pushThinking()
 
   const norm = normalizeAr(text)
+
+  // ---- PRE-STEP WATERFALL (DeepSeek-Harness `agent/pre-step`, R45) ----
+  // Typed hooks validate the turn BEFORE any path is admitted (direct
+  // commands, deterministic passes, or the model). A hook can authoritatively
+  // REJECT — a dangerous or absurd payload never reaches the model, the user
+  // gets a specific safe question instead (stop-and-ask).
+  const preStep = await runPreStepWaterfall({ business, text, norm })
+  if (!preStep.ok) {
+    done(IDX.understand, 'بوابة الأمان قبل التنفيذ — استفسار محدد')
+    done(IDX.reply)
+    await streamDeterministic(preStep.reply, emit, 450)
+    return { replyText: preStep.reply, card: null, cards: null, thinking: steps, modelLabel, actions: [] }
+  }
+
 
   // ---- PASS 0y: Desk calculation → instant, deterministic, zero LLM (R44) ----
   // «حسبلي ٢٠ ضرب ١٥» must NEVER ride the model (offline it died as a

@@ -59,3 +59,4 @@ skills/
 
 # Local CI reports
 .ci-results/
+bin/

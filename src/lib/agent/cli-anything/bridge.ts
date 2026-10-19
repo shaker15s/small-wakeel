@@ -10,6 +10,8 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import type { AgentPluginDTO, ResultCardDTO } from '@/lib/types'
+import { executeExcelCommand, type ExcelCommandResult, type ExcelOp } from './excel-engine'
+import { skillForApp } from './app-skills'
 
 const execFileAsync = promisify(execFile)
 
@@ -67,7 +69,7 @@ export interface CliBridgeResult {
   harnessSchema: Record<string, unknown>
   plugin?: AgentPluginDTO
   error?: string
-  status?: 'not_connected'
+  status?: 'not_connected' | 'unavailable'
 }
 
 export interface BridgedToolParams {
@@ -89,7 +91,7 @@ export interface BridgedToolExecutionResult {
   cards: ResultCardDTO[]
   summary: string
   error?: string
-  status?: 'not_connected'
+  status?: 'not_connected' | 'unavailable'
 }
 
 // ---------------------------------------------------------------------------
@@ -707,21 +709,103 @@ function notConnectedCards(appName: string): ResultCardDTO[] {
   }]
 }
 
-/** No synthetic data, internal-ledger fallback or success without an adapter. */
+/**
+ * Execute a bridged app command. R45 (CLI-Anything merge): spreadsheet apps
+ * route to the REAL Excel/CSV engine when the server is co-located with the
+ * merchant's machine (self-host/dev — the same gate the inspection engines
+ * use: `NODE_ENV !== 'production'`). Everything else stays fail-closed: no
+ * synthetic data, no fake success — cloud production can never see the
+ * client machine.
+ */
 export async function executeBridgedTool(params: BridgedToolParams): Promise<BridgedToolExecutionResult> {
   const appName = params.appName.trim() || 'تطبيق العمل'
+  const command = String(params.command ?? 'check_status')
+  const args = (params.args ?? {}) as Record<string, unknown>
+  const started = Date.now()
+
+  const localSessionAllowed = process.env.NODE_ENV !== 'production'
+  if (localSessionAllowed) {
+    const skill = skillForApp(appName)
+    const isSpreadsheet =
+      skill?.category === 'spreadsheet' ||
+      /اكسيل|اكسل|excel|كسل|جداول?|شيت|csv/i.test(appName)
+    if (isSpreadsheet) {
+      const opMap: Record<string, ExcelOp> = {
+        'list-recent': 'list-recent',
+        'recent': 'list-recent',
+        summary: 'summary',
+        read: 'read',
+        'sheet-read': 'read',
+        write: 'write',
+        'cell-write': 'write',
+      }
+      const op = opMap[command] ?? (command === 'check_status' ? 'list-recent' : undefined)
+      if (op) {
+        const res = await executeExcelCommand(op, {
+          file: args.file ?? args.path ?? args.workbook,
+          sheet: args.sheet ?? args.sheetName,
+          range: args.range ?? args.cell,
+          value: args.value ?? args.text,
+          maxRows: args.maxRows ?? args.rows,
+        })
+        return {
+          ok: res.ok,
+          appName,
+          command,
+          durationMs: Date.now() - started,
+          executedAt: new Date().toISOString(),
+          data: { source: res.backend, ...res.data } as Record<string, unknown>,
+          cards: [excelResultCard(res)],
+          summary: res.summary,
+          error: res.error,
+          status: res.status,
+        }
+      }
+    }
+  }
+
   return {
     ok: false,
     status: 'not_connected',
     appName,
-    command: params.command ?? 'check_status',
-    durationMs: 0,
+    command,
+    durationMs: Date.now() - started,
     executedAt: new Date().toISOString(),
     data: { source: 'none', connectionStatus: 'not_connected' },
     cards: notConnectedCards(appName),
     summary: NOT_CONNECTED_MESSAGE,
     error: 'not_connected',
   }
+}
+
+/** Compact KV card for a real Excel engine result. */
+function excelResultCard(res: ExcelCommandResult): ResultCardDTO {
+  if (!res.ok) {
+    return {
+      kind: 'kv',
+      title: `إكسل / الجداول — ${res.op}`,
+      rows: [{ label: 'الحالة', value: res.summary, tone: 'bad' }],
+    }
+  }
+  const rows: { label: string; value: string; tone?: 'good' | 'bad' | 'neutral' }[] = [
+    { label: 'الناتج', value: res.summary, tone: 'good' },
+    { label: 'المحرك', value: res.backend === 'com' ? 'Excel COM (ويندوز)' : res.backend === 'csv' ? 'محرك CSV (محلي)' : '—' },
+  ]
+  const data = res.data
+  if (res.op === 'summary' && Array.isArray(data.sheets)) {
+    for (const s of (data.sheets as { name?: string; rows?: number; cols?: number }[]).slice(0, 6)) {
+      rows.push({ label: `شيت «${s.name ?? ''}»`, value: `${s.rows ?? 0} صف × ${s.cols ?? 0} عمود` })
+    }
+  }
+  if (res.op === 'read' && Array.isArray(data.rows)) {
+    rows.push({ label: 'الصفوف المرجعة', value: `${data.returned ?? 0} من ${data.totalRows ?? 0}` })
+  }
+  if (res.op === 'list-recent' && Array.isArray(data.files)) {
+    for (const f of (data.files as { name?: string; modified?: string }[]).slice(0, 5)) {
+      rows.push({ label: f.name ?? 'ملف', value: String(f.modified ?? '') })
+    }
+  }
+  return { kind: 'kv', title: `إكسل / الجداول — ${res.op}`, rows }
 }
 
 /** Fail before registration: a generated command schema is not a connection. */
