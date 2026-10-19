@@ -125,6 +125,11 @@ export function brainToolSchemas(): BrainToolSchema[] {
   }))
 }
 
+/** name → Arabic use-when line, straight from SPECS. */
+export function brainToolDescriptions(): Record<string, string> {
+  return Object.fromEntries(Object.entries(SPECS).map(([n, [s, d]]) => [n, d]))
+}
+
 /** Tool names grouped by their SPECS section — the prompt's one-line
  *  inventory is derived from the SAME registry, never hand-maintained. */
 export function brainToolSections(): Record<ToolSection, string[]> {

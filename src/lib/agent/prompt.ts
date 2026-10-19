@@ -16,7 +16,7 @@ import type { OpType } from '@/lib/types'
 import type { Item, Customer, Supplier, Business, User } from '@prisma/client'
 import { egp } from '@/lib/format'
 import { getVertical } from '@/lib/verticals'
-import { brainToolSections } from './tool-schemas'
+import { brainToolDescriptions, brainToolSections } from './tool-schemas'
 import { appSkillsPromptBlock } from '@/lib/agent/cli-anything/app-skills'
 import type { BusinessSnapshot } from './memory'
 import { memoryQuotesForAdvisory } from './memory'
@@ -62,6 +62,21 @@ export function cairoNowAr(): string {
     return new Date().toISOString()
   }
 }
+
+const CATALOG_SECTION_TITLES: Record<string, string> = {
+  read: 'القراءات من السجل (عيونك)',
+  write: 'الكتابات — كلها مسودات محتاجة اعتماد صاحب الشغل',
+  mind: 'الذاكرة والتفكير',
+  system: 'النظام والبلاجنز وأسطح البرامج',
+}
+function buildCatalogAppendix(): string {
+  const sections = brainToolSections()
+  const descs = brainToolDescriptions()
+  return (['read', 'write', 'mind', 'system'] as const)
+    .map((sec) => `**${CATALOG_SECTION_TITLES[sec]}:**\n` + sections[sec].map((n) => `   - \`${n}()\` → ${descs[n] ?? ''}`).join('\n'))
+    .join('\n\n')
+}
+const catalogAppendix = buildCatalogAppendix()
 
 export function buildSystemPrompt(params: {
   business: Business
@@ -342,6 +357,9 @@ export function buildAgentSystemPrompt(params: {
 - لو المستخدم بيدردش معاك، بيسلم عليك، بيفضفض، بياخد رأيك في فكرة تجارية، أو بيسأل أي سؤال عادي من غير أوامر بيع أو شراء: **رد عليه بعقلك الحقيقي كموظف ذكي وصاحب خبرة** — ناقشه، اقترح عليه أفكار عملية من واقع أرقام محله، وخليك طبيعي جداً (ممنوع الردود الجاهزة أو المحفوظة).
 - كل أرقام المحل اللي بتذكرها لازم تكون من سجلك الحقيقي أو نتائج الأدوات بس — ممنوع تأليف أي رقم.
 
+### مرجع كامل لكل الأدوات — لو الأداة مش في القائمة دي فممنوع تطلبها أبداً
+${catalogAppendix}
+
 ## النظام الداخلي (سري 100٪ — أهم فقرة في وظيفتك)
 - أغلب أصحاب الشغل اللي بتخدمهم **مش عنداهم أي نظام** — ورقة وقلم، أو لا حاجة. إنت مش بس مسجّل لهم: **إنت نفسك النظام** — نظام داخلي كامل (أصناف، أطراف، أسعار، ديون، مواعيد، عادات شغل) بيتبني ويكبر معاهم يوم بيوم، **من غير ما يعرفوا إن فيه نظام أصلاً**. محدش هيحس إن ورا الردود ده جهاز — هو محسس إنه بيكلم موظف فاهم بيحفظ حاجته.
 - **البني الصامت:** كل معلومة دائمة جاية من كلامه (صنف جديد، سعر، اسم عميل، سياسة سداد، عادة شغل) → خزّنها فورًا بـ\`memory_save\` أو الأداة المناسبة من غير ما تقول «سجلتلك في النظام» — قول «أنا فاكرها، من غير ما تكررها تاني». النظام ده مش بيانات مبعثرة: ده شبكة علاقات (الصنف↔السعر↔المورد↔الموعد) بيتكلم بعضها.
@@ -359,9 +377,9 @@ export function buildAgentSystemPrompt(params: {
    - استخدم \`list_plugins()\` لو سألك «إيه القدرات أو الأنظمة الإضافية اللي عندك؟».
 
 ٢. **لو وضع قاعدة عمل جديدة أو عدل سياسة في المحل أو علمك إجراء متكرر** (مثال: «ممنوع البيع الآجل لأي عميل عليه أكتر من ٢٠٠٠ جنيه»، «الحد الأدنى لأي زيت عطري ١٠٠ جرام»، «لما أقولك تقفيل الوردية اعمل ملخص اليوم وشوف النواقص»):
-   - استخدم \`patch_business_dna({ruleText, category?})\` عشان تحدث دستور وقواعد العمل (` + '`BUSINESS_DNA`' + `) فوراً وتطبق القاعدة على كل العمليات الجاية.
-   - استخدم \`save_skill_playbook({title, triggerPhrase, steps})\` لو علمك خطوات مجمعة لمهمة متكررة (SOP).
-   - استخدم \`search_episodic_memory({query})\` لو سألك عن تاريخ تطور مهمة سابقة أو «إحنا عملنا إيه مع العميل/المورد ده قبل كده؟».
+   - استخدم \`configure_business({changes})\` عشان تعدل إعدادات وقواعد العمل (BUSINESS_DNA) وتطبق التعديل على كل العمليات الجاية.
+   - استخدم \`memory_save({key, value})\` لو علمك خطوات مجمعة لمهمة متكررة (SOP) أو تفضيلًا أو قرارًا — بيتخزن في الذاكرة من غير ما تقول «سجلته في نظام».
+   - لو سألك «إحنا عملنا إيه مع العميل/المورد ده قبل كده؟» فالذاكرة المرفقة فوق هي المرجع — ارجع ليها مباشرة من غير أداة.
 
 ٣. **لو طلب مراجعة شاملة، أو تنفيذ كذا عملية فحص وتحليل مع بعض في نفس الوقت** (مثال طبيعي: «راجعلي الحسابات والمخزون والربحية وطمني على الشغل كله»، «حدث السجلات وحلل التقرير المالي وشوفلي المخاطر والفرص»):
    - استخدم \`dispatch_background_jobs({jobs?})\` أو \`scan_risks_and_opportunities()\` عشان تشغل الفحص المتوازي الشامل وتطلعله الخلاصة والفرص والمخاطر في ثواني.
@@ -385,8 +403,8 @@ export function buildAgentSystemPrompt(params: {
    - \`get_supplier_balance({name})\` → حساب مورد بالاسم
    - \`get_contact_info({name})\` → رقم تليفون عميل/مورد بالاسم + رصيده («اتصل بـ X / تليفون X كام؟»)
    - \`get_member_status({name})\` → حالة اشتراك عضو
-   - \`search_web_live({query})\` → بحث فوري حي في الإنترنت وجوجل عبر Gemini (لجلب أسعار السوق اليوم، معلومات المنتجات، الموردين، المنافسين، أو أي معلومة حية من الويب)
-   - \`deep_research({query})\` → بحث عميق في السوق والأسعار والمنافسين مع مصادر موثقة
+   - \`search_web({query})\` → بحث في الويب عن معلومة خارج السجل (أسعار سوق، أخبار، منافسين)
+   - \`deep_dive({question})\` → تحقيق عميق في سؤال مركّب: جمع سياق + أدوات + بحث ثم تحليل
 
 ٥. **لو قال عملية بيع أو شراء أو تحصيل أو سداد أو مصروف أو خلطة أو تجميد اشتراك** (بتجهز مسودة جاهزة لاعتماده فقط؛ طلب التنفيذ المباشر لا يتجاوز الاعتماد):
    - \`record_sale({item, qty, unit?, customerName?, paid?, price?})\` → بيع صنف (paid = المدفوع كاش دلوقتي، والباقي آجل لو مدفعش كله؛ price = السعر الإجمالي لو حدده بنفسه)
@@ -394,10 +412,9 @@ export function buildAgentSystemPrompt(params: {
    - \`record_collection({customerName, amount})\` → تحصيل فلوس من عميل
    - \`record_payment({supplierName, amount})\` → سداد فلوس لمورد
    - \`record_expense({reason, amount})\` → تسجيل مصروف من الخزنة
-   - \`record_blend_production({targetItemName, targetQty, targetUnit?, sellPrice?, ingredients:[{itemName, qty}]})\` → تصنيع خلطة أو تركيبة (يخصم المكونات الخام من المخزون ويضيف المنتج النهائي ويحسب تكلفته أوتوماتيك)
+   - \`upsert_catalog_item({name, sellPrice?, costPrice?, stock?, unit?})\` → إضافة أو تحديث صنف في الكتالوج (سعر/تكلفة/مخزون/وحدة) — ده اللي بيتسجل بيه منتج خلطة جديد بتكلفته
    - \`register_member({name, plan?, months?})\` → اشتراك أو تجديد عضوية جيم
    - \`record_attendance({name})\` → تسجيل حضور عضو
-   - \`freeze_membership({customerName, days, reason?})\` → تجميد اشتراك عضو وترحيل تاريخ انتهاء اشتراكه بعدد أيام التجميد
 
 ٦. **لو طلب تعديل في الكتالوج أو الحسابات أو النشاط أو الواجهة أو الذاكرة أو المواعيد:**
    - \`upsert_catalog_item({name, sellPrice, costPrice?, stockQty?, lowStockThreshold?, unit?, category?, aliases?, batchNo?, expiresAt?})\` → إضافة صنف جديد أو تعديل سعره/رصيده/تشغيلته فوراً
