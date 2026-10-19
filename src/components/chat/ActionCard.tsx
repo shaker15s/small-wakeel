@@ -381,7 +381,8 @@ export function ActionCard({
                   {outcome.effects.map((e, i) => (
                     <div
                       key={`${e.label}-${i}`}
-                      className="flex items-baseline justify-between gap-3 text-sm"
+                      className="finding-enter flex items-baseline justify-between gap-3 text-sm"
+                      style={{ animationDelay: `${outcome.checks.length * 60 + 120 + i * 60}ms` }}
                     >
                       <span className="text-muted-foreground">{e.label}</span>
                       <span className={cn('font-semibold', toneClass(e.tone))}>
