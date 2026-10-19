@@ -33,6 +33,7 @@ export type ReadTool =
   | 'forecast_stockout'
   | 'get_customer_history'
   | 'get_supplier_history'
+  | 'get_contact_info'
   | 'compare_periods'
   | 'expense_breakdown'
   | 'get_period_totals'
@@ -73,6 +74,7 @@ export const READ_TOOLS: ReadonlySet<string> = new Set<string>([
   'forecast_stockout',
   'get_customer_history',
   'get_supplier_history',
+  'get_contact_info',
   'compare_periods',
   'expense_breakdown',
   'search_web',
@@ -1459,6 +1461,63 @@ export async function runReadTool(
       ]
     }
 
+    case 'get_contact_info': {
+      // R54 — «رقم تليفون أم حسن؟» / «اتصل بـ محمد تاجر الجملة». One number,
+      // plus the balance as context (a call is usually to collect or to order).
+      // Customers first, suppliers second; the same exact > strong-partial
+      // contract as the two history files — never one person's number for
+      // another person.
+      const name = String(args.name ?? '').trim()
+      const flat = (x: string) => normalizeAr(x).replace(/\s+/g, ' ').trim()
+      const wordCount = (x: string) => flat(x).split(' ').filter(Boolean).length
+      const [customers, suppliers] = await Promise.all([
+        db.customer.findMany({ where: { businessId } }),
+        db.supplier.findMany({ where: { businessId } }),
+      ])
+      const pick = <T extends { name: string }>(list: T[]): T | undefined => {
+        const exact = list.find((c) => flat(c.name) === flat(name))
+        if (exact) return exact
+        if (!name || isQuestionWord(name)) return undefined
+        const strong = list.filter(
+          (c) => flat(c.name).includes(flat(name)) && (wordCount(name) >= 2 || flat(name).length >= 6),
+        )
+        return strong.length === 1 ? strong[0] : undefined
+      }
+      const cust = pick(customers)
+      const sup = cust ? undefined : pick(suppliers)
+      const found = (cust ?? sup) as (Customer & { phone: string | null; balance: number }) | undefined
+      if (!found) {
+        const near = [...customers.map((c) => c.name), ...suppliers.map((s2) => s2.name)]
+          .filter((n) => flat(n).includes(flat(name)))
+          .slice(0, 3)
+        return [
+          {
+            kind: 'kv',
+            title: 'رقم التليفون',
+            rows: [
+              { label: 'النتيجة', value: `ملقيتش «${name}» في سجل العملاء ولا الموردين` },
+              ...(near.length > 0
+                ? [{ label: 'قصدت؟', value: near.join(' · ') }]
+                : [{ label: 'الخطوة', value: `قولّي «ضيف ${name}» وبرضه رقم تليفونه وأنا أسجله` }]),
+            ],
+          },
+        ]
+      }
+      const isCust = cust != null
+      return [
+        {
+          kind: 'kv',
+          title: `تليفون ${found.name}`,
+          rows: [
+            { label: 'النوع', value: isCust ? 'عميل' : 'مورد' },
+            ...(found.phone
+              ? [{ label: 'التليفون', value: found.phone }]
+              : [{ label: 'التليفون', value: 'مش مسجل في السجل — قولّي رقمه وأنا أضيفة' }]),
+            { label: 'الرصيد', value: isCust ? `عليه ${egp(found.balance)}` : `رصيدنا عليه ${egp(found.balance)}` },
+          ],
+        },
+      ]
+    }
     case 'compare_periods': {
       // «أنا أحسن من الأسبوع اللي فات؟» — two windows, one honest verdict.
       const days = Math.min(90, Math.max(2, Number(args.days ?? 7) || 7))

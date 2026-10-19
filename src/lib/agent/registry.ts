@@ -48,6 +48,7 @@ export const AGENT_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   'forecast_stockout',
   'get_customer_history',
   'get_supplier_history',
+  'get_contact_info',
   'compare_periods',
   'expense_breakdown',
   // «بعت كام لبن الشهر ده؟ / حصلت كام من أم حسن؟» — period aggregates
@@ -128,6 +129,7 @@ export const TOOL_STEP_LABEL: Record<string, string> = {
   forecast_stockout: 'توقّع النقص',
   get_customer_history: 'ملف العميل',
   get_supplier_history: 'ملف المورد',
+  get_contact_info: 'رقم التليفون',
   compare_periods: 'مقارنة الفترات',
   expense_breakdown: 'تفصيل المصروفات',
   search_web: 'بحث في الويب',

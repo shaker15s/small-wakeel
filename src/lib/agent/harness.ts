@@ -90,7 +90,7 @@ import { factsFromCards, verifyReply, type VerifyFact } from './verify'
 import { buildAdvisoryPrompt, buildAgentSystemPrompt, buildReplyPrompt, buildSystemPrompt, roleTitle, TONE_AR } from './prompt'
 import { harnessesPromptBlock } from './cli-anything/harness-installer'
 import { brainToolSchemas } from './tool-schemas'
-import { READ_TOOLS, runReadTool, TYPE_AR, type ReadTool } from './tools'
+import { READ_TOOLS, runReadTool, TYPE_AR, isQuestionWord, type ReadTool } from './tools'
 import {
   budgetToolHistory,
   logContextPressure,
@@ -278,6 +278,7 @@ const TOOL_ACTIONS: Record<string, ChatActionDTO[]> = {
   list_receivables: [{ id: 'act-list_receivables', label: 'حسابات العملاء', view: 'accounts', icon: 'users', tone: 'primary' }],
   list_payables: [{ id: 'act-list_payables', label: 'حسابات الموردين', view: 'accounts', icon: 'users', tone: 'primary' }],
   get_supplier_history: [{ id: 'act-get_supplier_history', label: 'حسابات الموردين', view: 'accounts', icon: 'users', tone: 'primary' }],
+  get_contact_info: [{ id: 'act-get_contact_info', label: 'جهات الاتصال', view: 'accounts', icon: 'users', tone: 'primary' }],
   get_activity_history: [{ id: 'act-get_activity_history', label: 'سجل العمليات', view: 'journal', icon: 'journal', tone: 'primary' }],
   search_catalog: [{ id: 'act-search_catalog', label: 'افتح المخزون', view: 'inventory', icon: 'boxes', tone: 'primary' }],
   get_item_stock: [{ id: 'act-get_item_stock', label: 'افتح المخزون', view: 'inventory', icon: 'boxes', tone: 'primary' }],
@@ -298,6 +299,7 @@ const TOOL_LABEL_AR: Record<string, string> = {
   list_receivables: 'الحسابات المستحقة',
   list_payables: 'مستحقات الموردين',
   get_supplier_history: 'ملف المورد',
+  get_contact_info: 'رقم التليفون',
   list_expiring: 'الصلاحيات القريبة',
   search_catalog: 'بحث في الكتالوج',
   get_item_stock: 'رصيد صنف',
@@ -681,6 +683,22 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
   const mRef = s.match(/WKL[\s-]?([0-9٠-٩]{3,})/i)
   if (mRef && !/(سجل|سدد|دفع|ضيف|اشتري|بعت|صرف|عدل|اعكس|الغيت|امسح)/.test(s)) {
     return { intent: 'read', tool: 'get_transaction_status', fields: { ref: `WKL-${toWesternDigits(mRef[1])}` } }
+  }
+  // R54: a phone question — «رقم تليفون أم حسن؟» / «اتصل بـ محمد تاجر الجملة» /
+  // «تليفون المورد محمد تاجر الجملة كام؟». Sits AFTER the mRef rule (a ref
+  // question carries WKL-… and wins) and BEFORE the payables substring rule.
+  const mPhone = s.match(
+    /(?:^|\s)(?:رقم(?: تليفون)?|تليفون|التليفون|جوال|اتصل)(?: ب(?:ـ)?|\s+(?:تليفون|الرقم|رقم|بتاع|بتاعت|اللي))?[\s-]*([^\s؟?]+(?:\s+[^\s؟?]+){0,4})/,
+  )
+  if (mPhone && !/(سجل|ضيف|اضف|اضيف)/.test(s)) {
+    const n = mPhone[1]
+      .replace(/^(?:ال)?(?:عميل|عميله|مورد|مورده|زبون|بتاع|بتاعت|ب)\s+/, '')
+      .replace(/\s+(?:هو|هي|ايه|إيه|كام|متاح|رقمه|رقمها)(?:\s|$)/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+    if (n.length >= 2 && !isQuestionWord(n)) {
+      return { intent: 'read', tool: 'get_contact_info', fields: { name: n } }
+    }
   }
   // «أنا أحسن من الأسبوع اللي فات؟ / قارن»
   if (/(احسن من|أحسن من|قارن|مقارنه|مقارنة|اللي فات|الشهر اللي فات|الاسبوع اللي فات)/.test(s)) {
@@ -4754,6 +4772,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       'get_reorder_list',
       'get_profit_by_item',
       'get_supplier_history',
+      'get_contact_info',
     ])
     if (!SAFE.has(r.tool)) return null
     const hasDigits = /[0-9٠-٩۰-۹]/.test(text)

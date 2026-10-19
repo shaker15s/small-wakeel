@@ -249,6 +249,12 @@ export const CASES: EvalCase[] = [
   { text: 'الورقة WKL 2070 كانت كام؟', vertical: 'supermarket', expect: 'نفس العملية برقم من غير شرطة: التطبيع بيفضلها', check: (r) => String(JSON.stringify(r.cards)).includes('WKL-2070') },
   { text: 'WKL-9999', vertical: 'supermarket', expect: 'رقم ملوش عملية: نتيجة صادقة (ملقيتش)', check: (r) => cards(1)(r) && String(JSON.stringify(r.cards)).includes('ملقيتش') },
 
+  // ---- R54: a phone question answers with the number (never the wrong person) ----
+  { text: 'رقم تليفون أم حسن؟', vertical: 'supermarket', expect: 'رقم تليفون العميل بالاسم من السجل', check: (r) => String(JSON.stringify(r.cards)).includes('0111 987 6543') },
+  { text: 'اتصل بـ محمد تاجر الجملة', vertical: 'supermarket', expect: 'رقم تليفون المورد: نفس العقد، الجهة التانية', check: (r) => String(JSON.stringify(r.cards)).includes('0100 555 4433') },
+  { text: 'رقم تليفون سمير غنيم', vertical: 'supermarket', expect: 'رقم مش مسجل: نتيجة صادقة (مش رقم من عند واحد تاني)', check: (r) => String(JSON.stringify(r.cards)).includes('مش مسجل') },
+  { text: 'رقم تليفون عميل مش موجود؟', vertical: 'supermarket', expect: 'اسم مش في السجل: نتيجة صادقة (ملقيتش)', check: (r) => cards(1)(r) && String(JSON.stringify(r.cards)).includes('ملقيتش') },
+
 
   // ---- R51: the everyday balance question must not die offline ----
   { text: 'كم علي أم حسن؟', vertical: 'supermarket', expect: 'رصيد العميل (مش «النت تقيل»)', check: (r) => all(noCard, saysNot('النت شكله تقيل'))(r) && String(r.replyText).length >= 30 },

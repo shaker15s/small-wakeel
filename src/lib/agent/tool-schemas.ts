@@ -51,6 +51,7 @@ const SPECS: Record<string, [string, Record<string, unknown>]> = {
   forecast_stockout: ['متى هينفد الصنف بمعدل البيع الحالي.', P({ name: 'string' }, ['name'])],
   get_customer_history: ['ملف العميل: عملياته وسجله في فترة.', P({ name: 'string', days: 'number' })],
   get_supplier_history: ['ملف المورد: عليه قد إيه وآخر سداداته وحركاته.', P({ name: 'string', days: 'number' })],
+  get_contact_info: ['رقم تليفون عميل/مورد بالاسم + رصيده. «رقم تليفون X؟ / اتصل بـ X».', P({ name: 'string' }, ['name'])],
   compare_periods: ['مقارنة فترتين (هالشهر بالشهر اللي فات).', P({ days: 'number' })],
   expense_breakdown: ['تفصيل المصروفات على فئاتها.', P({ days: 'number', limit: 'number' })],
   get_period_totals: ['إجماليات فترة (بعت كام/حصّلت كام في آخر N يوم).', P({ days: 'number', type: 'string' })],
