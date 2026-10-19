@@ -3337,6 +3337,34 @@ async function reflectOnDraft(args: {
   return { findings: result.findings, confidence: result.confidence, risk: danger ? 'R3' : undefined, ms: result.ms }
 }
 
+/** R66: the party a pronoun points at — the most recent known name in the
+ * last 4 messages of the conversation. «كام بقى عليها؟» after a credit turn
+ * to أم حسن is a question about أم حسن, and the rule ladder (text-only)
+ * cannot know that without this lookup. */
+function resolveAnaphoricParty(
+  history: { role: string; text: string }[],
+  customers: Customer[],
+  suppliers: Supplier[],
+): { name: string; kind: 'customer' | 'supplier' } | null {
+  const names = [
+    ...customers.map((c) => ({ name: c.name, kind: 'customer' as const })),
+    ...suppliers.map((sp) => ({ name: sp.name, kind: 'supplier' as const })),
+  ]
+  for (let i = history.length - 1; i >= Math.max(0, history.length - 4); i--) {
+    const t = normalizeAr(history[i].text)
+    if (t.length < 3) continue
+    for (const n of names) {
+      const f = normalizeAr(n.name)
+      if (f.length >= 3 && t.includes(f)) return n
+    }
+  }
+  return null
+}
+
+/** «كام عليها؟» / «كم بقي عليه كده؟» — the WHOLE message is a pronoun
+ * balance question (anchored), so it can never swallow a write sentence. */
+const PRONOUN_BALANCE_RE = /^(?:كام|كم)\s*(?:(?:بقي|بقى|باقي|باقيه|باقيها|عليها|عليه|عليهم)\s*)*(?:عليها|عليه|عليهم)\s*(?:كده|ده|دلوقتي|الحين)?\s*[؟?]*$/
+
 async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMeta): Promise<TurnResult> {
   const liveUser = await requireBusinessUser(ctx.business.id, ctx.user.id)
   const ownedConversation = await db.conversation.findFirst({ where: { id: ctx.conversationId, businessId: ctx.business.id, userId: liveUser.id }, select: { id: true } })
@@ -3474,6 +3502,26 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   pushThinking()
 
   const norm = normalizeAr(text)
+
+  // ---- R66: anaphoric balance question — «كام بقى عليها كده؟» right after a
+  // credit turn naming أم حسن. Resolve the pronoun to the party FIRST, then
+  // answer with that party's real file (the rule ladder is text-only and
+  // would fall to a generic summary — the live-probed failure).
+  if (PRONOUN_BALANCE_RE.test(norm) && ctx.history.length >= 2) {
+    const party = resolveAnaphoricParty(ctx.history, customers, suppliers)
+    if (party) {
+      const cards = await runReadTool(
+        party.kind === 'customer' ? 'get_customer_history' : 'get_supplier_history',
+        business.id,
+        { name: party.name },
+      )
+      done(IDX.understand, `سؤال على الضمير — رجّعته على ${party.name} من آخر الكلام`)
+      done(IDX.reply)
+      const replyText = deterministicReadReply(cards)
+      await streamDeterministic(replyText, emit, 500)
+      return { replyText, card: null, cards, thinking: steps, modelLabel, actions: null }
+    }
+  }
 
   // ---- PRE-STEP WATERFALL (DeepSeek-Harness `agent/pre-step`, R45) ----
   // Typed hooks validate the turn BEFORE any path is admitted (direct
