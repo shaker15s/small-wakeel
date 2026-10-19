@@ -190,6 +190,13 @@ export const CASES: EvalCase[] = [
   { text: 'عدّل مخزون التونة يبقى ٣٠', vertical: 'supermarket', expect: 'تعديل مخزون يدوي', check: (r) => r.card?.kind === 'draft' || noCard(r) },
   { text: 'الجرد طلّع التونة ٢٥ مش ٢٠', vertical: 'supermarket', expect: 'جرد → تعديل مخزون', check: (r) => r.card?.kind === 'draft' || noCard(r) },
   { text: 'سعر اللبن بقى ٤٥ مش ٤٠', vertical: 'supermarket', expect: 'تغيير سعر في الكتالوج', check: (r) => r.card?.kind === 'draft' || noCard(r) },
+
+  // ---- R47: reversal misroute + stated-price + unknown-party safety ----
+  { text: 'ملش آخر بيع', vertical: 'supermarket', expect: 'عكس آخر بيع (مش بحث كتالوج)', check: (r) => all(noCard, saysNot('مش لاقي'))(r) || draft('reversal')(r) },
+  { text: 'الغيت اللي فات', vertical: 'supermarket', expect: 'عكس آخر عملية مالية (مش مقارنة 7 أيام)', check: (r) => all(noCard, saysNot('مقارنة'))(r) || draft('reversal')(r) },
+  { text: 'بعت ٢ تونة لعميل اسمه أحمد زكي اللي مش معارفه', vertical: 'supermarket', expect: 'بيع نقدي بالاسم (مش عميل تاني)', check: (r) => draft('sale')(r) && (r.card?.fields ?? []).some((f: any) => String(f.value).includes('احمد زكي')) },
+  { text: 'بعت ٣ كونة زيت لعميل اسمه محمد اللي مش معارفه آجل', vertical: 'supermarket', expect: 'آجل لغير مسجل: سؤال (مش مسودة)', check: (r) => all(noCard, says('مش مسجل'))(r) },
+  { text: 'جبت ٥ كرتونة لبن من مورد جديد اسمه الشفاء بـ٣٠', vertical: 'supermarket', expect: 'شرا بالإجمالي ٣٠ + مورد جديد', check: (r) => draft('purchase')(r) && (r.card?.fields ?? []).some((f: any) => String(f.value).includes('٣٠')) },
   { text: 'ارفع سعر زيت عافية ٥ جنيه', vertical: 'supermarket', expect: 'تغيير سعر بدلتا', check: (r) => r.card?.kind === 'draft' || noCard(r) },
 
   // =======================================================================

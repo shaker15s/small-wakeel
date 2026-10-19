@@ -643,6 +643,17 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
     const name = mName ? mName[1].replace(/^(العميل|بتاع|من)\s*/, '').trim() : ''
     return { intent: 'read', tool: 'get_customer_history', fields: name && name.length >= 2 ? { name } : {} }
   }
+  // R47: undo/reversal of recent work — «ملش آخر بيع» / «الغيت اللي فات» /
+  // «اعكس شرا السمنه». MUST fire before the sale/collection/period rules:
+  // «بيع» inside «اعكس بيع» is not a sale verb, and «اللي فات» here means the
+  // last OPERATION, not a period (the compare-period rule used to steal it).
+  if (
+    /(ملش|ملشت|ملشش|ملشلي|الغيت|الغي|يلغي|ايلغي|امسح|امسحلي|اعكس|اعمل عكس|عكس|اتلغى|اتلغت)( |$)/.test(s) &&
+    (/آخر|اللي فات|التاني|تاني|قبلها/.test(s) || /بيع|شرا|شراء|مصروف|تحصيل|دفعة|دفع|عملية/.test(s)) &&
+    !/مبيعات|مصاريف|تحصيلات|اسبوع|شهر|امبارح|مقارنه/.test(s)
+  ) {
+    return { intent: 'write', opType: 'reversal', fields: {} }
+  }
   // «أنا أحسن من الأسبوع اللي فات؟ / قارن»
   if (/(احسن من|أحسن من|قارن|مقارنه|مقارنة|اللي فات|الشهر اللي فات|الاسبوع اللي فات)/.test(s)) {
     return { intent: 'read', tool: 'compare_periods', fields: {} }
@@ -1292,12 +1303,45 @@ function stripItemName(text: string, item: { name: string; aliases?: string | nu
   return out
 }
 
+/**
+ * R47 — an explicitly typed name («عميل اسمه أحمد زكي اللي مش معارفه») is
+ * captured greedily, so trim trailing function words that are not part of the
+ * name. A name must never be drafted as «أحمد زكي اللي».
+ */
+function cleanTypedName(raw: string): string {
+  // The capture is GREEDY (up to 25 chars of the sentence), so the name ends
+  // at the FIRST function word — «عميل اسمه محمد اللي مش معارفه آجل» → محمد.
+  const stop = new Set(['اللي', 'اللي', 'ده', 'دي', 'دى', 'مش', 'معرفه', 'معارفه', 'معرفش', 'لي', 'لـ', 'بـ', 'ل', 'ب', 'في', 'من', 'لو', 'قالي', 'يقول', 'يعني', 'يعنيها', 'اجل', 'نقدي', 'دفعت', 'دفع'])
+  const words = raw.replace(/\u0640/g, '').trim().split(/\s+/)
+  const out: string[] = []
+  for (const w of words) {
+    if (out.length > 0 && stop.has(w)) break
+    out.push(w)
+  }
+  return out.slice(0, 3).join(' ')
+}
 function findPartyMention<T extends { name: string }>(
   text: string,
   parties: T[],
   marker: 'ل' | 'من' = 'ل',
 ): T | null {
   const norm = normalizeAr(text)
+  // R47 SAFETY: an explicitly typed full name («عميل اسمه أحمد زكي») must NEVER
+  // partial-match a different registered person («أحمد عبد الرحمن») — a word
+  // hit + role word used to draft a sale onto the wrong customer (live probe).
+  // With an explicit phrase, a party matches only if the phrase is the party
+  // name itself or a leading part of it. No prefix match => NOT that party.
+  const explicitPhrase = cleanTypedName(norm.match(/اسمه\s+([ء-ي][ء-ي\s]{1,25})/)?.[1] ?? '')
+  if (explicitPhrase) {
+    const ph = explicitPhrase.split(/\s+/).filter((w) => w.length >= 2).slice(0, 3).join(' ')
+    if (ph.length >= 2) {
+      for (const p of parties) {
+        const pn = normalizeAr(p.name).replace(/\s+/g, ' ')
+        if (pn === ph || (pn.length > ph.length && pn.startsWith(ph + ' '))) return p
+      }
+      return null
+    }
+  }
   const hasRoleWord = marker === 'ل' ? norm.includes('عميل') || norm.includes('زبون') : norm.includes('مورد')
   for (const p of parties) {
     const words = normalizeAr(p.name)
@@ -1890,7 +1934,10 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
         typeof f.amount === 'number' && f.amount > 0 ? f.amount : typeof f.amount === 'string' && Number(f.amount) > 0 ? Number(f.amount) : null
       const statedEgp = priceCue ? rawAmount : null
       let priceOverride = false
-      if (type === 'sale' && statedEgp != null) {
+      // R47: the owner's stated number wins for purchases too (R40 contract:
+      // «جبت ٥ كرتونة لبن بـ٣٠» — the ٣٠ IS the deal total). Live probe: the
+      // override was sale-only, so a purchase silently used catalog × qty.
+      if (statedEgp != null) {
         const statedPiastres = Math.round(statedEgp * 100)
         if (statedPiastres > 0) {
           // «بـ٤٥٠ للكيلو» is a UNIT price, not the deal total: 2 kg = ٩٠٠.
@@ -1910,12 +1957,23 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
       const lexCustomer = type === 'sale' ? lexiconResolve(norm, memCtx.lexicon, customers)?.entity : null
       if (lexCustomer) memCtx.referencedIds.push(...memCtx.lexicon.filter((l) => l.entityRef === lexCustomer.id).map((l) => l.id))
       const customer = lexCustomer ?? (customerName ? matchEntity(customerName, customers)?.entity : null) ?? (type === 'sale' ? findPartyMention(text, customers) : null)
-      const supplierName = String(f.supplierName ?? '')
+      // R47: an explicitly typed name («عميل اسمه أحمد زكي») that is NOT a
+      // registered party is the party itself: a CASH sale drafts under the
+      // typed name (no customerId), a credit sale asks to register first, and
+      // a purchase makes it a NEW supplier born at approval.
+      const explicitPartyName = cleanTypedName(norm.match(/اسمه\s+([ء-ي][ء-ي\s]{1,25})/)?.[1] ?? '')
+      const typedCustomerName = !customer && type === 'sale' && lexCustomer == null && (customerName.trim() || explicitPartyName)
+      const supplierName = String(f.supplierName ?? '') || (type === 'purchase' ? explicitPartyName : '')
       const supplier = (supplierName ? matchEntity(supplierName, suppliers)?.entity : null) ?? (type === 'purchase' ? findPartyMention(text, suppliers, 'من') : null)
       // R41: a supplier name the owner EXPLICITLY gave but that is not in the
       // book yet is a NEW supplier (born at approval) — never a hard fail,
       // never re-asked.
       const supplierIsNew = !supplier && type === 'purchase' && supplierName.trim().length >= 2
+      // R47: a CREDIT sale to an unregistered person is a debt — it must never
+      // be drafted onto a name string. Register first: one precise question.
+      if (typedCustomerName && total - paid > 0) {
+        return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'العميل', failMessage: `«${typedCustomerName}» مش مسجل في حسابات العملاء — لو عايز تحمّله عليه زوده الأول من شاشة العملاء، أو قولي عليه كام وأنا أسجله.` }
+      }
 
       // ---- R41 «موظف حقيقي»: a purchase that leaves a balance needs its
       // counterparty. «جبت 80 سمنه ودفعتله 500 بس» — the «له» implies a
@@ -1957,7 +2015,11 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
         total,
         paid,
         ...(priceOverride ? { priceOverride: true } : {}),
-        ...(type === 'sale' && customer ? { customerId: customer.id, customerName: customer.name } : {}),
+        ...(type === 'sale' && customer
+          ? { customerId: customer.id, customerName: customer.name }
+          : type === 'sale' && typedCustomerName
+            ? { customerName: typedCustomerName }
+            : {}),
         ...(type === 'purchase' && (supplier || supplierIsNew)
           ? {
               supplierId: supplier?.id ?? null,
@@ -1968,7 +2030,7 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
       }
       const ref = `WKL-DRAFT` // replaced by real ref from createDraft
       const risk = computeRisk(type, total)
-      const summary = `${type === 'sale' ? 'بيع' : 'شرا'} ${fmtQty(qtyN, arUnit(item.unit))} ${item.name} بـ${egp(total)}${type === 'sale' && customer ? ` — ${customer.name}` : ''}${type === 'purchase' && (supplier || supplierIsNew) ? ` — من ${supplier?.name ?? supplierName.trim()}` : ''}`
+      const summary = `${type === 'sale' ? 'بيع' : 'شرا'} ${fmtQty(qtyN, arUnit(item.unit))} ${item.name} بـ${egp(total)}${type === 'sale' && (customer || typedCustomerName) ? ` — ${customer?.name ?? typedCustomerName}` : ''}${type === 'purchase' && (supplier || supplierIsNew) ? ` — من ${supplier?.name ?? supplierName.trim()}` : ''}`
       // BUSINESS_DNA credit-limit enforcement (آجل on a capped party)
       let dangerNote: string | undefined
       let creditField: { label: string; value: string; hint?: string } | undefined
@@ -1987,7 +2049,11 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
         { label: 'الإجمالي', value: egp(total) },
         { label: 'مدفوع', value: egp(paid) },
         ...(total - paid > 0 ? [{ label: 'باقي (آجل)', value: egp(total - paid) }] : []),
-        ...(type === 'sale' && customer ? [{ label: 'العميل', value: customer.name }] : []),
+        ...(type === 'sale' && customer
+          ? [{ label: 'العميل', value: customer.name }]
+          : type === 'sale' && typedCustomerName
+            ? [{ label: 'العميل', value: `${typedCustomerName} — مش مسجل`, hint: 'مسودة نقدي بالاسم. لو عايزه مسجل قولي وأعد المسودة' }]
+            : []),
         ...(type === 'purchase' && (supplier || supplierIsNew)
           ? [{ label: 'المورد', value: `${supplier?.name ?? supplierName.trim()}${supplierIsNew ? ' — هيتسجل جديد' : ''}` }]
           : []),
@@ -2329,6 +2395,47 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
         if (best) {
           original = best.op
           ref = best.op.ref
+        }
+      }
+      // R47: «آخر بيع» / «آخر شرا» — the TYPE word pins the operation type, no
+      // summary overlap needed: take the most recent op of that type.
+      if (!original) {
+        const typeMap: Array<[RegExp, string]> = [
+          [/بيع|بعت/, 'sale'],
+          [/شرا|شراء|جبت/, 'purchase'],
+          [/مصروف|صرفت|صرف/, 'expense'],
+          [/تحصيل|حصلت|قبض/, 'collection'],
+          [/دفعة|سداد|سدد|دفع/, 'payment'],
+        ]
+        for (const [re, ot] of typeMap) {
+          if (re.test(norm)) {
+            const last = await db.operation.findFirst({
+              where: { businessId: business.id, type: ot, status: 'SUCCEEDED', reversedByRef: null },
+              orderBy: { createdAt: 'desc' },
+            })
+            if (last) {
+              original = last
+              ref = last.ref
+            }
+            break
+          }
+        }
+        // «الغيت اللي فات» — no type word: the most recent FINANCIAL operation
+        // (reversable types only — a customer_add has no reversal path).
+        if (!original) {
+          const last = await db.operation.findFirst({
+            where: {
+              businessId: business.id,
+              type: { in: ['sale', 'purchase', 'expense', 'collection', 'payment', 'stock_adjustment', 'membership'] },
+              status: 'SUCCEEDED',
+              reversedByRef: null,
+            },
+            orderBy: { createdAt: 'desc' },
+          })
+          if (last) {
+            original = last
+            ref = last.ref
+          }
         }
       }
       if (!original) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'رقم العملية', failMessage: 'عايز تعكس أنهي عملية؟ اكتب رقمها (زي WKL-1006) أو اسم الصنف بتاعها' }
