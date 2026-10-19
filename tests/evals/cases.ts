@@ -244,6 +244,11 @@ export const CASES: EvalCase[] = [
   { text: 'تاريخ المورد محمد تاجر الجملة', vertical: 'supermarket', expect: 'ملف المورد (مش قائمة المستحقات كلها)', check: (r) => cards(1)(r) && String(JSON.stringify(r.cards)).includes('ملف محمد تاجر الجملة') },
   { text: 'كام علينا لمحمد تاجر الفول؟', vertical: 'supermarket', expect: 'مورد مش موجود: نتيجة صادقة (مش رقم من عند واحد تاني)', check: (r) => cards(1)(r) && String(JSON.stringify(r.cards)).includes('ملقيتش') },
 
+  // ---- R53: a receipt ref read off the printed slip -------------------------
+  { text: 'الفاتورة WKL-2070 دي فيها إيه؟', vertical: 'supermarket', expect: 'استرجاع العملية من رقم الفاتورة: الأصناف والإجمالي من السجل', check: (r) => String(JSON.stringify(r.cards)).includes('WKL-2070') && String(JSON.stringify(r.cards)).includes('جبنة رومي') },
+  { text: 'الورقة WKL 2070 كانت كام؟', vertical: 'supermarket', expect: 'نفس العملية برقم من غير شرطة: التطبيع بيفضلها', check: (r) => String(JSON.stringify(r.cards)).includes('WKL-2070') },
+  { text: 'WKL-9999', vertical: 'supermarket', expect: 'رقم ملوش عملية: نتيجة صادقة (ملقيتش)', check: (r) => cards(1)(r) && String(JSON.stringify(r.cards)).includes('ملقيتش') },
+
 
   // ---- R51: the everyday balance question must not die offline ----
   { text: 'كم علي أم حسن؟', vertical: 'supermarket', expect: 'رصيد العميل (مش «النت تقيل»)', check: (r) => all(noCard, saysNot('النت شكله تقيل'))(r) && String(r.replyText).length >= 30 },

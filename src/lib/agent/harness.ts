@@ -673,6 +673,15 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
   ) {
     return { intent: 'write', opType: 'reversal', fields: {} }
   }
+  // R53: a receipt REF, read straight off the printed slip — «الفاتورة
+  // WKL-1032 دي فيها إيه؟» / «الورقة WKL 1032 كانت كام؟» / just «WKL-1032».
+  // Sits AFTER the reversal rule (which owns «اعكس WKL-…»); the write-verb
+  // guard keeps «سجل…/سدد…» on the write side. Arabic digits and a missing
+  // dash are tolerated (normalized again inside the tool).
+  const mRef = s.match(/WKL[\s-]?([0-9٠-٩]{3,})/i)
+  if (mRef && !/(سجل|سدد|دفع|ضيف|اشتري|بعت|صرف|عدل|اعكس|الغيت|امسح)/.test(s)) {
+    return { intent: 'read', tool: 'get_transaction_status', fields: { ref: `WKL-${toWesternDigits(mRef[1])}` } }
+  }
   // «أنا أحسن من الأسبوع اللي فات؟ / قارن»
   if (/(احسن من|أحسن من|قارن|مقارنه|مقارنة|اللي فات|الشهر اللي فات|الاسبوع اللي فات)/.test(s)) {
     return { intent: 'read', tool: 'compare_periods', fields: {} }

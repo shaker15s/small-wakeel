@@ -4,7 +4,7 @@ import { cashbookCash } from '@/lib/domain/cashbook'
 // Results are structured ResultCardDTOs the UI renders as tables/kv cards.
 
 import type { Item, Customer, Supplier, Operation } from '@prisma/client'
-import { normalizeAr } from './arabic'
+import { normalizeAr, toWesternDigits } from './arabic'
 import { searchWeb } from './websearch'
 import { db } from '@/lib/db'
 import type { ResultCardDTO } from '@/lib/types'
@@ -1073,22 +1073,81 @@ export async function runReadTool(
     }
 
     case 'get_transaction_status': {
-      const ref = String(args.ref ?? '')
-      const op = await db.operation.findFirst({ where: { businessId, ref } })
-      return [
-        {
-          kind: 'kv',
-          title: `العملية ${ref}`,
-          rows: op
-            ? [
-                { label: 'النوع', value: TYPE_AR[op.type] ?? op.type },
-                { label: 'الحالة', value: STATUS_AR[op.status] ?? op.status },
-                { label: 'الملخص', value: op.summary },
-                { label: 'وقت التنفيذ', value: op.executedAt ? arTime(op.executedAt) : 'لسه' },
+      // «الفاتورة WKL 1032 دي كانت فيها إيه؟» — ref normalization first:
+      // Arabic digits, spaces, underscores, missing dash, all tolerated.
+      const rawRef = String(args.ref ?? '')
+      const clean = toWesternDigits(rawRef).replace(/[\s_-]+/g, '').toUpperCase()
+      let op: Operation | null = null
+      if (clean) {
+        op = await db.operation.findFirst({ where: { businessId, ref: clean } })
+        if (!op) {
+          // Digit-by-digit match, the same contract as /api/search:
+          // «1032» or «WKL1032» finds WKL-1032. Prefer the exact WKL-<digits>.
+          const digits = clean.replace(/\D/g, '')
+          if (digits.length >= 3) {
+            const cands = await db.operation.findMany({
+              where: { businessId, ref: { contains: digits } },
+              orderBy: { createdAt: 'desc' },
+              take: 5,
+            })
+            const exact = cands.find((c) => c.ref === `WKL-${digits}`)
+            if (exact) op = exact
+            else if (cands.length === 1) op = cands[0]
+            else if (cands.length > 1) {
+              const list = cands.slice(0, 3).map((c) => `${c.ref} (${TYPE_AR[c.type] ?? c.type})`).join(' · ')
+              return [
+                {
+                  kind: 'kv',
+                  title: `الرقم ${digits}`,
+                  rows: [{ label: 'النتيجة', value: `أكتر من عملية فيها الأرقام دي: ${list} — قولّي الرقم كله (زي WKL-1032)` }],
+                },
               ]
-            : [{ label: 'النتيجة', value: `ملقيتش عملية بالرقم ${ref}` }],
-        },
-      ]
+            }
+          }
+        }
+      }
+      if (!op) {
+        return [
+          {
+            kind: 'kv',
+            title: `العملية ${rawRef}`,
+            rows: [{ label: 'النتيجة', value: `ملقيتش عملية بالرقم ${rawRef || 'ده'}` }],
+          },
+        ]
+      }
+      const cards: ResultCardDTO[] = []
+      // The real receipt: line items + total, straight from the payload.
+      const lines = opLines(op.payload)
+      if (lines.length > 0) {
+        const items = await db.item.findMany({ where: { businessId } })
+        const nameOf = new Map(items.map((i) => [i.id, i.name]))
+        const total = lines.reduce((s, l) => s + l.total, 0)
+        cards.push({
+          kind: 'table',
+          title: `فيها إيه — ${op.ref}`,
+          columns: [
+            { key: 'name', label: 'الصنف' },
+            { key: 'qty', label: 'الكمية', align: 'end' },
+            { key: 'total', label: 'المبلغ', align: 'end' },
+          ],
+          rows: lines.map((l) => ({ name: nameOf.get(l.itemId) ?? 'صنف', qty: fmtQty(l.qty), total: egp(l.total) })),
+          footer: [{ label: 'الإجمالي', value: egp(total) }],
+        })
+      }
+      const p = readPayload(op.payload)
+      cards.push({
+        kind: 'kv',
+        title: `العملية ${op.ref}`,
+        rows: [
+          { label: 'النوع', value: TYPE_AR[op.type] ?? op.type },
+          { label: 'الحالة', value: STATUS_AR[op.status] ?? op.status },
+          ...(String(p.customerName ?? p.supplierName ?? '') ? [{ label: 'المعاملة مع', value: String(p.customerName ?? p.supplierName) }] : []),
+          { label: 'الإجمالي', value: egp(Number(p.total ?? p.amount ?? 0) || lines.reduce((s, l) => s + l.total, 0)) },
+          { label: 'الملخص', value: op.summary },
+          { label: 'وقت التنفيذ', value: op.executedAt ? arTime(op.executedAt) : 'لسه' },
+        ],
+      })
+      return cards
     }
 
     // ---------------------------------------------------------------
