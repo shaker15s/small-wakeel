@@ -96,6 +96,19 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
   const { theme, setTheme } = useTheme()
 
   const [turns, setTurns] = useState<ChatTurnWithMeta[]>([])
+  // R60: the LAST awaiting draft is the keyboard target (A = اعتماد, X = إلغاء).
+  // R3 drafts need a typed reason, so they are never keyboard-approved.
+  const keyboardTargetId = useMemo(() => {
+    for (let i = turns.length - 1; i >= 0; i--) {
+      const c = turns[i].card
+      if (c && c.status === 'AWAITING_APPROVAL' && !turns[i].outcome && c.risk !== 'R3') return c.opId ?? null
+    }
+    return null
+  }, [turns])
+  // refs so the keyboard effect below can call the latest callbacks without
+  // re-binding the listener on every render.
+  const approveRef = useRef<(card: ActionCardDTO, reason?: string) => void>(() => {})
+  const rejectRef = useRef<(card: ActionCardDTO) => void>(() => {})
   // the conversation ACTUALLY displayed (from GET / start event) — distinct
   // from the requested one so the query key only re-keys on explicit intent
   const [loadedConvId, setLoadedConvId] = useState<string | null>(null)
@@ -539,6 +552,29 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
     [userId, business.id, toast, queryClient],
   )
 
+  // R60: keyboard quick-approve — the owner's hands are often on the keyboard,
+  // not the mouse. e.code (not e.key) so it works on Arabic keyboard layouts.
+  useEffect(() => {
+    approveRef.current = approve
+    rejectRef.current = reject
+  })
+  useEffect(() => {
+    if (!keyboardTargetId) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return
+      const el = document.activeElement as HTMLElement | null
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return
+      if (e.code !== 'KeyA' && e.code !== 'KeyX') return
+      const card = turns.find((t) => t.card?.opId === keyboardTargetId)?.card
+      if (!card) return
+      e.preventDefault()
+      if (e.code === 'KeyA') void approveRef.current(card)
+      else void rejectRef.current(card)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [keyboardTargetId, turns])
+
   const reject = useCallback(
     async (card: ActionCardDTO) => {
       if (!card.opId) return
@@ -695,6 +731,7 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
                 key={t.id}
                 turn={t}
                 userDisplayText={t.role === 'user' ? choiceDisplayText(t.text, turns[index - 1]?.role === 'assistant' ? turns[index - 1].actions : null) : undefined}
+                keyboard={t.card?.opId != null && t.card.opId === keyboardTargetId}
                 onApprove={approve}
                 onReject={reject}
                 busyOpId={busyOpId}
