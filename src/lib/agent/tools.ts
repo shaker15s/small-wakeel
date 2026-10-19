@@ -474,6 +474,10 @@ export async function runReadTool(
                   { label: 'على الحساب (عند العملاء)', value: egp(creditSold) },
                 ]
               : []),
+            // R59: the planning number — what a NORMAL day looks like.
+            ...(matched.length > 0 && days > 1 && total > 0
+              ? [{ label: 'المتوسط اليومي', value: egp(Math.round(total / days)) }]
+              : []),
             { label: 'عدد العمليات', value: fmtQty(matched.length) },
           ],
           ...(matched.length === 0

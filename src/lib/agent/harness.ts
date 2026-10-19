@@ -587,7 +587,12 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
     if (metric) {
       // R58: امبارح = yesterday's full Cairo day (its own window in the tool).
       const isYesterday = /(امبارح|امبارح|بارح)/.test(s)
-      const days = isYesterday ? 1 : /(النهارده|اليوم|دلوقتي)/.test(s) ? 1 : /(اسبوع|الأسبوع|7 ايام|سبعة ايام)/.test(s) ? 7 : 30
+      // R59: «في اليوم» / «في يوم» means PER DAY («متوسط البيع في اليوم كام؟»),
+      // not TODAY — stripping the prepositional form keeps «اليوم» alone as
+      // the today marker only.
+      const sNoPerDay = s.replace(/(?:^|\s)(?:في\s+|بكل\s+|كل\s+)(?:يوم|اليوم)(?=\s|$|[؟?])/g, ' ')
+      const isToday = /النهارده|دلوقتي/.test(sNoPerDay) || /(^|\s)اليوم(?=\s|$|[؟?])/.test(sNoPerDay)
+      const days = isYesterday ? 1 : isToday ? 1 : /(اسبوع|الأسبوع|7 ايام|سبعة ايام)/.test(s) ? 7 : 30
       const query = s
         .replace(/(بعت|مبيعات|اتبيع|بيع|حصلت|تحصيل|قبضت|استلمت|اشتريت|مشتريات|الشرا|شراء|صرفت|مصروفات|مصاريف|مصروف)/g, ' ')
         .replace(/(كام|قد\s*ايه|قدايه|النهارده|اليوم|امبارح|امبارح|الشهر|هذا|ده|دي|الاسبوع|الأسبوع|الفتره|الفترة|الماضي|الجاي|علبه|علبة|كرتونه|كرتونة|كيلو|قطعه|قطعة|جرام|شريط|لتر)/g, ' ')

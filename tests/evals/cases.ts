@@ -259,6 +259,9 @@ export const CASES: EvalCase[] = [
   { text: 'فلوسي واقفين فين؟', vertical: 'supermarket', expect: 'المركز المالي: كاش + عند العملاء + المخزون - الموردين', check: (r) => String(JSON.stringify(r.cards)).includes('رأس المال') && String(JSON.stringify(r.cards)).includes('كاش في الخزنة') },
   { text: 'المركز المالي', vertical: 'supermarket', expect: 'نفس السؤال بصيغة رسمية: نفس الكارت', check: (r) => String(JSON.stringify(r.cards)).includes('فلوسي عند العملاء') },
 
+  // ---- R59: the planning number — average per day ----
+  { text: 'متوسط البيع في اليوم كام؟', vertical: 'supermarket', expect: 'إجماليات الفترة بتعرض متوسط اليوم العادي', check: (r) => String(JSON.stringify(r.cards)).includes('المتوسط اليومي') },
+
   // ---- R58: امبارح is its own full day, never a 30-day fallback ----
   { text: 'بعت كام امبارح؟', vertical: 'supermarket', expect: 'امبارح = يوم القاهرة ده بس (مش ٣٠ يوم)', check: (r) => String(JSON.stringify(r.cards)).includes('امبارح') },
   { text: 'صرفت كام امبارح؟', vertical: 'supermarket', expect: 'نفس النافذة على المصاريف', check: (r) => String(JSON.stringify(r.cards)).includes('امبارح') },
