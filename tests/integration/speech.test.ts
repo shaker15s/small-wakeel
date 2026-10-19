@@ -45,9 +45,21 @@ test('explicit provider selection revalidates enabled model, protects stored uns
   expect((await configure(config({ providerId, remoteId: 'does-not-exist' }))).status).toBe(422)
   expect((await configure(config({ providerId, remoteId: 'speech-test' }))).status).toBe(200)
   const selected = await speechSelection(); expect(selected?.remoteId).toBe('speech-test')
-  await expect(transcribeAudio(await readAudio(request(wave())), selected!)).rejects.toThrow('Non-public')
-  const res = await POST(request(wave())); expect(res.status).toBe(500)
-  expect(JSON.stringify(await res.json())).not.toContain('never-output-this-secret')
+  // HERMETIC: stored-URL protection is the PRODUCTION contract. A parallel
+  // test file may hold the dev flag WAKIL_ALLOW_LOCAL_PROVIDERS=1 (bun runs
+  // every file in one process) — pin the strict semantics for every
+  // flag-sensitive assertion (the 'Non-public' throw AND the 500 mapping) so
+  // the suite is green under any scheduling.
+  const hadAllowLocal = 'WAKIL_ALLOW_LOCAL_PROVIDERS' in process.env
+  const prevAllowLocal = process.env.WAKIL_ALLOW_LOCAL_PROVIDERS
+  delete process.env.WAKIL_ALLOW_LOCAL_PROVIDERS
+  try {
+    await expect(transcribeAudio(await readAudio(request(wave())), selected!)).rejects.toThrow('Non-public')
+    const res = await POST(request(wave())); expect(res.status).toBe(500)
+    expect(JSON.stringify(await res.json())).not.toContain('never-output-this-secret')
+  } finally {
+    if (hadAllowLocal) process.env.WAKIL_ALLOW_LOCAL_PROVIDERS = prevAllowLocal
+  }
   expect(await db.operation.count({ where: { businessId } })).toBe(0)
   await db.modelConfig.updateMany({ where: { providerId }, data: { enabled: false } })
   expect(await speechSelection()).toBeNull()

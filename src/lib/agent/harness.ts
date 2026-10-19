@@ -68,6 +68,8 @@ import {
   getActivePendingRequest,
   looksLikeNewTopic,
   markPendingDone,
+  isCreditCommand,
+  parseCreditBalance,
   pendingFollowUpText,
   pendingQuestionText,
   savePendingRequest,
@@ -1971,8 +1973,36 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
       const supplierIsNew = !supplier && type === 'purchase' && supplierName.trim().length >= 2
       // R47: a CREDIT sale to an unregistered person is a debt — it must never
       // be drafted onto a name string. Register first: one precise question.
-      if (typedCustomerName && total - paid > 0) {
-        return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'العميل', failMessage: `«${typedCustomerName}» مش مسجل في حسابات العملاء — لو عايز تحمّله عليه زوده الأول من شاشة العملاء، أو قولي عليه كام وأنا أسجله.` }
+      // R48: the question is kept HONEST — the whole sale is held as a pending
+      // request, so the owner's ONE answer («عليه ٢٠» / «جديد») completes it:
+      // register the customer, then draft the sale on his account.
+      if (typedCustomerName && total - paid > 0 && !f.creditNewCustomer) {
+        const creditAsk = `«${typedCustomerName}» مش مسجل في حسابات العملاء — عليه كام من قبل؟ قولي رقمه وأنا أسجله وأنزل عليه البيعة، أو قولي «جديد» لو من عندنا.`
+        if (ctx.conversationId) {
+          await savePendingRequest({
+            businessId: business.id,
+            conversationId: ctx.conversationId,
+            userId: user.id,
+            kind: 'credit_new_customer',
+            slots: {
+              itemId: item.id,
+              itemName: item.name,
+              qty: qtyN,
+              unit: item.unit,
+              unitLabel: null,
+              paid: 0,
+              supplierName: null,
+              suggestedSupplier: null,
+              total,
+              unitPrice: qtyN > 0 ? total / qtyN : null,
+              customerName: typedCustomerName,
+              openingBalance: null,
+              sourceText: text,
+            },
+            question: creditAsk,
+          })
+        }
+        return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'العميل', failMessage: creditAsk }
       }
 
       // ---- R41 «موظف حقيقي»: a purchase that leaves a balance needs its
@@ -3457,6 +3487,8 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   // new-item purchase draft, (b) partial → one follow-up question, or
   // (c) clearly a new topic → released and handled normally.
   let pendingWriteIntent: ExtractedIntent | null = null
+  /** R48: a completed credit-to-new-customer request = TWO deterministic subs. */
+  let creditSubs: SubIntent[] | null = null
   if (ctx.conversationId) {
     const pending = await getActivePendingRequest(business.id, ctx.conversationId)
     if (pending && (pending.kind === 'purchase_new_item' || pending.kind === 'purchase_known_item')) {
@@ -3542,6 +3574,54 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         return { replyText: q, card: null, cards: null, thinking: steps, modelLabel, actions: null }
       }
     }
+    // ---- R48: CREDIT sale held for an unregistered customer ----
+    // The owner's ONE answer completes it: «عليه ٢٠» (or «جديد») → register the
+    // customer WITH his opening balance, then draft the sale on his account.
+    if (pending && pending.kind === 'credit_new_customer') {
+      const s = pending.slots
+      const name = s.customerName ?? ''
+      const balance = parseCreditBalance(norm)
+      if (balance == null) {
+        // Release ONLY on a fresh work command («بعت ٢ تونة لأم حسن» / «الغيت
+        // اللي فات»). Confusion («ما ايه») or silence is NOT a new topic — a
+        // real employee simply repeats the one question he asked.
+        if (isCreditCommand(norm)) {
+          await markPendingDone(ctx.conversationId, 'cancelled')
+        } else {
+          const q = pendingQuestionText(s, 'credit_new_customer')
+          await savePendingRequest({
+            businessId: business.id,
+            conversationId: ctx.conversationId,
+            userId: user.id,
+            kind: 'credit_new_customer',
+            slots: s,
+            question: q,
+          })
+          done(IDX.understand, 'طلب معلق مفتوح — بكمّل الناقص')
+          done(IDX.reply)
+          await streamDeterministic(q, emit, 900)
+          return { replyText: q, card: null, cards: null, thinking: steps, modelLabel, actions: null }
+        }
+      } else {
+        creditSubs = [
+          { intent: 'write', opType: 'customer_add', fields: { name, balance }, sourceText: text },
+          {
+            intent: 'write',
+            opType: 'sale',
+            fields: {
+              ...(s.itemId ? { itemId: s.itemId } : {}),
+              itemName: s.itemName,
+              qty: s.qty,
+              customerName: name,
+              creditNewCustomer: true,
+            },
+            sourceText: s.sourceText || text,
+          },
+        ]
+        await markPendingDone(ctx.conversationId, 'resolved')
+        done(IDX.understand, `طلب معلق اكتمل — بتسجيل «${name}» وأنزل عليه البيعة`)
+      }
+    }
   }
 
   // ---- PASS 0d: DEEP RESEARCH (user-toggled OR auto-detected) — R15 ----
@@ -3552,7 +3632,12 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   // Auto-research must not hijack a concrete command («حسن دفع ٥٠ من اللي عليه»
   // contains «ليه» but is a collection, not a research question).
   const wantsAutoResearch = ctx.deepResearch !== true && RESEARCH_TRIGGER_RE.test(text)
-  const autoResearchBlocked = wantsAutoResearch && isActionableIntent(ruleBasedIntent(text, business.type))
+  const autoResearchBlocked =
+    wantsAutoResearch &&
+    (isActionableIntent(ruleBasedIntent(text, business.type)) || !!creditSubs)
+  // R48: «عليه ٢٠» (a balance answer) must never trigger auto-research — a
+  // completed credit request owns the turn (creditSubs), and an answer to the
+  // open credit question is a slot fill, not a research question.
   if (ctx.deepResearch === true || (wantsAutoResearch && !autoResearchBlocked)) {
     meta.kind = 'research'
     const researchResult = await runDeepResearch({
@@ -4475,7 +4560,9 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   // R41: a COMPLETED pending request is a deterministic write — it bypasses
   // the brain loop so the model cannot re-interpret the follow-up sentence
   // («المورد … والحساب 2000» is slots for the open request, not a new command).
-  if (!pendingWriteIntent) {
+  // R48: a COMPLETED credit-to-new-customer request owns the turn — it is two
+  // deterministic writes, and the model (or deep research) must not take over.
+  if (!pendingWriteIntent && !creditSubs) {
     // All user queries flow through the genuine Gemini model via runBrainTurn() first.
     // Rule-based intent patterns are preserved strictly as an offline fallback when the LLM
     // is unreachable or times out, never intercepting when the model is operational.
@@ -4533,6 +4620,9 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     // R41: the completed pending request OWNS this turn — no model, no rules.
     llmSingle = pendingWriteIntent
     done(IDX.understand, 'طلب معلق اكتمل — بجهّز المسودة من معلوماتك')
+  } else if (creditSubs) {
+    // R48: same guarantee for the two-draft credit completion.
+    done(IDX.understand, 'طلب معلق اكتمل — بتسجيل العميل وأنزل عليه البيعة')
   } else {
   try {
     const baseSystem = buildSystemPrompt({ business, user, items, customers, suppliers, memories: promptMemories, rules, history: ctx.history, userToolsLine })
@@ -4587,6 +4677,14 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     // Offline / LLM-failure fallback ONLY: rule-based intent
     const rule = offlineFallbackRule ?? ruleBasedIntent(text, business.type)
     llmSingle = rule
+  }
+
+  // R48: a completed credit-to-new-customer request OWNS this turn — it is
+  // exactly TWO deterministic writes (register, then sell), no model, no rules.
+  if (creditSubs) {
+    llmRaws = []
+    llmSingle = null
+    subs = creditSubs
   }
 
   // ---- PASS 2+3: Act ----

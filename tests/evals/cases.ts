@@ -15,6 +15,9 @@ export interface EvalCase {
   /** Human-readable expectation (shown in the report). */
   expect: string
   check: (r: any) => boolean
+  /** R48: a second owner message (run with turn-1 history) — the check then
+   *  applies to turn TWO (multi-turn flows like the credit-to-new-customer). */
+  followUp?: string
 }
 
 // ---- check builders -------------------------------------------------------
@@ -197,6 +200,29 @@ export const CASES: EvalCase[] = [
   { text: 'بعت ٢ تونة لعميل اسمه أحمد زكي اللي مش معارفه', vertical: 'supermarket', expect: 'بيع نقدي بالاسم (مش عميل تاني)', check: (r) => draft('sale')(r) && (r.card?.fields ?? []).some((f: any) => String(f.value).includes('احمد زكي')) },
   { text: 'بعت ٣ كونة زيت لعميل اسمه محمد اللي مش معارفه آجل', vertical: 'supermarket', expect: 'آجل لغير مسجل: سؤال (مش مسودة)', check: (r) => all(noCard, says('مش مسجل'))(r) },
   { text: 'جبت ٥ كرتونة لبن من مورد جديد اسمه الشفاء بـ٣٠', vertical: 'supermarket', expect: 'شرا بالإجمالي ٣٠ + مورد جديد', check: (r) => draft('purchase')(r) && (r.card?.fields ?? []).some((f: any) => String(f.value).includes('٣٠')) },
+
+  // ---- R48: credit to an UNREGISTERED customer — the ask must be HONEST ----
+  {
+    text: 'بعت ٣ كونة زيت لعميل اسمه محمد اللي مش معارفه آجل',
+    vertical: 'supermarket',
+    expect: 'سؤال واحد عن الرصيد (مش بحث عميق)',
+    followUp: 'عليه ٢٠',
+    check: (r) => (r.card?.type === 'customer_add' || r.card?.title?.includes('عميل')) && String(r.replyText).includes('بيع'),
+  },
+  {
+    text: 'بعت ٣ كونة زيت لعميل اسمه محمد اللي مش معارفه آجل',
+    vertical: 'supermarket',
+    expect: '«جديد» → عميل برصيد ٠ + مسودة البيع',
+    followUp: 'جديد',
+    check: (r) => r.card?.type === 'customer_add' && String(r.replyText).includes('بيع'),
+  },
+  {
+    text: 'بعت ٣ كونة زيت لعميل اسمه محمد اللي مش معارفه آجل',
+    vertical: 'supermarket',
+    expect: 'طلب جديد يطلّع من السؤال (تسجيل + بيع مش ضايقين)',
+    followUp: 'بعت ٢ تونة لأم حسن بـ٥٠',
+    check: (r) => draft('sale')(r) && !String(r.replyText).includes('مش مسجل في حسابات العملاء — عليه كام'),
+  },
   { text: 'ارفع سعر زيت عافية ٥ جنيه', vertical: 'supermarket', expect: 'تغيير سعر بدلتا', check: (r) => r.card?.kind === 'draft' || noCard(r) },
 
   // =======================================================================
