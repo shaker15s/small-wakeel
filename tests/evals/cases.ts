@@ -259,6 +259,10 @@ export const CASES: EvalCase[] = [
   { text: 'فلوسي واقفين فين؟', vertical: 'supermarket', expect: 'المركز المالي: كاش + عند العملاء + المخزون - الموردين', check: (r) => String(JSON.stringify(r.cards)).includes('رأس المال') && String(JSON.stringify(r.cards)).includes('كاش في الخزنة') },
   { text: 'المركز المالي', vertical: 'supermarket', expect: 'نفس السؤال بصيغة رسمية: نفس الكارت', check: (r) => String(JSON.stringify(r.cards)).includes('فلوسي عند العملاء') },
 
+  // ---- R63: a stated day count is respected (آخر ٣ أيام ≠ ٣٠ يوم) ----
+  { text: 'بعت كام آخر ٣ أيام؟', vertical: 'supermarket', expect: 'العدد المكتوب هو النافذة مش ٣٠ يوم', check: (r) => String(JSON.stringify(r.cards)).includes('آخر ٣') },
+  { text: 'صرفت كام في ٥ ايام؟', vertical: 'supermarket', expect: 'نفس القراءة على المصاريف', check: (r) => String(JSON.stringify(r.cards)).includes('آخر ٥') },
+
   // ---- R62: a greeting carries the day's snapshot (zero LLM) ----
   { text: 'صباح الخير', vertical: 'supermarket', expect: 'التحية + نظرة النهارده: امبارح + الكاش + النواقص', check: (r) => String(JSON.stringify(r.cards)).includes('بعت امبارح') && String(JSON.stringify(r.cards)).includes('كاش في الخزنة') },
   { text: 'ازيك', vertical: 'supermarket', expect: 'نفس الطقسة بكل تحية', check: (r) => String(JSON.stringify(r.cards)).includes('نظرة سريعة على الشغل') },

@@ -593,7 +593,11 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
       // the today marker only.
       const sNoPerDay = s.replace(/(?:^|\s)(?:في\s+|بكل\s+|كل\s+)(?:يوم|اليوم)(?=\s|$|[؟?])/g, ' ')
       const isToday = /النهارده|دلوقتي/.test(sNoPerDay) || /(^|\s)اليوم(?=\s|$|[؟?])/.test(sNoPerDay)
-      const days = isYesterday ? 1 : isToday ? 1 : /(اسبوع|الأسبوع|7 ايام|سبعة ايام)/.test(s) ? 7 : 30
+      // R63: any stated day count — «بعت كام آخر ٣ أيام؟» must mean 3 days,
+      // not the 30-day fallback. (7 ايام/أسبوع resolve to the same 7.)
+      const mDays = s.match(/([0-9٠-٩]{1,3})\s*(?:يوم|ايام)/)
+      const daysFromText = mDays ? Math.min(365, Math.max(2, Number(toWesternDigits(mDays[1])))) : null
+      const days = isYesterday ? 1 : isToday ? 1 : daysFromText ?? (/(اسبوع|الأسبوع|7 ايام|سبعة ايام)/.test(s) ? 7 : 30)
       const query = s
         .replace(/(بعت|مبيعات|اتبيع|بيع|حصلت|تحصيل|قبضت|استلمت|اشتريت|مشتريات|الشرا|شراء|جبت|صرفت|مصروفات|مصاريف|مصروف)/g, ' ')
         .replace(/(كام|قد\s*ايه|قدايه|النهارده|اليوم|امبارح|امبارح|الشهر|هذا|ده|دي|الاسبوع|الأسبوع|الفتره|الفترة|الماضي|الجاي|علبه|علبة|كرتونه|كرتونة|كيلو|قطعه|قطعة|جرام|شريط|لتر)/g, ' ')
