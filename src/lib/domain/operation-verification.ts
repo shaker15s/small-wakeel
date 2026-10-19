@@ -26,12 +26,19 @@ export async function prepareAccountingVerification(
   })).reduce((sum, entry) => sum + (entry.direction === 'in' ? entry.amount : -entry.amount), 0)
   const beforeCash = await cashNet()
   const verifySettlement = type === 'collection' || type === 'payment' ? await prepareSettlementVerification(tx, businessId, ref, String(type === 'collection' ? p.customerId : p.supplierId), type === 'collection', amount) : null
+  // R50: a credit draft may carry a TYPED NAME only (customer_add / new
+  // supplier born at approval) — resolve the counterparty by name too, so the
+  // read-back verifies the REAL account the money landed on.
   const customer = (type === 'sale' || type === 'collection' || type === 'membership')
-    ? p.customerId ? await tx.customer.findFirst({ where: { id: String(p.customerId), businessId } })
-      : type === 'membership' ? await tx.customer.findFirst({ where: { businessId, name: String(p.customerName) } }) : null
+    ? p.customerId
+      ? await tx.customer.findFirst({ where: { id: String(p.customerId), businessId } })
+      : await tx.customer.findFirst({ where: { businessId, name: String(p.customerName ?? '').trim() } })
     : null
-  const supplier = (type === 'purchase' || type === 'payment') && p.supplierId
-    ? await tx.supplier.findFirst({ where: { id: String(p.supplierId), businessId } }) : null
+  const supplier = (type === 'purchase' || type === 'payment')
+    ? p.supplierId
+      ? await tx.supplier.findFirst({ where: { id: String(p.supplierId), businessId } })
+      : await tx.supplier.findFirst({ where: { businessId, name: String(p.supplierName ?? '').trim() } })
+    : null
 
   return async () => {
     const afterCash = await cashNet()
@@ -56,7 +63,9 @@ export async function prepareAccountingVerification(
     if (type === 'sale' || type === 'purchase') {
       const meta = await tx.cashbookEntry.findFirst({ where: { businessId, operationRef: ref } })
       const credit = total - paid
-      const pass = credit > 0 ? !!meta && meta.amount === credit && meta.openAmount === credit && meta.kind === (type === 'sale' ? 'credit_sale' : 'credit_purchase') && (type === 'sale' ? meta.customerId === p.customerId : meta.supplierId === p.supplierId) && meta.cashDelta === 0 && meta.dateSource === 'recorded_day' : !meta
+      // R50: name-only drafts resolve their counterparty at approval — compare
+      // the lot against the RESOLVED id, not the (absent) payload id.
+      const pass = credit > 0 ? !!meta && meta.amount === credit && meta.openAmount === credit && meta.kind === (type === 'sale' ? 'credit_sale' : 'credit_purchase') && (type === 'sale' ? meta.customerId === (p.customerId ? String(p.customerId) : customer?.id ?? null) : meta.supplierId === (p.supplierId ? String(p.supplierId) : supplier?.id ?? null)) && meta.cashDelta === 0 && meta.dateSource === 'recorded_day' : !meta
       checks.push({ label: 'أصل الدين مرتبط بالبيع أو الشرا دون تكرار الفلوس', expected: String(credit), actual: String(meta?.openAmount ?? 0), pass })
     }
     if (verifySettlement) checks.push(...await verifySettlement())
