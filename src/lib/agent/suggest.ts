@@ -152,6 +152,14 @@ export async function buildSuggestions(businessId: string, userId: string): Prom
       push({ id: `sg-schedule-${label}`, label: 'تحب التقرير يبقى دوري؟', prompt: `اقترح عليّ جدولة تقرير قراءة فقط: ${TOOL_PROMPT_AR[label]}. اسألني عن الموعد والتكرار بتوقيت القاهرة وموافقتي الصريحة؛ لا تنشئ مهمة دلوقتي.`, reason: 'frequent', reasonLabel: 'اقتراح فقط — محتاج موافقتك', icon: 'today' })
     }
   }
+  // R46 Mode 2: the entry point to «arbeli programi» — if no real harness is
+  // registered yet, offer the chip. The prompt is deliberately permission-first:
+  // the brain must explain + ask for the owner's explicit consent (confirmed=false
+  // on cli_harness_install) BEFORE anything runs on the owner's machine.
+  const hasHarness = (await db.appHarness.findFirst({ where: { businessId }, select: { id: true } })) !== null
+  if (!hasHarness && user.role === 'owner') {
+    push({ id: 'sg-harness-connect', label: 'اربطلي برنامج الشغل عندي', prompt: 'عايزك توصل ببرنامج الشغل اللي شغال عندي دلوقتي — قولي الأول هتعمل إيه بالظبط على الجهاز، ومش هتحرك حاجة غير بإذني', reason: 'custom', reasonLabel: 'هتسألني الإذن قبل أي حاجة', icon: 'spark' })
+  }
   for (const goal of profile.goals) {
     if (goal === 'members' && business.type !== 'gym') continue
     push({ id: `sg-goal-${goal}`, label: WORKSPACE_GOALS[goal].label, prompt: WORKSPACE_GOALS[goal].prompt, reason: 'custom', reasonLabel: 'من أولوياتك', icon: 'spark' })

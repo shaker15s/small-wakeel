@@ -50,7 +50,12 @@ test('cross-tenant, unknown roles, CSS, script, arbitrary colors, money and priv
   expect((await getWorkspacePreferences(businessId, owner)).accent).toBe('amber')
 })
 test('empty actor gets no demos or clock-based invented commands; declared goals are explicit', async () => {
-  expect(await buildSuggestions(businessId, owner)).toEqual([])
+  // R46: an empty actor gets no invented activity — the single affordance is the
+  // permission-first «connect my program» chip (owner only), and its prompt must
+  // demand explicit consent before anything runs on the owner's machine.
+  const ownerSuggestions = await buildSuggestions(businessId, owner)
+  expect(ownerSuggestions.map((s) => s.id)).toEqual(['sg-harness-connect'])
+  expect(ownerSuggestions[0].prompt).toContain('إذني')
   const suggestions = await buildSuggestions(businessId, staff)
   expect(suggestions.map((s) => s.id)).toEqual(['sg-goal-cash'])
 })

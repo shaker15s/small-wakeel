@@ -4692,6 +4692,19 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     const hint = proactiveHintFor(tool, cards)
     if (hint) replyInstruction += ` ${hint}`
     actions = TOOL_ACTIONS[tool] ?? null
+    // R46 Mode 2: when the brain surfaced the harness PERMISSION card, attach
+    // server-stamped quick-consent buttons — a clarification tap, never a
+    // financial approval. The owner's tap sends the consent sentence that makes
+    // the brain re-invoke the tool with confirmed=true.
+    if (tool === 'cli_harness_install') {
+      const isPermissionCard = cards.some((c) => c.kind === 'kv' && c.title.includes('إذن البني'))
+      if (isPermissionCard) {
+        actions = [
+          { id: 'act-harness-yes', label: 'أيوة — ابدأ', view: 'chat', icon: 'book', tone: 'primary', reply: 'أيوة — عندك الإذن، ابدأ البناء' },
+          { id: 'act-harness-no', label: 'متعملش دلوقتي', view: 'chat', icon: 'book', tone: 'outline', reply: 'متعملش دلوقتي — بس قولي لو غيّرت رأيي' },
+        ]
+      }
+    }
     await trackUsage(business.id, user.id, 'tool', tool === 'search_catalog' || tool === 'get_item_stock' ? `${tool}:${String(llmSingle.fields?.query ?? llmSingle.fields?.name ?? '')}` : tool)
   } else if (llmSingle && llmSingle.intent === 'write' && llmSingle.opType) {
     // ================= SINGLE WRITE (draft/approval path) =================
