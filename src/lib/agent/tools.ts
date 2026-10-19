@@ -407,7 +407,11 @@ export async function runReadTool(
       // «النهارده» is the Cairo day, not «now − 24h»: the shop's day starts at
       // midnight, and a 24h window silently includes yesterday evening (live
       // R31: «صرفت كام النهارده؟» counted 10 old expenses).
-      const from = days === 1 ? startOfCairoDay(0) : new Date(Date.now() - days * 86400000)
+      // R58: امبارح is a full Cairo day on its own — «بعت كام امبارح؟» must NOT
+      // return 30 days of sales (the old fallback) and NOT today.
+      const isYesterday = args.yesterday === true
+      const from = isYesterday ? startOfCairoDay(1) : days === 1 ? startOfCairoDay(0) : new Date(Date.now() - days * 86400000)
+      const when = isYesterday ? { gte: from, lt: startOfCairoDay(0) } : { gte: from }
       const types =
         metric === 'sales'
           ? ['sale', 'membership']
@@ -418,7 +422,7 @@ export async function runReadTool(
               : ['expense']
       const label = metric === 'sales' ? 'مبيعات' : metric === 'collections' ? 'تحصيلات' : metric === 'purchases' ? 'مشتريات' : 'مصروفات'
       const ops = await db.operation.findMany({
-        where: { businessId, status: 'SUCCEEDED', type: { in: types }, createdAt: { gte: from } },
+        where: { businessId, status: 'SUCCEEDED', type: { in: types }, createdAt: when },
       })
       const money = (payload: string): number => payloadMoney(readPayload(payload))
       const flat = (x: string) => normalizeAr(x).replace(/\s+/g, ' ').trim()
@@ -456,7 +460,7 @@ export async function runReadTool(
           creditSold += t - paid
         }
       }
-      const period = days === 1 ? 'النهارده' : days === 7 ? 'آخر ٧ أيام' : `آخر ${fmtQty(days)} يوم`
+      const period = isYesterday ? 'امبارح' : days === 1 ? 'النهارده' : days === 7 ? 'آخر ٧ أيام' : `آخر ${fmtQty(days)} يوم`
       return [
         {
           kind: 'kv',

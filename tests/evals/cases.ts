@@ -259,6 +259,10 @@ export const CASES: EvalCase[] = [
   { text: 'فلوسي واقفين فين؟', vertical: 'supermarket', expect: 'المركز المالي: كاش + عند العملاء + المخزون - الموردين', check: (r) => String(JSON.stringify(r.cards)).includes('رأس المال') && String(JSON.stringify(r.cards)).includes('كاش في الخزنة') },
   { text: 'المركز المالي', vertical: 'supermarket', expect: 'نفس السؤال بصيغة رسمية: نفس الكارت', check: (r) => String(JSON.stringify(r.cards)).includes('فلوسي عند العملاء') },
 
+  // ---- R58: امبارح is its own full day, never a 30-day fallback ----
+  { text: 'بعت كام امبارح؟', vertical: 'supermarket', expect: 'امبارح = يوم القاهرة ده بس (مش ٣٠ يوم)', check: (r) => String(JSON.stringify(r.cards)).includes('امبارح') },
+  { text: 'صرفت كام امبارح؟', vertical: 'supermarket', expect: 'نفس النافذة على المصاريف', check: (r) => String(JSON.stringify(r.cards)).includes('امبارح') },
+
   // ---- R56: of the sales, how much is cash in hand vs. on account ----
   { text: 'بعت كام الشهر ده؟', vertical: 'supermarket', expect: 'المبيعات تتقسم: كاش في اليد + على الحساب (عند العملاء)', check: (r) => String(JSON.stringify(r.cards)).includes('كاش (في اليد)') && String(JSON.stringify(r.cards)).includes('على الحساب') },
   { text: 'بعت كام على الحساب؟', vertical: 'supermarket', expect: 'سؤال عن الحساب: نفس الأرقام، السطر بتاع الحساب موجود', check: (r) => String(JSON.stringify(r.cards)).includes('على الحساب') },

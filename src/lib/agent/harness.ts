@@ -585,10 +585,12 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
             ? 'sales'
             : null
     if (metric) {
-      const days = /(النهارده|اليوم|دلوقتي)/.test(s) ? 1 : /(اسبوع|الأسبوع|7 ايام|سبعة ايام)/.test(s) ? 7 : 30
+      // R58: امبارح = yesterday's full Cairo day (its own window in the tool).
+      const isYesterday = /(امبارح|امبارح|بارح)/.test(s)
+      const days = isYesterday ? 1 : /(النهارده|اليوم|دلوقتي)/.test(s) ? 1 : /(اسبوع|الأسبوع|7 ايام|سبعة ايام)/.test(s) ? 7 : 30
       const query = s
         .replace(/(بعت|مبيعات|اتبيع|بيع|حصلت|تحصيل|قبضت|استلمت|اشتريت|مشتريات|الشرا|شراء|صرفت|مصروفات|مصاريف|مصروف)/g, ' ')
-        .replace(/(كام|قد\s*ايه|قدايه|النهارده|اليوم|الشهر|هذا|ده|دي|الاسبوع|الأسبوع|الفتره|الفترة|الماضي|الجاي|علبه|علبة|كرتونه|كرتونة|كيلو|قطعه|قطعة|جرام|شريط|لتر)/g, ' ')
+        .replace(/(كام|قد\s*ايه|قدايه|النهارده|اليوم|امبارح|امبارح|الشهر|هذا|ده|دي|الاسبوع|الأسبوع|الفتره|الفترة|الماضي|الجاي|علبه|علبة|كرتونه|كرتونة|كيلو|قطعه|قطعة|جرام|شريط|لتر)/g, ' ')
         // connectors + generic nouns are not names: «اشتريت كام من الموردين؟»
         // must not filter by a customer/supplier called «من المور ن» (the
         // normalizer splits «الموردين»), it must aggregate ALL purchases.
@@ -600,7 +602,7 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
       return {
         intent: 'read',
         tool: 'get_period_totals',
-        fields: { metric, days, ...(query.length >= 2 ? { query } : {}) },
+        fields: { metric, days, ...(isYesterday ? { yesterday: true } : {}), ...(query.length >= 2 ? { query } : {}) },
       }
     }
   }

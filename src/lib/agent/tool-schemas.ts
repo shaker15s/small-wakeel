@@ -57,7 +57,7 @@ const SPECS: Record<string, [ToolSection, string, Record<string, unknown>]> = {
   get_financial_position: ['read', 'المركز المالي: الكاش + مديونيات العملاء + قيمة المخزون - مستحقات الموردين. «فلوسي واقفين فين؟ / ماليي كام؟».', NONE],
   compare_periods: ['read', 'مقارنة فترتين (هالشهر بالشهر اللي فات).', P({ days: 'number' })],
   expense_breakdown: ['read', 'تفصيل المصروفات على فئاتها.', P({ days: 'number', limit: 'number' })],
-  get_period_totals: ['read', 'إجماليات فترة (بعت كام/حصّلت كام في آخر N يوم).', P({ days: 'number', type: 'string' })],
+  get_period_totals: ['read', 'إجماليات فترة (بعت كام/حصّلت كام في آخر N يوم). yesterday=true = امبارح (يوم القاهرة كامل).', P({ days: 'number', type: 'string', metric: 'string', yesterday: 'boolean', query: 'string' })],
   get_stock_value: ['read', 'قيمة المخزون الحالي بالدخل.', NONE],
   get_top_items: ['read', 'أفضل الأصناف مبيعًا في فترة.', P({ days: 'number', limit: 'number' })],
   get_dead_stock: ['read', 'أصناف راكدة متباعتش فترة.', P({ days: 'number', limit: 'number' })],
