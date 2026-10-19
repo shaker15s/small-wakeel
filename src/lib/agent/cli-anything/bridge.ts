@@ -12,6 +12,7 @@ import { homedir } from 'node:os'
 import type { AgentPluginDTO, ResultCardDTO } from '@/lib/types'
 import { executeExcelCommand, type ExcelCommandResult, type ExcelOp } from './excel-engine'
 import { skillForApp } from './app-skills'
+import { execHarness, learnedHarnesses } from './harness-installer'
 
 const execFileAsync = promisify(execFile)
 
@@ -764,6 +765,38 @@ export async function executeBridgedTool(params: BridgedToolParams): Promise<Bri
     }
   }
 
+  // R46 Mode 2 — a learned REAL harness (CLI-Anything installed on this machine,
+  // owner's program, owner's permission) beats the not-connected fallback.
+  const learned = (await learnedHarnesses(params.businessId ?? '').catch(() => [] as Array<{ app: string; display: string; command: string; argsTemplate: string | null }>))
+    .find((h) => h.app === String(args.app))
+  if (learned) {
+    const argStr = [args.args, args.file, args.range, args.value].filter(Boolean).join(' ')
+    const r = await execHarness({ command: learned.command, argsTemplate: learned.argsTemplate }, learned.app, command, argStr)
+    if (!r.ok) {
+      return {
+        ok: false,
+        appName,
+        command,
+        durationMs: Date.now() - started,
+        executedAt: new Date().toISOString(),
+        data: { source: 'harness-error' },
+        cards: [],
+        summary: r.raw,
+        error: r.raw,
+      }
+    }
+    const compact = r.json !== undefined ? JSON.stringify(r.json).slice(0, 4000) : r.raw.slice(0, 4000)
+    return {
+      ok: true,
+      appName: `${learned.display} (هارنس حقيقي)`,
+      command,
+      durationMs: Date.now() - started,
+      executedAt: new Date().toISOString(),
+      data: { source: 'cli-anything-harness', ...(r.json ? { json: r.json } : {}), text: compact } as Record<string, unknown>,
+      cards: [{ kind: 'kv', title: `${learned.display} (هارنس حقيقي)`, rows: [{ label: 'النتيجة', value: compact.slice(0, 500), tone: 'good' as const }] }],
+      summary: `نفذت الأمر عبر هارنس ${learned.command} على جهازك`,
+    }
+  }
   return {
     ok: false,
     status: 'not_connected',

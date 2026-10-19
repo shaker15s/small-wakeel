@@ -52,7 +52,7 @@ function runBattery(timeoutMs: number): Promise<{ passed: number; total: number;
 }
 
 test('golden battery: every scenario passes', async () => {
-  const d = await runBattery(420_000)
+  const d = await runBattery(1500_000)
   const failures = d.results.filter((r) => !r.ok)
   expect(d.total).toBeGreaterThanOrEqual(100)
   if (failures.length > 0) {

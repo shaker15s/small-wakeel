@@ -38,6 +38,7 @@ model Business {
   memories       AgentMemory[]
   usageEvents    UsageEvent[]
   quickCommands  QuickCommand[]
+  appHarnesses     AppHarness[]
   agentNotes     AgentNote[]
   pendingRequests PendingRequest[]
   subscriptions Subscription?
@@ -274,6 +275,30 @@ model AgentMemory {
 
   @@index([businessId, userId, active])
   @@index([businessId, kind])
+}
+
+// R46 — Mode 2 (CLI-Anything real): a learned/generated CLI harness for one
+// of the owner's apps. Built on THIS machine with the owner's explicit
+// permission (cli-hub prebuilt or the 7-phase pipeline), SKILL.md parsed,
+// executable surface registered so the brain can drive the app.
+model AppHarness {
+  id           String   @id @default(cuid())
+  businessId   String
+  business     Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  userId       String
+  app          String // canonical app slug (excel, daftra, …)
+  display      String // Arabic display name
+  source       String // prebuilt | generated | native
+  version      String   @default("1.0")
+  skillMd      String // parsed SKILL.md: command groups JSON
+  command      String // executable command prefix (cli-anything-<app>)
+  argsTemplate String? // e.g. "--json {command} {args}"
+  installedAt  DateTime @default(now())
+  lastUsedAt   DateTime?
+  status       String   @default("active") // active | broken | uninstalled
+
+  @@unique([businessId, app])
+  @@index([businessId, status])
 }
 
 model UsageEvent {

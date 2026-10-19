@@ -107,6 +107,8 @@ const SPECS: Record<string, [string, Record<string, unknown>]> = {
   cli_inspect_app: ['فحص عميق لتطبيق: شغال ولا لأ، ملفات البيانات وقاعدة بياناته المحلية.', P({ appName: 'string' }, ['appName'])],
   cli_sync_desktop_data: ['مطابقة بيانات تطبيق خارجي مع السجل (فحص فقط — الكتابة المالية محتاجة موصل موثّق).', P({ appName: 'string' }, ['appName'])],
   cli_control_app: ['تشغيل برنامج عبر سطح أوامره (نمط CLI-Anything). «إكسل» محركه حقيقي: list-recent/summary/read (read-only)/write. app = excel|daftra|ameen|easystore|quickbooks|browser. الناتج JSON موثّق.', P({ app: 'string', command: 'string', file: 'string', sheet: 'string', range: 'string', value: 'string', maxRows: 'number' }, ['app', 'command'])],
+  cli_harness_install: ['تبني هارنس CLI حقيقي لبرنامج المستشري باستخدام CLI-Anything الحقيقي (CLI-Hub المثبت أو pipeline الـ7-phases على كود البرنامج). confirmed=false (الأول مرعة): يعيد بكارت الإذن — اسؤ المستشري الإذن أولا. confirmed=true فقط بعد المرورية المصرّحة. source: مسار كود البرنامج الحقيقي (لو مش متاث في ال​ hub).', P({ app: 'string', source: 'string', confirmed: 'boolean' }, ['app'])],
+
 }
 
 /** The OpenAI-compatible tools array for the brain. Stable order = stable

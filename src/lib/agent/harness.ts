@@ -85,6 +85,7 @@ import { ensurePrismaFresh, jotFactsFromCards, jotNote, notesContext } from './s
 import { activeTools, userToolsPromptLine } from './userTools'
 import { factsFromCards, verifyReply, type VerifyFact } from './verify'
 import { buildAdvisoryPrompt, buildAgentSystemPrompt, buildReplyPrompt, buildSystemPrompt, roleTitle, TONE_AR } from './prompt'
+import { harnessesPromptBlock } from './cli-anything/harness-installer'
 import { brainToolSchemas } from './tool-schemas'
 import { READ_TOOLS, runReadTool, TYPE_AR, type ReadTool } from './tools'
 import {
@@ -756,7 +757,10 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
       // party + (up to 2 name words) + took: «كافترية النور خدت ١٠ زجاجة كوكاكولا»
       // party + (up to 2 name words) + took: «كافترية النور خدت ١٠ زجاجة كوكاكولا».
       // normalizeAr maps ة→ه and ى→ي, so party names need both spellings.
-      /(?:زبون|عميل|مطعم|كافتري[هة]|مق[هىي]|حاج|بنت)(?:\s+[^\s،,؟?]{1,15}){0,2}\s+(?:خد|خدت|اخدها|اخده|اخدت|ياخد)/.test(s)) {
+      /(?:زبون|عميل|مطعم|كافتري[هة]|مق[هىي]|حاج|بنت)(?:\s+[^\s،,؟?]{1,15}){0,2}\s+(?:خد|خدت|اخدها|اخده|اخدت|ياخد)/.test(s) ||
+      // R46: the owner's FULL NAME + took: «مصطفى الجزار خد ٥٠ كيس سكر» — 1–3 name
+      // words + took-verb. The payload builder resolves the customer (or asks).
+      /^(?:[^\s0-9،,؟?]{1,20}\s+){1,3}(?:خد|خدت|اخدها|اخده|اخدت|ياخد)(?:\s|$)/.test(s)) {
     const amount = extractStatedPrice(s)
     return { intent: 'write', opType: 'sale', fields: amount != null ? { amount } : {} }
   }
@@ -2048,6 +2052,12 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
       const requested = amount
       let overNote = ''
       if (requested > customer.balance) {
+        if (customer.balance <= 0) {
+          // R46: the customer owes us NOTHING (zero or credit). Collecting from
+          // them is not a collection of existing debt — never clamp to 0 and
+          // never crash in validation. One precise question, employee voice.
+          return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'المبلغ', failMessage: `${customer.name} مالوش مديونية عندك دلوقتي (رصيده ${egp(customer.balance)}) — الـ ${egp(requested)} دي عربون ولا سلفة؟ قولّي وأنا أسجلها بالظبط` }
+        }
         amount = customer.balance
         overNote = `${customer.name} عليه ${egp(amount)} بس — قللت المبلغ للمستحق الفعلي`
       }
@@ -4115,7 +4125,11 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         pluginsSection: pluginsPromptSection(plugins),
         middlewareRuntimeTail: middlewareOut?.dynamicRuntimeTail ?? undefined,
       })
-      const brainSystem = notesSection ? `${baseBrain}\n\n${evidenceBlock('conversation-notes', notesSection, 4_000)}` : baseBrain
+      // R46 Mode 2: learned CLI-Anything harnesses (real executables installed on this
+      // machine with the owner's permission) are appended — the model SEES them.
+      const harnessBlock = await harnessesPromptBlock(business.id).catch(() => '')
+      const baseBrain2 = harnessBlock ? `${baseBrain}\n\n${harnessBlock}` : baseBrain
+      const brainSystem = notesSection ? `${baseBrain2}\n\n${evidenceBlock('conversation-notes', notesSection, 4_000)}` : baseBrain2
       // DeepSeek-Harness: the whole capability surface is ONE typed registry;
       // the model gets the real schemas and picks the tool itself.
       const brainTools = brainToolSchemas()

@@ -18,39 +18,40 @@ export interface EvalCase {
 }
 
 // ---- check builders -------------------------------------------------------
-const draft =
+export const draft =
   (type: string) =>
   (r: any): boolean =>
     r.card?.kind === 'draft' && r.card?.type === type && r.card?.status === 'AWAITING_APPROVAL'
-const anyDraft = (types: string[]) => (r: any): boolean =>
+export const anyDraft = (types: string[]) => (r: any): boolean =>
   r.card?.kind === 'draft' && types.includes(r.card?.type)
-const cards =
+export const cards =
   (min = 1) =>
   (r: any): boolean =>
     Array.isArray(r.cards) && r.cards.length >= min
-const noCard = (r: any): boolean => !r.card
-const overpaySafe = (needle: string) => (r: any) =>
+export const noCard = (r: any): boolean => !r.card
+export const overpaySafe = (needle: string) => (r: any) =>
   r.card?.kind === 'draft' ||
   (typeof r.replyText === 'string' && r.replyText.includes('المستحق لـ' + needle))
-const says =
+export const says =
   (...parts: string[]) =>
   (r: any): boolean =>
     typeof r.replyText === 'string' && parts.some((p) => r.replyText.includes(p))
-const saysNot =
+export const saysNot =
   (part: string) =>
   (r: any): boolean =>
     typeof r.replyText === 'string' && !r.replyText.includes(part)
-const notResearch = (r: any): boolean => !r.research
-const chat =
+export const notResearch = (r: any): boolean => !r.research
+export const chat =
   (minLen = 15) =>
   (r: any): boolean =>
     typeof r.replyText === 'string' && r.replyText.length >= minLen && !r.card
 
-const all =
+export const all =
   (...cs: Array<(r: any) => boolean>) =>
   (r: any): boolean =>
     cs.every((c) => c(r))
 
+// NOTE: run.ts merges BASE + generated (1000+ battery) — kept separate to avoid a circular import.
 export const CASES: EvalCase[] = [
   // =======================================================================
   // SALES — every way an owner says «I sold»
@@ -273,5 +274,6 @@ export const CASES: EvalCase[] = [
   // STAFF & PERFORMANCE
   // =================================================================═══════
   { text: 'أداء العاملين إيه في الشهر؟', vertical: 'supermarket', expect: 'أداء فريق', check: (r) => cards()(r) || r.replyText.length > 15 },
-  { text: 'مين أفضل باعة عندنا؟', vertical: 'pharmacy', expect: 'ترتيب أداء/عملاء', check: (r) => cards()(r) || r.replyText.length > 15 },
-]
+  { text: 'مين أفضل باعة عندنا؟', vertical: 'pharmacy', expect: 'ترتيب أداء/عملاء', check: (r) => cards()(r) || r.replyText.length > 15 },]
+
+

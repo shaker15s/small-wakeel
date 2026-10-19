@@ -20,8 +20,12 @@ import { join } from 'node:path'
 
 
 
-import { CASES } from './cases'
+import { CASES as BASE_CASES } from './cases'
+import { generateCases } from './case-generator'
 import type { EvalCase } from './cases'
+
+// R46: 1000+ scenario battery = hand-written base + generated cross-product.
+const CASES: EvalCase[] = [...BASE_CASES, ...generateCases()]
 
 async function main() {
   const asJson = process.argv.includes('--json')
@@ -40,14 +44,15 @@ async function main() {
   const businesses = await db.business.findMany()
   const results: { text: string; expect: string; ok: boolean; ms: number; note: string }[] = []
 
-  for (const c of CASES) {
+  // R46: parallel pool (6) — each case is independent (own scratch
+  // conversation), results keep case order. 1000+ cases in seconds.
+  const runOne = async (c: EvalCase): Promise<{ text: string; expect: string; ok: boolean; ms: number; note: string }> => {
     const business = businesses.find((b: { type: string }) => b.type === c.vertical)
     const user = business
       ? await db.user.findFirst({ where: { businessId: business.id, role: 'owner' } })
       : null
     if (!business || !user) {
-      results.push({ text: c.text, expect: c.expect, ok: false, ms: 0, note: `مفيش نشاط من نوع ${c.vertical}` })
-      continue
+      return { text: c.text, expect: c.expect, ok: false, ms: 0, note: `مفيش نشاط من نوع ${c.vertical}` }
     }
     const conversation = await db.conversation.create({
       data: { businessId: business.id, userId: user.id, title: 'تقييم آلي' },
@@ -67,7 +72,7 @@ async function main() {
         () => {},
       )
       const ok = c.check(result)
-      results.push({
+      return {
         text: c.text,
         expect: c.expect,
         ok,
@@ -75,19 +80,24 @@ async function main() {
         note: ok
           ? r_note(result)
           : `جاب: card=${result.card?.type ?? '—'} cards=${result.cards?.length ?? 0} رد=«${String(result.replyText).slice(0, 60)}»`,
-      })
+      }
     } catch (err) {
-      results.push({
+      return {
         text: c.text,
         expect: c.expect,
         ok: false,
         ms: Date.now() - started,
         note: `استثناء: ${err instanceof Error ? err.message : String(err)}`,
-      })
+      }
     } finally {
       // the eval conversation is scratch data — keep the copy clean
       await db.conversation.delete({ where: { id: conversation.id } }).catch(() => null)
     }
+  }
+  const POOL = 12
+  for (let i = 0; i < CASES.length; i += POOL) {
+    const chunk = CASES.slice(i, i + POOL)
+    results.push(...(await Promise.all(chunk.map(runOne))))
   }
 
   await db.$disconnect()

@@ -34,8 +34,11 @@ export interface AppSkill {
   aliases: string[]
   /** the agent-readable command surface (SKILL.md command groups) */
   commandGroups: SkillGroup[]
-  /** 'native' = a real engine executes here; 'adapter' = inspected, not yet drivable */
-  status: 'native' | 'adapter'
+  /** 'native' = a real engine executes here; 'adapter' = inspected, not yet drivable;
+   *  'harness' = R46 Mode 2 — a real CLI-Anything harness installed on the owner's machine */
+  status: 'native' | 'adapter' | 'harness'
+  /** installed executable (cli-anything-<app>) when status='harness' */
+  harnessCommand?: string
   notes?: string
 }
 
@@ -176,6 +179,12 @@ export function appSkillsPromptBlock(): string {
       .join(' · ')
     lines.push(`- ${sk.name} [id=${sk.id}, ${sk.status === 'native' ? 'محرك حقيقي' : 'فحص فقط'}] — ${groups}`)
   }
+  lines.push(
+    'هارنسات متعلمة (R46 Mode 2): لو برنامجك اتبنى له CLI حقيقي على جهازك (CLI-Anything — cli-anything-<app> + SKILL.md)، بيظهر هنا كهارنس، و `cli_control_app` بتنّفذ أوامره فعلًا على برنامجك.',
+  )
+  lines.push(
+    'لو صاحب الشغل طلب يعمل وكيل يشتغل على برنامج عنده (دفرا، أمان، أي تطبيق): أداة `cli_harness_install` — أول مرة confirmed=false هتعيط لك بطاقة الإذن: قريها واطلب من المالك صراحةً الإذن بالبناء على جهازه، وبعدين confirmed=true. ده CLI-Anything الحقيقي (github.com/HKUDS/CLI-Anything) ماشي على جهازه — مش محاكاة، وبيطلب الإذن دايمًا قبل أي تثبيت.',
+  )
   lines.push(
     'التنفيذ: `cli_control_app({app, command, args})` — الناتج JSON موثّق (ok/summary/data). «إكسل» شغال فعلًا: اقرأ ملفاتك وخذ تجميعات من الشيتات وكبها في السجل. القراءة read-only؛ الكتابة تطلب تأكيدًا من صاحبه أولًا. في بيئة السحابة (مش جهازه) فالأمر بيرجع حالة واضحة — مش بيانات مخيونصة.',
   )
