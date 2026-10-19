@@ -32,6 +32,7 @@ export type ReadTool =
   | 'get_profit_margin'
   | 'forecast_stockout'
   | 'get_customer_history'
+  | 'get_supplier_history'
   | 'compare_periods'
   | 'expense_breakdown'
   | 'get_period_totals'
@@ -71,6 +72,7 @@ export const READ_TOOLS: ReadonlySet<string> = new Set<string>([
   'get_profit_margin',
   'forecast_stockout',
   'get_customer_history',
+  'get_supplier_history',
   'compare_periods',
   'expense_breakdown',
   'search_web',
@@ -1288,6 +1290,94 @@ export async function runReadTool(
             { label: 'متوسط التحصيل', value: avgCollection > 0 ? egp(avgCollection) : '—' },
             { label: 'بيسدد كل', value: gapDays != null ? `${gapDays} يوم تقريبًا` : 'مفيش بيانات كفاية' },
             ...(sinceLabel ? [{ label: 'الرصيد الافتتاحي من', value: sinceLabel }] : []),
+            ...(found.phone ? [{ label: 'التليفون', value: found.phone }] : []),
+          ],
+        },
+        {
+          kind: 'table',
+          title: `آخر حركات ${found.name}`,
+          columns: [
+            { key: 'ref', label: 'الرقم' },
+            { key: 'type', label: 'النوع' },
+            { key: 'amount', label: 'المبلغ' },
+            { key: 'date', label: 'التاريخ' },
+          ],
+          rows: mine.slice(0, 6).map((op) => ({
+            ref: op.ref,
+            type: TYPE_AR[op.type] ?? op.type,
+            amount: egp(opAmount(op.payload)),
+            date: arDate(op.createdAt),
+          })),
+        },
+      ]
+    }
+    case 'get_supplier_history': {
+      // R52 — the payables mirror of get_customer_history: «كام علينا لمحمد
+      // تاجر الجملة؟» must answer with THAT supplier's account, not the whole
+      // list and not the generic «النت تقيل» dead-end.
+      const name = String(args.name ?? '').trim()
+      const suppliers = await db.supplier.findMany({ where: { businessId } })
+      const flat = (x: string) => normalizeAr(x).replace(/\s+/g, ' ').trim()
+      const wordCount = (x: string) => flat(x).split(' ').filter(Boolean).length
+      // Same disambiguation contract as the customer file: an exact name wins,
+      // a lone shared first word never silently lands on someone else's debt.
+      const exact = suppliers.find((s) => flat(s.name) === flat(name))
+      const strong = suppliers
+        .filter((s) => flat(s.name).includes(flat(name)) && (wordCount(name) >= 2 || flat(name).length >= 6))
+        .filter((s) => !isQuestionWord(name))
+      const partial = exact ?? (strong.length === 1 ? strong[0] : undefined)
+      if (!partial) {
+        const near = suppliers.filter((s) => flat(s.name).includes(flat(name))).slice(0, 3)
+        return [
+          {
+            kind: 'kv',
+            title: 'ملف المورد',
+            rows: [
+              { label: 'النتيجة', value: `ملقيتش مورد بالاسم «${name}» — مفيش مورد بالاسم ده في السجل` },
+              ...(near.length > 0
+                ? [{ label: 'قصدت؟', value: `${near.map((s) => `${s.name} (علينا ${egp(s.balance)})`).join(' · ')} — اكتب الاسم زي ما هو في السجل` }]
+                : [{ label: 'الخطوة', value: `قولّي «جبت من ${name}» وأنا أسجله في السجل` }]),
+            ],
+          },
+        ]
+      }
+      const found = partial
+      const ops = await db.operation.findMany({
+        where: { businessId, status: 'SUCCEEDED', OR: [{ summary: { contains: found.name } }, { type: { in: ['payment', 'purchase'] } }] },
+        orderBy: { createdAt: 'desc' },
+        take: 60,
+      })
+      const mine = ops.filter((op) => op.summary.includes(found.name) || opLines(op.payload).length > 0)
+      const payments = mine.filter((op) => op.type === 'payment')
+      const avgPayment =
+        payments.length > 0 ? Math.round(payments.reduce((s2, o) => s2 + opAmount(o.payload), 0) / payments.length) : 0
+      const addOp = mine.find((op) => op.type === 'supplier_add')
+      let sinceLabel: string | null = null
+      if (addOp) {
+        try {
+          const pj = JSON.parse(addOp.payload) as { since?: string }
+          if (pj.since) {
+            const d = new Date(pj.since)
+            if (!Number.isNaN(d.getTime())) sinceLabel = arDate(d)
+          }
+        } catch {
+          /* payload not JSON — the balance is still shown */
+        }
+      }
+      const gapDays =
+        payments.length >= 2
+          ? Math.round((payments[0].createdAt.getTime() - payments[payments.length - 1].createdAt.getTime()) / 86400000 / (payments.length - 1))
+          : null
+      return [
+        {
+          kind: 'kv',
+          title: `ملف ${found.name}`,
+          rows: [
+            { label: 'المستحق له (رصيدنا عليه)', value: egp(found.balance) },
+            { label: 'آخر سداد', value: payments[0] ? `${egp(opAmount(payments[0].payload))} — ${arDate(payments[0].createdAt)}` : 'مفيش' },
+            { label: 'متوسط السداد', value: avgPayment > 0 ? egp(avgPayment) : '—' },
+            { label: 'بنسدد كل', value: gapDays != null ? `${gapDays} يوم تقريبًا` : 'مفيش بيانات كفاية' },
+            ...(sinceLabel ? [{ label: 'الحساب اتفتح من', value: sinceLabel }] : []),
             ...(found.phone ? [{ label: 'التليفون', value: found.phone }] : []),
           ],
         },

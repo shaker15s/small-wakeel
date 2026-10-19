@@ -277,6 +277,7 @@ const TOOL_ACTIONS: Record<string, ChatActionDTO[]> = {
   list_expiring: [{ id: 'act-list_expiring', label: 'افتح المخزون', view: 'inventory', icon: 'boxes', tone: 'primary' }],
   list_receivables: [{ id: 'act-list_receivables', label: 'حسابات العملاء', view: 'accounts', icon: 'users', tone: 'primary' }],
   list_payables: [{ id: 'act-list_payables', label: 'حسابات الموردين', view: 'accounts', icon: 'users', tone: 'primary' }],
+  get_supplier_history: [{ id: 'act-get_supplier_history', label: 'حسابات الموردين', view: 'accounts', icon: 'users', tone: 'primary' }],
   get_activity_history: [{ id: 'act-get_activity_history', label: 'سجل العمليات', view: 'journal', icon: 'journal', tone: 'primary' }],
   search_catalog: [{ id: 'act-search_catalog', label: 'افتح المخزون', view: 'inventory', icon: 'boxes', tone: 'primary' }],
   get_item_stock: [{ id: 'act-get_item_stock', label: 'افتح المخزون', view: 'inventory', icon: 'boxes', tone: 'primary' }],
@@ -296,6 +297,7 @@ const TOOL_LABEL_AR: Record<string, string> = {
   list_low_stock: 'النواقص في المخزون',
   list_receivables: 'الحسابات المستحقة',
   list_payables: 'مستحقات الموردين',
+  get_supplier_history: 'ملف المورد',
   list_expiring: 'الصلاحيات القريبة',
   search_catalog: 'بحث في الكتالوج',
   get_item_stock: 'رصيد صنف',
@@ -624,7 +626,15 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
     const amount = extractStatedPrice(s)
     return { intent: 'write', opType: 'payment', fields: { ...(mSup?.[1] ? { supplierName: mSup[1].trim() } : {}), ...(amount != null ? { amount } : {}) } }
   }
-  // R51: «كام علينا لمحمد تاجر الجملة؟» — the everyday payables question.
+  // R52: a NAMED payables question → that supplier's FILE (balance + payment
+  // pattern + last movements) — the mirror of the customer history rule.
+  // «كام علينا لمحمد تاجر الجملة؟» / «تاريخ المورد X» / «حساب المورد X».
+  const mSupQ = s.match(/^(?:كام|كم) علينا (?:ل|لم|لمن)?\s*([^ ،,؟?]+(?:\s+[^ ،,؟?]+){0,3})\s*[؟?]?$/) ?? s.match(/^(?:تاريخ|حساب|ملف) المورد\s+([^ ،,؟?]+(?:\s+[^ ،,؟?]+){0,3})\s*[؟?]?$/)
+  if (mSupQ) {
+    const supName = mSupQ[1].trim()
+    return { intent: 'read', tool: 'get_supplier_history', fields: supName.length >= 2 ? { name: supName } : {} }
+  }
+  // R51: «كام علينا؟» — the everyday payables question (no name → the list).
   if (/(اللي علينا|للمورد|الموردين|مستحق|كام علينا|كم علينا|كام على المورد|كم على الموردين)/.test(s)) return { intent: 'read', tool: 'list_payables', fields: {} }
   // «النهارده عملت ايه؟» is the same question in a different word order — the
   // owner's first sentence of the day, and it used to fall through to chat.
@@ -4734,6 +4744,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       'get_price_check',
       'get_reorder_list',
       'get_profit_by_item',
+      'get_supplier_history',
     ])
     if (!SAFE.has(r.tool)) return null
     const hasDigits = /[0-9٠-٩۰-۹]/.test(text)

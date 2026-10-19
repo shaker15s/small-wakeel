@@ -239,6 +239,11 @@ export const CASES: EvalCase[] = [
     check: (r) => r.card?.type === 'customer_add' && String(r.replyText).includes('تونة'),
   },
   { text: 'كام علينا لمحمد تاجر الجملة؟', vertical: 'supermarket', expect: 'مستحقات الموردين (مش «النت تقيل»)', check: (r) => cards(1)(r) },
+  // ---- R52: a NAMED payables question answers with THAT supplier's file ----
+  { text: 'كام علينا لمحمد تاجر الجملة؟', vertical: 'supermarket', expect: 'ملف المورد ده (رصيد + آخر سداد + حركات)', check: (r) => cards(1)(r) && String(JSON.stringify(r.cards)).includes('محمد تاجر الجملة') },
+  { text: 'تاريخ المورد محمد تاجر الجملة', vertical: 'supermarket', expect: 'ملف المورد (مش قائمة المستحقات كلها)', check: (r) => cards(1)(r) && String(JSON.stringify(r.cards)).includes('ملف محمد تاجر الجملة') },
+  { text: 'كام علينا لمحمد تاجر الفول؟', vertical: 'supermarket', expect: 'مورد مش موجود: نتيجة صادقة (مش رقم من عند واحد تاني)', check: (r) => cards(1)(r) && String(JSON.stringify(r.cards)).includes('ملقيتش') },
+
 
   // ---- R51: the everyday balance question must not die offline ----
   { text: 'كم علي أم حسن؟', vertical: 'supermarket', expect: 'رصيد العميل (مش «النت تقيل»)', check: (r) => all(noCard, saysNot('النت شكله تقيل'))(r) && String(r.replyText).length >= 30 },
