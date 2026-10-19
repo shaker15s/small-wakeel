@@ -1,7 +1,14 @@
 // GET /api/providers/health — the DeepSeek-harness «provider-check» pattern:
-// before trusting a provider, call the endpoint DIRECTLY (its /models
-// route, the canonical OpenAI-compat capability probe), measure latency,
+// before trusting a provider, call the endpoint DIRECTLY, measure latency,
 // and report ok/down per provider.
+//
+// R44: the check now has TWO legs, run in parallel per provider:
+//   1. GET  /models            — is the endpoint alive + what does it serve?
+//   2. POST /chat/completions  — does the model ACCEPT native tool calling
+//      (one trivial tool schema, max_tokens 16) and does it USE it?
+//      That is the gate the brain relies on: a provider that 400s on the
+//      `tools` field is transparently retried without it (self-heal) and
+//      shown here as «بدون tool-calling» so the owner knows what he pays for.
 //
 // Security contract (same as the rest of the BYO layer):
 //   • the API key NEVER leaves the server and NEVER appears in the response
@@ -19,46 +26,100 @@ export const dynamic = 'force-dynamic'
 
 const PROBE_TIMEOUT_MS = 8_000
 
+/** The trivial capability probe: if the endpoint accepts this, the `tools`
+ *  field is supported; if the model uses the tool, tool calling is live. */
+const TOOL_PROBE = {
+  tools: [
+    {
+      type: 'function',
+      function: {
+        name: 'wakil_probe',
+        description: 'قدرة استدعاء الأدوات',
+        parameters: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] },
+      },
+    },
+  ],
+  messages: [{ role: 'user', content: 'استخدم أداة wakil_probe بقيمة ok=true' }],
+  max_tokens: 16,
+  stream: false,
+}
+
 export async function GET(req: Request) {
   try {
     const gate = await guard(req, { scope: 'admin' })
     if (!gate.ok) return gate.res
 
     const providers = await db.modelProvider.findMany({
-      include: { models: { where: { enabled: true }, select: { id: true, label: true } } },
+      include: { models: { where: { enabled: true }, select: { id: true, label: true, remoteId: true } } },
     })
 
     const results = await Promise.all(
       providers.map(async (p) => {
-        const url = `${p.baseUrl.replace(/\/$/, '')}/models`
+        const base = p.baseUrl.replace(/\/$/, '')
         const t0 = Date.now()
         const ctrl = new AbortController()
         const timer = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS)
+        const auth = { authorization: `Bearer ${decryptProviderKey(p.apiKey)}` }
         try {
-          const res = await providerFetch(url, {
+          // ---- leg 1: /models (canonical OpenAI-compat capability probe)
+          const modelsRes = await providerFetch(`${base}/models`, {
             method: 'GET',
-            headers: { authorization: `Bearer ${decryptProviderKey(p.apiKey)}` },
+            headers: auth,
             signal: ctrl.signal,
           })
-          const ms = Date.now() - t0
           let modelCount = 0
-          if (res.ok) {
+          if (modelsRes.ok) {
             try {
-              const json = (await res.json()) as { data?: unknown[] }
+              const json = (await modelsRes.json()) as { data?: unknown[] }
               modelCount = Array.isArray(json.data) ? json.data.length : 0
             } catch {
               modelCount = 0
             }
           }
+
+          // ---- leg 2: native tool-calling probe (parallel, same budget)
+          const firstModel = p.models[0]?.remoteId ?? 'default'
+          let supportsTools: boolean | null = null
+          let usedTool: boolean | null = null
+          let toolMs: number | null = null
+          const toolT0 = Date.now()
+          try {
+            const toolRes = await providerFetch(`${base}/chat/completions`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json', ...auth },
+              body: JSON.stringify({ model: firstModel, ...TOOL_PROBE }),
+              signal: ctrl.signal,
+            })
+            toolMs = Date.now() - toolT0
+            if (toolRes.ok) {
+              supportsTools = true
+              const json = (await toolRes.json().catch(() => null)) as {
+                choices?: { message?: { tool_calls?: unknown[] } }[]
+              } | null
+              usedTool = Array.isArray(json?.choices?.[0]?.message?.tool_calls) && json.choices[0].message!.tool_calls!.length > 0
+            } else {
+              const detail = await toolRes.text().catch(() => '')
+              // A 4xx that names the tools field = provider WITHOUT tool
+              // support (the harness self-heals to JSON-in-text for it).
+              supportsTools = /tool|function|schema|unknown parameter|invalid request/i.test(detail) ? false : null
+            }
+          } catch {
+            // probe leg failed (abort/timeout) — models leg still reports ok
+            toolMs = null
+          }
+
           return {
             id: p.id,
             name: p.name,
             baseUrl: p.baseUrl,
-            ok: res.ok,
-            status: res.status,
-            ms,
+            ok: modelsRes.ok,
+            status: modelsRes.status,
+            ms: Date.now() - t0,
             modelCount,
             enabledModels: p.models.length,
+            supportsTools,
+            usedTool,
+            toolMs,
           }
         } catch (err) {
           // redacted: the error text can carry gateway echoes
@@ -72,6 +133,9 @@ export async function GET(req: Request) {
             ms: Date.now() - t0,
             modelCount: 0,
             enabledModels: p.models.length,
+            supportsTools: null as boolean | null,
+            usedTool: null as boolean | null,
+            toolMs: null as number | null,
             detail,
           }
         } finally {

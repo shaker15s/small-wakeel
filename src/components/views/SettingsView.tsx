@@ -216,6 +216,7 @@ export default function SettingsView({ businessId, userId }: ViewProps) {
   const [health, setHealth] = useState<Array<{
     id: string; name: string; ok: boolean; status: number | null; ms: number
     modelCount: number; enabledModels: number; detail?: string
+    supportsTools?: boolean | null; usedTool?: boolean | null
   }> | null>(null)
   const [healthBusy, setHealthBusy] = useState(false)
 
@@ -227,6 +228,7 @@ export default function SettingsView({ businessId, userId }: ViewProps) {
       const json = (await res.json()) as { providers: Array<{
         id: string; name: string; ok: boolean; status: number | null; ms: number
         modelCount: number; enabledModels: number; detail?: string
+        supportsTools?: boolean | null; usedTool?: boolean | null
       }> }
       setHealth(json.providers)
     } catch (err) {
@@ -512,8 +514,17 @@ export default function SettingsView({ businessId, userId }: ViewProps) {
                     <span className={cn('size-2 shrink-0 rounded-full', h.ok ? 'bg-wakil-teal' : 'bg-destructive')} aria-hidden />
                     <span className="min-w-0 flex-1 truncate font-medium">{h.name}</span>
                     {h.ok ? (
-                      <span className="num text-[11px] text-wakil-teal">
-                        شغال · {arNum(h.ms)}ms · {arNum(h.modelCount)} موديل عند المزوّد / {arNum(h.enabledModels)} مفعّل عندك
+                      <span className="num flex flex-wrap items-center gap-1.5 text-[11px] text-wakil-teal">
+                        <span>شغال · {arNum(h.ms)}ms · {arNum(h.modelCount)} موديل عند المزوّد / {arNum(h.enabledModels)} مفعّل عندك</span>
+                        {h.supportsTools === true ? (
+                          <span className="rounded-full border border-wakil-teal/40 bg-wakil-teal/10 px-1.5 py-px font-bold text-wakil-teal">
+                            tool-calling أصلي{h.usedTool ? ' ✓ بيستخدم الأدوات' : ''}
+                          </span>
+                        ) : h.supportsTools === false ? (
+                          <span className="rounded-full border border-border bg-muted px-1.5 py-px font-bold text-muted-foreground">
+                            بدون tool-calling — بيشتغل بالبروتوكول النصي
+                          </span>
+                        ) : null}
                       </span>
                     ) : (
                       <span className="num max-w-full truncate text-[11px] text-destructive" title={h.detail}>

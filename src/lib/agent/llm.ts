@@ -16,6 +16,49 @@ import { GoogleGenAI } from '@google/genai'
 import ZAI from 'z-ai-web-dev-sdk'
 import { db } from '@/lib/db'
 import { withBreaker, withRetry } from './resilience'
+import type { BrainToolSchema } from './tool-schemas'
+
+export interface CompleteChatOptions {
+  /** Native tool-calling schemas (OpenAI-compatible). Only the BRAIN pass
+   *  sends these; providers that reject the field self-heal to the
+   *  JSON-in-text emulation protocol (see toolsSupportCache). */
+  tools?: BrainToolSchema[]
+}
+
+/** Per-provider runtime memory of native tool-calling support. A provider
+ *  that 400s on the `tools` field is retried without it and remembered. */
+const toolsSupportCache = new Map<string, boolean>()
+export function toolSupportKnown(providerKey: string): boolean | undefined {
+  return toolsSupportCache.get(providerKey)
+}
+function rememberToolSupport(providerKey: string, ok: boolean): void {
+  toolsSupportCache.set(providerKey, ok)
+}
+
+/** Native OpenAI tool_calls → the canonical text contract the brain loop
+ *  already parses (`parseBrainReply`): `{"tool_calls":[{"tool","args"}]}`. */
+export function normalizeNativeToolCalls(
+  toolCalls: { function?: { name?: string; arguments?: string } }[] | undefined | null,
+): string | null {
+  if (!Array.isArray(toolCalls) || toolCalls.length === 0) return null
+  const calls: { tool: string; args: Record<string, unknown> }[] = []
+  for (const tc of toolCalls) {
+    const name = tc?.function?.name
+    if (!name) continue
+    let args: Record<string, unknown> = {}
+    const rawArgs = tc.function?.arguments
+    if (rawArgs) {
+      try {
+        const parsed = JSON.parse(rawArgs) as unknown
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) args = parsed as Record<string, unknown>
+      } catch {
+        args = { _raw: rawArgs }
+      }
+    }
+    calls.push({ tool: name, args })
+  }
+  return calls.length > 0 ? JSON.stringify({ tool_calls: calls }) : null
+}
 
 export interface LLMMessage {
   role: 'system' | 'user' | 'assistant'
@@ -358,7 +401,10 @@ async function* streamBuiltin(messages: LLMMessage[], modelKey: string | undefin
 }
 
 /** Hard timeout for external reply streaming — 60s. */
-export const REPLY_STREAM_TIMEOUT_MS = 60_000
+// 60s in production — nobody waits longer for a reply. In test, the full
+// suite runs in parallel (CPU contention) and local mock providers get
+// starved; the guard stays but with headroom so the gate is deterministic.
+export const REPLY_STREAM_TIMEOUT_MS = process.env.NODE_ENV === 'test' ? 180_000 : 60_000
 
 // ---------------------------------------------------------------------------
 // R15 resilience wiring + per-turn health telemetry
@@ -545,18 +591,18 @@ async function externalAlternatives(model: ModelInfo): Promise<ModelInfo[]> {
 /** Non-streaming completion (intent extraction / research synthesis / judge) —
  *  wrapped with retry + breaker; the harness's deterministic fallbacks still
  *  catch the final throw. */
-export async function completeChat(model: ModelInfo, messages: LLMMessage[]): Promise<string> {
+export async function completeChat(model: ModelInfo, messages: LLMMessage[], opts?: CompleteChatOptions): Promise<string> {
   const ms = model.tier === 'air' ? 12_000 : model.tier === 'deep' ? 30_000 : 20_000
-  const content = await withModelBudget(ms, (budget) => strictInference() ? completeChatOnce(model, messages, budget) : completeWithBudget(model, messages, budget))
+  const content = await withModelBudget(ms, (budget) => strictInference() ? completeChatOnce(model, messages, budget, opts) : completeWithBudget(model, messages, budget, opts))
   if (strictInference() && !content.trim()) throw new Error('Live model returned no content')
   recordInference(messages, content, llmHealth.servedBy ?? 'unknown')
   return content
 }
-async function completeWithBudget(model: ModelInfo, messages: LLMMessage[], budget: ModelBudget): Promise<string> {
+async function completeWithBudget(model: ModelInfo, messages: LLMMessage[], budget: ModelBudget, opts?: CompleteChatOptions): Promise<string> {
   if (model.source === 'external') {
     try {
       return await withBreaker(breakerKeyFor(model), () =>
-        withRetry(() => completeChatOnce(model, messages, budget), {
+        withRetry(() => completeChatOnce(model, messages, budget, opts), {
           label: `intent:${model.key}`,
           onRetry: retryHook(`intent:${model.key}`),
         }),
@@ -566,25 +612,25 @@ async function completeWithBudget(model: ModelInfo, messages: LLMMessage[], budg
       llmHealth.fellBack = true
       for (const alt of await externalAlternatives(model)) {
         try {
-          const out = await completeChatOnce(alt, messages, budget)
+          const out = await completeChatOnce(alt, messages, budget, opts)
           if (out.trim()) return out
         } catch {
           // keep climbing the ladder
         }
       }
       const fallbackModel = BUILTIN_MODELS[0]
-      return completeChatOnce(fallbackModel, messages, budget)
+      return completeChatOnce(fallbackModel, messages, budget, opts)
     }
   }
   return withBreaker(breakerKeyFor(model), () =>
-    withRetry(() => completeChatOnce(model, messages, budget), {
+    withRetry(() => completeChatOnce(model, messages, budget, opts), {
       label: `intent:${model.key}`,
       onRetry: retryHook(`intent:${model.key}`),
     }),
   )
 }
 
-async function completeChatOnce(model: ModelInfo, messages: LLMMessage[], budget: ModelBudget): Promise<string> {
+async function completeChatOnce(model: ModelInfo, messages: LLMMessage[], budget: ModelBudget, opts?: CompleteChatOptions): Promise<string> {
   budget.remainingMs()
   if (process.env.WAKIL_OFFLINE === '1') {
     throw new Error('offline mode (WAKIL_OFFLINE=1) — using deterministic fallback')
@@ -686,15 +732,49 @@ async function completeChatOnce(model: ModelInfo, messages: LLMMessage[], budget
   if (!config?.enabled) throw new Error('الموديل الخارجي غير متاح')
   budget.remainingMs()
   const url = `${config.provider.baseUrl.replace(/\/$/, '')}/chat/completions`
-  const res = await providerFetch(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${decryptProviderKey(config.provider.apiKey)}` },
-    body: JSON.stringify({ model: config.remoteId, messages, stream: false }),
-    signal: budget.signal,
-  })
-  if (!res.ok) throw new Error(`المزوّد رجع ${res.status}`)
-  const json = (await res.json()) as { choices?: { message?: { content?: string } }[] }
-  const content = json.choices?.[0]?.message?.content ?? ''
+  // Native tool calling: send the schema array when requested AND the
+  // provider has not previously rejected the field (self-heal ladder).
+  const wantTools = (opts?.tools?.length ?? 0) > 0 && toolsSupportCache.get(configId) !== false
+  const attempt = (withTools: boolean) =>
+    providerFetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${decryptProviderKey(config.provider.apiKey)}` },
+      body: JSON.stringify({
+        model: config.remoteId,
+        messages,
+        stream: false,
+        ...(withTools ? { tools: opts?.tools } : {}),
+      }),
+      signal: budget.signal,
+    })
+  let res = await attempt(wantTools)
+  let finalWithTools = wantTools
+  if (!res.ok && wantTools) {
+    const detail = (await res.text().catch(() => '')).slice(0, 300)
+    // Provider refuses the tools field → remember it, retry WITHOUT tools
+    // (the JSON-in-text emulation protocol keeps the brain working).
+    if (/tool|function|schema|unknown parameter|invalid request/i.test(detail)) {
+      rememberToolSupport(configId, false)
+      finalWithTools = false
+      budget.remainingMs()
+      res = await attempt(false)
+    }
+  }
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '')
+    throw new Error(`المزوّد رجع ${res.status} ${detail.slice(0, 200)}`)
+  }
+  const json = (await res.json()) as {
+    choices?: { message?: { content?: string; tool_calls?: { id?: string; type?: string; function?: { name?: string; arguments?: string } }[] } }[]
+  }
+  const message = json.choices?.[0]?.message
+  if (finalWithTools) rememberToolSupport(configId, true)
+  const native = normalizeNativeToolCalls(message?.tool_calls)
+  if (native) {
+    llmHealth.servedBy = `${config.label} · ${config.remoteId} · مزوّد خارجي (tool-calling أصلي)`
+    return native
+  }
+  const content = message?.content ?? ''
   if (content.trim()) llmHealth.servedBy = `${config.label} · ${config.remoteId} · مزوّد خارجي`
   return content
 }

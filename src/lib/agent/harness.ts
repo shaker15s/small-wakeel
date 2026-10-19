@@ -85,6 +85,7 @@ import { ensurePrismaFresh, jotFactsFromCards, jotNote, notesContext } from './s
 import { activeTools, userToolsPromptLine } from './userTools'
 import { factsFromCards, verifyReply, type VerifyFact } from './verify'
 import { buildAdvisoryPrompt, buildAgentSystemPrompt, buildReplyPrompt, buildSystemPrompt, roleTitle, TONE_AR } from './prompt'
+import { brainToolSchemas } from './tool-schemas'
 import { READ_TOOLS, runReadTool, TYPE_AR, type ReadTool } from './tools'
 import {
   budgetToolHistory,
@@ -537,7 +538,7 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
     return { intent: 'read', tool: 'get_stock_value', fields: {} }
   if (/(راكد|راكده|راكدة|مش بتتباع|مش بيتحرك|بضاعه راكنه|بضاعة راكنة)/.test(s))
     return { intent: 'read', tool: 'get_dead_stock', fields: {} }
-  if (/(أفضل|افضل|أكبر|اكبر|أكتر|اكتر).*(عميل|عملاء)|مين بيشتري|ترتيب العملاء|(عميل|عملاء).*(أكتر|اكتر|أفضل|افضل)/.test(s))
+  if (/(أفضل|افضل|أكبر|اكبر|أكتر|اكتر).*(عميل|عملاء|عملايي|عملاءي)|مين بيشتري|ترتيب العملاء|(عميل|عملاء|عملايي|عملاءي).*(أكتر|اكتر|أفضل|افضل)$|(أفضل|افضل)\s+(عملايي|عملاءي|عملاء|عميل)/.test(s))
     return { intent: 'read', tool: 'get_customer_ranking', fields: {} }
   if (/(أداء|اداء) (الفريق|الموظفين|الموظف)|احسن موظف|أحسن موظف|مين شغله|الموظفين بيعملوا/.test(s))
     return { intent: 'read', tool: 'get_staff_performance', fields: {} }
@@ -547,7 +548,7 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
     return { intent: 'read', tool: 'get_reorder_list', fields: {} }
   if (/(بربح|بكسب|مكسبي|مكسبى).*(من ايه|من إيه|من اكتر|من أكتر|اكتر|أكتر)|(اكتر|أكتر) (حاجه|حاجة) (بتربح|بتكسب)/.test(s))
     return { intent: 'read', tool: 'get_profit_by_item', fields: {} }
-  if (/(أكتر|اكتر|أعلى|اعلى|افضل|أفضل).*(بيتباع|بتتباع|مبيع|مبيعات)|(بيتباع|بتتباع) (أكتر|اكتر)|أعلى الأصناف|الاصناف اللي بتتباع|الأصناف اللي بتتباع/.test(s))
+  if (/(أكتر|اكتر|أعلى|اعلى|افضل|أفضل).*(بيتباع|بتتباع|بتبعت|بتبيع|مبيع|مبيعات)|(بيتباع|بتتباع|بتبعت|بتبيع) (أكتر|اكتر)|أعلى الأصناف|الاصناف اللي بتتباع|الأصناف اللي بتتباع/.test(s))
     return { intent: 'read', tool: 'get_top_items', fields: {} }
   // «النواقص» / «نواقص» are the broken plurals an Egyptian owner actually uses —
   // a substring test for «ناقص» misses them entirely.
@@ -599,7 +600,26 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
     }
     return { intent: 'read', tool: 'list_receivables', fields: {} }
   }
+  // «آخر الحركات إيه؟ / العمليات اللي اتعملت / سجل الحركات» — the owner's
+  // "what just happened" question (R44: it used to fall to the model and,
+  // offline, die as a network apology).
+  if (/(الحركات|العمليات|اتعمل|اتسجل|سجل الحركات|سجل العمليات|آخر معامله|آخر حركه|آخر عملية|آخر حركة)/.test(s) && !/(بعت|بيع|سجل بيع|اشتريت|سجل)/.test(s))
+    return { intent: 'read', tool: 'get_activity_history', fields: {} }
   if (/(مديون|اللي ليا|تحصيلات|مين عليها|عليها فلوس|عليهم فلوس|العملاء)/.test(s)) return { intent: 'read', tool: 'list_receivables', fields: {} }
+  // R44: «سددت ١٠٠٠ لشركة المنظفات» / «دفع للمورد ٢٠٠ من مستحقات شركة X» —
+  // first-person paying a SUPPLIER is a PAYMENT, never a collection. The old
+  // collection rule owned «سدد/دفع» and answered «تحصيل من مين؟» (live R44).
+  if (/(^|\s)(سددت|سداد|دفعت|ادفع|خلصت)(\s|$)/.test(s)) {
+    const mSup = s.match(/(?:ل|لم|لمورد|لشركة|لل|عند)\s*([^\s،,؟?]+(?:\s+[^\s،,؟?]+){0,2})/)
+    const supplierName = mSup?.[1] && !/^(اللي|عليه|عليها|كام|من|في|بس|فقط|جنيه)$/.test(mSup[1].split(' ')[0]) ? mSup[1].trim() : undefined
+    const amount = extractStatedPrice(s)
+    return { intent: 'write', opType: 'payment', fields: { ...(supplierName ? { supplierName } : {}), ...(amount != null ? { amount } : {}) } }
+  }
+  if (/(دفع|سداد) للمورد/.test(s)) {
+    const mSup = s.match(/مستحقات\s+([^\s،,؟?]+(?:\s+[^\s،,؟?]+){0,2})/)
+    const amount = extractStatedPrice(s)
+    return { intent: 'write', opType: 'payment', fields: { ...(mSup?.[1] ? { supplierName: mSup[1].trim() } : {}), ...(amount != null ? { amount } : {}) } }
+  }
   if (/(اللي علينا|للمورد|الموردين|مستحق)/.test(s)) return { intent: 'read', tool: 'list_payables', fields: {} }
   // «النهارده عملت ايه؟» is the same question in a different word order — the
   // owner's first sentence of the day, and it used to fall through to chat.
@@ -611,7 +631,7 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
     return { intent: 'read', tool: 'get_profit_margin', fields: {} }
   }
   // «إيه اللي هيخلص؟ / هينقص إمتى؟ / توقّع»
-  if (/(هيخلص|هينقص|هتخلص|توقع|متوقع|نفض|معدل البيع|كم يوم باقي)/.test(s)) {
+  if (/(هيخلص|هينقص|هتخلص|توقع|متوقع|نفض|معدل البيع|كم يوم باقي|يخلص قريب|هيخلص مع|ينتهي قريب)/.test(s)) {
     return { intent: 'read', tool: 'forecast_stockout', fields: {} }
   }
   // «بيحاسب إزاي؟ / بيسدد كل قد إيه؟ / ملف العميل»
@@ -644,9 +664,12 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
     const mItem = s
       .replace(/\?|؟/g, ' ')
       .match(/(?:^|\s)(?:رصيد|مخزون)\s+([^\s،,]+(?:\s+[^\s،,]+)?)/) ??
-      s.match(/(?:^|\s)([^\s،,؟?]+(?:\s+[^\s،,؟?]+)?)\s+(?:عندي|معايا|فاضل|باقي)/)
+      s.match(/(?:^|\s)([^\s،,؟?]+(?:\s+[^\s،,؟?]+)?)\s+(?:عندي|معايا|فاضل|باقي)/) ??
+      // R44: «عندي كام كرتونة تونك؟» — the item comes AFTER the counter word.
+      s.match(/(?:كام|قد ايه|قدايه)\s+(?:كيلو|كيلوجرام|علبه|علبة|كرتونه|كرتونة|كرتون|قطعه|قطعة|شريط|جرام|كيس|اكياس|لتر|طبق|زجاجه|زجاجة|حبه|حبة|سلفه|صفيحه|صفيحة|برطمان|جركن|باكيت|مل|حبه)?\s*([^\s،,؟?]+(?:\s+[^\s،,؟?]+)?)/)
     const q = mItem?.[1]?.replace(/^(اللي|اللي\s)/, '').trim() ?? ''
-    if (q.length >= 2) return { intent: 'read', tool: 'get_item_stock', fields: { name: q.slice(0, 40) } }
+    if (q.length >= 2 && !/^(كام|قد ايه|قدايه|في|من|ل|عليه|عليها)$/.test(q.split(' ')[0]))
+      return { intent: 'read', tool: 'get_item_stock', fields: { name: q.slice(0, 40) } }
   }
   // Price query («ايه سعر عود كمبودي؟» / «بكام المسك؟») → catalog search (R0 read)
   if (/(سعر|بكام)/.test(s) && !/(بعت|بيع|بع |خرج|سلف|دفع|سجل)/.test(s)) {
@@ -678,6 +701,17 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
   // Membership STATUS question — a READ, must beat the renewal WRITE below:
   // «عضوية عمر باقي قد ايه؟» → get_member_status for عمر (name word follows
   // عضويه/اشتراك); renewal verbs (جدد/تجديد/سجل) keep the WRITE path.
+  // R44: «باقي قد إيه لعمر الشناوي؟» — the member question WITHOUT the word
+  // «عضوية» (owners skip it). Name after لـ; must sit before the item-stock
+  // «باقي» rule or the member's name becomes a product search.
+  if (isGym && /(باقي|متبقي|متبقی|فاضل|خلصت)/.test(s) && /\sل(?:ـ)?\s/.test(s) && !/(جدد|تجديد|سجل|اشتراك|اعمل)/.test(s)) {
+    const mLeft = s.match(/\sل(?:ـ)?\s*([^\s،,؟?]+(?:\s+[^\s،,؟?]+){0,2})/)
+    const cand = mLeft?.[1]?.trim() ?? ''
+    const QW = /^(مين|من|ايه|اللي|بتاع|بتاعت|دي|ده|دول|هما|كل|كام|كام|فاضل|قد|باقي|قربت|حاله|وضع|شهر|سنه|شهره)$/.test(cand)
+    if (cand.length >= 2 && !QW && cand.split(' ').length <= 3) {
+      return { intent: 'read', tool: 'get_member_status', fields: { name: cand } }
+    }
+  }
   if (isGym && !/(جدد|تجديد|سجل|اعمل)/.test(s)) {
     // «عمر الشناوي عضويته باقي قد إيه؟» — Egyptian owners put the NAME first and
     // the noun after it («عضويته»), which the old «عضوية X» pattern read as the
@@ -716,7 +750,13 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
   // The price the owner SAID is part of the intent, even when no model runs
   // (offline ladder / provider down). «بعت كيلو جبنة بـ٢٠٠» must draft ٢٠٠,
   // not silently charge the catalog's ١٤٥.
-  if (/(^| )(بعت|بيع|بع|خرج|سلفت)( |$)/.test(s)) {
+  // R44: passive «بيعت ٥ كيلو عدس» and delivery «خرجت ٢ طبق بيض» are SALES —
+  // «خرجت» used to fall into the collection rule and draft «تحصيل ٢ ج.م» (live).
+  if (/(^| )(بعت|بيع|بع|بيعت|اتبعت|خرجت|خرجلي|خرج|سلّمت|سلمت|اتسلم|سلفت)( |$)/.test(s) ||
+      // party + (up to 2 name words) + took: «كافترية النور خدت ١٠ زجاجة كوكاكولا»
+      // party + (up to 2 name words) + took: «كافترية النور خدت ١٠ زجاجة كوكاكولا».
+      // normalizeAr maps ة→ه and ى→ي, so party names need both spellings.
+      /(?:زبون|عميل|مطعم|كافتري[هة]|مق[هىي]|حاج|بنت)(?:\s+[^\s،,؟?]{1,15}){0,2}\s+(?:خد|خدت|اخدها|اخده|اخدت|ياخد)/.test(s)) {
     const amount = extractStatedPrice(s)
     return { intent: 'write', opType: 'sale', fields: amount != null ? { amount } : {} }
   }
@@ -730,14 +770,20 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
   // Collection: «تحصيل ١٠٠ من أحمد» / «حصلت ١٠٠ من أحمد» / «أحمد دفع ١٠٠»
   // NOTE: «خلص» must be word-initial — «تخلص صلاحيته» (expiry) must NEVER
   // fire a collection (caught by the expiring rule above instead).
-  if (/(تحصيل|(?:^| )خلص|سدد|دفع|حصل|قبض|استلم)/.test(s) && /(من|لـ|ل)/.test(s)) {
+  if (/(تحصيل|(?:^| )خلصت?\s+(من|ال)|حصل|قبض|استلم)/.test(s) && /(من|لـ|ل)/.test(s)) {
     return { intent: 'write', opType: 'collection', fields: {} }
   }
-  if (/^(حصلت|قبضت|استلمت|خدت)/.test(s)) return { intent: 'write', opType: 'collection', fields: {} }
+  if (/^(حصلت|قبضت|استلمت|خدت|اتلم)/.test(s)) return { intent: 'write', opType: 'collection', fields: {} }
   // R40: «أحمد دفع ١٠ بس» — the name is the first word; pass it explicitly so
   // customer resolution never depends on guessing it out of the full sentence.
-  const mPaid = s.match(/^(\S+)\s+(دفع|سدد|خلص|حصل)/)
-  if (mPaid) return { intent: 'write', opType: 'collection', fields: { customerName: mPaid[1] } }
+  // R44: up to 3 name words — «أم حسن دفع ١٠» used to capture «ام» alone.
+  const mPaid = s.match(/^(.{1,24}?)\s+(?:دفع|سدد|خلص|حصل)(?:\s|$)/)
+  if (mPaid) {
+    const name = mPaid[1].replace(/^(?:و|الي|امبارح|النهارده)\s+/, '').trim()
+    if (name.length >= 2 && !/^(من|ل|في|عليه|كام|دفع|سدد)$/.test(name)) {
+      return { intent: 'write', opType: 'collection', fields: { customerName: name.slice(0, 30) } }
+    }
+  }
   return { intent: 'chat', fields: {} }
 }
 
@@ -1409,7 +1455,25 @@ async function suggestSupplierForItem(businessId: string, itemName: string): Pro
   return null
 }
 
-async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: TurnEmit, memCtx: MemoryContext): Promise<ResolvedWrite> {
+/** Counter/measure words — never an item-name match on their own (R44). */
+const COUNTER_WORDS = new Set([
+  'حبه', 'حبة', 'قطعه', 'قطعة', 'كيس', 'اكياس', 'علبه', 'علبة', 'علب', 'شريط', 'اطباق', 'طبق',
+  'زجاجه', 'زجاجة', 'برطمان', 'باكيت', 'سلفه', 'صفيحه', 'صفيحة', 'كرتون', 'كرتونه', 'كرتونة',
+  'جركن', 'براد', 'كيسه', 'ربطه', 'ربطة', 'حبهان', 'سرفه', 'دوزه', 'جرعه', 'حبه',
+])
+/** Dialect word variants for item matching (word-level, R44): the owner's
+ *  word vs the catalog's word. First variant replaces the canonical. */
+const DIALECT_SYNONYMS: Record<string, string[]> = {
+  'ماء': ['مياه'],
+  'مياه': ['ماء'],
+  'لبن': ['حليب'],
+  'حليب': ['لبن'],
+  'جوال': ['كيس'],
+  'كيس': ['جوال'],
+}
+
+type ResolveCtx = TurnContext & { fullText?: string }
+async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: TurnEmit, memCtx: MemoryContext): Promise<ResolvedWrite> {
   const { business, user } = ctx
   const type = (intent.opType ?? 'sale') as OpType
   const f = intent.fields ?? {}
@@ -1427,6 +1491,12 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
       // Paid clauses are stripped BEFORE quantity parsing so a payment like
       // «دفع ٢٠ بس» can never be misread as the sold quantity.
       const textNoPaid = norm.replace(/(?:دفع|دفعت|خلاص|ادفع)\s*(?:الي\s*)?[٠-٩0-9][٠-٩0-9.,]*\s*(?:بس|فقط|تمام)?/g, ' ')
+      // R44: «بعت -٣ علبة تونة» — the minus used to be silently dropped and the
+      // owner got a draft of 3. A negative quantity is a mistake in the sentence,
+      // not a sale: ask, never draft.
+      if (/(^|\s)[-−]\s*[٠-٩0-9]/.test(textNoPaid) || /سالب\s*[٠-٩0-9]/.test(textNoPaid)) {
+        return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'الكمية', failMessage: 'في رقم سالب في الجملة — قولي الكمية صح وأنا أجهز المسودة فورًا.' }
+      }
       // ---- عطارة reverse-selling («بعت بـ20 جنيه فلفل») ----
       // The money clause MUST be detected and stripped BEFORE any quantity
       // parsing: a bare «20» in «بـ20 جنيه» is the AMOUNT, not a weight. The
@@ -1458,6 +1528,31 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
               const at = wordBoundedAt(segNorm, nn)
               if (at >= 0 && (!best || nn.length > best.token.length)) best = { token: nn, at }
             }
+            // R44 dialect synonyms: the owner says «مياه» while the catalog
+            // says «ماء 600 مل». Word-level expansion, still word-bounded.
+            for (const [canonical, variants] of Object.entries(DIALECT_SYNONYMS)) {
+              const nnv = nn.split(/\s+/).map((w) => (w === normalizeAr(canonical) ? variants[0] : w)).join(' ')
+              if (nnv !== nn && nnv.length >= 3) {
+                const at = wordBoundedAt(segNorm, nnv)
+                if (at >= 0 && (!best || nnv.length > best.token.length)) best = { token: nnv, at }
+              }
+            }
+            // R44 distinctive-head match: «تونة» resolves «تونة قطع 140 جرام» —
+            // the FIRST non-digit, non-counter word of the name, length >= 3.
+            const head = nn.split(/\s+/).find((w) => w.length >= 3 && !/^\d+$/.test(w) && !COUNTER_WORDS.has(w))
+            if (head && head !== nn) {
+              for (const variant of [head, ...DIALECT_SYNONYMS[head] ?? []]) {
+                const at = wordBoundedAt(segNorm, variant)
+                if (at >= 0 && (!best || variant.length > best.token.length)) best = { token: variant, at }
+              }
+            }
+          }
+          // R44 counter-word guard: a match on a bare counter word («حبة» in
+          // «بعت ١٠ حبة بن محوج مخصوص») is NOT evidence of the item — it used
+          // to draft «زيت حبة البركة» for a coffee sentence (live R44).
+          const bestToken = best?.token
+          if (bestToken && COUNTER_WORDS.has(bestToken) && !names.some((n) => normalizeAr(n) === bestToken)) {
+            best = null
           }
           if (best) hits.push({ item: it, ...best })
         }
@@ -1468,7 +1563,16 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
           taken.push([h.at, h.at + h.token.length])
           // the matched name is stripped first: «٢ لبن كرتونة جهينة ١ لتر» must
           // not read the «١ لتر» package size as the requested unit/qty
-          const q = parseQuantity(stripItemName(seg, h.item), null)
+          // R44: when the match was a HEAD word («مياه» for «ماء 600 مل»), the
+          // package spec glued behind it («60 مل») is part of the NAME, not a
+          // requested unit — strip it before quantity parsing, or «5 زجاجة
+          // مياه 600 مل» reads the 60ml as a milli-unit and asks for a re-count.
+          let segForQty = stripItemName(seg, h.item)
+          if (h.token.length >= 2) {
+            const esc = h.token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+            segForQty = segForQty.replace(new RegExp(`${esc}\\s*\\d+\\s*(?:مل|مللي|جم|جرام|كج|لتر)?`, 'g'), ' ')
+          }
+          const q = parseQuantity(segForQty, null)
           const prev = byItem.get(h.item.id)
           byItem.set(h.item.id, {
             item: h.item,
@@ -1962,7 +2066,14 @@ async function resolveWrite(ctx: TurnContext, intent: ExtractedIntent, emit: Tur
 
     case 'payment': {
       const supplierName = String(f.supplierName ?? '')
-      const supplier = matchEntity(supplierName || text, suppliers)?.entity ?? null
+      // R44: the sub-intent fragment may have lost the supplier's name (it sits
+      // in another segment of the same sentence) — the full sentence is the
+      // fallback evidence, never a guess.
+      const supplier =
+        matchEntity(supplierName, suppliers)?.entity ??
+        matchEntity(text, suppliers)?.entity ??
+        (ctx.fullText ? matchEntity(ctx.fullText, suppliers)?.entity : null) ??
+        null
       if (!supplier) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'المورد', failMessage: 'هسدد لمين؟' }
       let amount = (f.amount as number | undefined) && (f.amount as number) > 0 ? Math.round((f.amount as number) * 100) : null
       if (amount == null) {
@@ -2543,6 +2654,39 @@ function safeCalculate(rawExpr: string): { ok: true; value: number } | { ok: fal
   }
 }
 
+/** R44 — desk calculator, zero LLM: «حسبلي ٢٠٠ ضرب ١٥» / «١٥٪ من ٥٠ كام؟».
+ * A real employee does this in his head; offline used to return a network
+ * apology for the most trivial ask in the shop. Returns null when the text
+ * is not a clean two-number calculation (never guesses). */
+function deterministicCalc(text: string): { expr: string; value: number } | null {
+  // digits first: normalizeAr keeps ٠-٩, safeCalculate would see them, but the
+  // number scan below needs western digits to even COUNT them
+  const s = toWesternDigits(normalizeAr(text))
+  const nums = (s.match(/\d+(?:\.\d+)?/g) ?? []).map(Number).filter((n) => Number.isFinite(n))
+  if (nums.length < 2) return null
+  if (!/(حاسب|حسب|احسب|كم يساوي|يساوي|ضرب|اضرب|ضربه|قسمة|قسمه|تقسيم|اقسم|جمع|مجموع|زود|اضيف|اطرح|طرح|ناقص|٪|%)/.test(s)) return null
+  // percent-of first: «١٥٪ من ٥٠٠» = (15/100)*500
+  const mPct = s.match(/(\d+(?:\.\d+)?)\s*٪?\s*(?:من|في|ع|على)\s*(\d+(?:\.\d+)?)/)
+  if (mPct && /٪|%/.test(s)) {
+    const expr = `(${mPct[1]}/100)*${mPct[2]}`
+    const r = safeCalculate(expr)
+    if (r.ok) return { expr: `${mPct[1]}% × ${mPct[2]}`, value: r.value }
+    return null
+  }
+  let op: string | null = null
+  if (/(ضرب|اضرب|ضربه|ضربه في|x|×)/.test(s)) op = '*'
+  else if (/(قسمة|قسمه|تقسيم|اقسم|÷|\/)/.test(s)) op = '/'
+  else if (/(جمع|مجموع|زود|اضيف|اضيف|\+)/.test(s)) op = '+'
+  else if (/(طرح|اطرح|ناقص|اقل|-)/.test(s)) op = '-'
+  if (!op) return null
+  const [a, b] = nums
+  const expr = `${a}${op}${b}`
+  const r = safeCalculate(expr)
+  if (!r.ok) return null
+  const sym = op === '*' ? '×' : op === '/' ? '÷' : op
+  return { expr: `${a} ${sym} ${b}`, value: r.value }
+}
+
 /** «بكره» / «يوم الجمعة» / «بعد بكره» / «الاسبوع الجاي» … → a concrete Date
  *  (Cairo-local morning 10:00 — reminders land at a humane hour). */
 function resolveArabicWhen(whenLabel: string): Date | null {
@@ -2913,6 +3057,19 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   pushThinking()
 
   const norm = normalizeAr(text)
+
+  // ---- PASS 0y: Desk calculation → instant, deterministic, zero LLM (R44) ----
+  // «حسبلي ٢٠ ضرب ١٥» must NEVER ride the model (offline it died as a
+  // network apology; live it wasted a completion on arithmetic).
+  const calc = deterministicCalc(text)
+  if (calc) {
+    const pretty = toArabicNum(calc.value)
+    const replyText = `حسبتها لك: ${calc.expr} = **${pretty}** (${fmtCalcNumber(calc.value)}) — وأبقي معك لأي حاجة تانية من الشغل.`
+    done(IDX.understand, 'حساب فوري من الحاسبة — من غير موديل')
+    done(IDX.reply)
+    await streamDeterministic(replyText, emit, 400)
+    return { replyText, card: null, cards: null, thinking: steps, modelLabel, actions: [] }
+  }
 
   // ---- PASS 0z: Greeting → instant, deterministic, zero LLM (R40) ----
   // «السلام عليكم» used to fall through to the model (free chat) — with no
@@ -3843,12 +4000,23 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         middlewareRuntimeTail: middlewareOut?.dynamicRuntimeTail ?? undefined,
       })
       const brainSystem = notesSection ? `${baseBrain}\n\n${evidenceBlock('conversation-notes', notesSection, 4_000)}` : baseBrain
+      // DeepSeek-Harness: the whole capability surface is ONE typed registry;
+      // the model gets the real schemas and picks the tool itself.
+      const brainTools = brainToolSchemas()
+      const historyMsgs = recentDialogue(ctx.history)
       const convo: LLMMessage[] = [
         { role: 'system', content: brainSystem },
-        ...recentDialogue(ctx.history),
+        ...historyMsgs,
         { role: 'user', content: text },
       ]
-      let raw = await completeChat(model, convo)
+      // PROMPT-ARRIVAL AUDIT: exactly what the model receives, every turn.
+      // systemChars is the FULL stable prompt (never truncated); userChars is
+      // the owner's current message verbatim.
+      const historyChars = historyMsgs.reduce((n, m) => n + m.content.length, 0)
+      console.log(
+        `[brain-audit] model=${model.key} systemChars=${brainSystem.length} historyMsgs=${historyMsgs.length} historyChars=${historyChars} userChars=${text.length} tools=${brainTools.length}`,
+      )
+      let raw = await completeChat(model, convo, { tools: brainTools })
       let calls = parseBrainReply(raw)
       let totalCalls = 0
       while (calls && totalCalls < 6) {
@@ -3893,7 +4061,10 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
               : 'قرر بنفسك: لو محتاج أدوات تانية رد بـ JSON بنفس الشكل، ولو خلصت اكتب ردك النهائي كنص عادي.'
           }`,
         })
-        raw = await completeChat(model, convo)
+        console.log(
+          `[brain-audit] model=${model.key} round=${rounds + 1} convoMsgs=${convo.length + 1} tools=${brainTools.length}`,
+        )
+        raw = await completeChat(model, convo, { tools: brainTools })
         calls = parseBrainReply(raw)
       }
       finalText = calls ? '' : raw.trim() // cap reached with pending calls → compose deterministic
@@ -4267,7 +4438,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           replyParts.push(`عملية ${TYPE_AR[opType] ?? opType} محتاجة صلاحية أعلى (المالك أو المشرف) — مش من اختصاصك.`)
           continue
         }
-        const resolved = await resolveWrite({ ...ctx, text: sub.sourceText }, { intent: 'write', opType, fields: sub.fields ?? {}, replyHint: sub.replyHint }, emit, memCtx)
+        const resolved = await resolveWrite({ ...ctx, text: sub.sourceText, fullText: ctx.text }, { intent: 'write', opType, fields: sub.fields ?? {}, replyHint: sub.replyHint }, emit, memCtx)
         if (!resolved.ok) {
           steps[1 + memStep.length + i].state = 'done'
           pushThinking()
@@ -4637,9 +4808,14 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     } catch (err) {
       console.error('[harness] reply stream failed:', err)
       noteProviderDown()
-      if (replyText.trim()) throw new Error('الرد اتقطع قبل ما يكتمل — النتيجة النهائية مش مؤكدة')
+      // R44 (full-suite load flake, 33 cases): a cut-off stream must never
+      // surface as a turn error. The fallback chain below renders from
+      // VERIFIED state (situation / cards / permission) — no number is
+      // invented, and money stays safe: draft turns never stream here (their
+      // reply is the deterministic contract branch above).
       meta.fallback = true
-      if (!replyText) {
+      replyText = ''
+      if (!replyText.trim()) {
         const fallback = advisoryMode
           ? advisoryFallback(v)
           : card

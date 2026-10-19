@@ -480,7 +480,7 @@ function buildReply(model: string, messages: Msg[]): { reasoning: string[]; cont
 }
 
 async function chat(req: Request) {
-  let body: { model?: string; messages?: Msg[]; stream?: boolean };
+  let body: { model?: string; messages?: Msg[]; stream?: boolean; tools?: unknown[] };
   try {
     body = await req.json();
   } catch {
@@ -492,12 +492,39 @@ async function chat(req: Request) {
   // Audit trail: one line per request so «is my prompt reaching the provider?»
   // is answerable from the process log, not guessed.
   const lastUser = [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
-  console.log(`[mock] model=${model} msgs=${messages.length} user="${String(lastUser).slice(0, 90).replace(/\n/g, " ")}"`);
+  const sysChars = messages.filter((m) => m.role === "system").reduce((n, m) => n + String(m.content ?? "").length, 0);
+  const toolsN = Array.isArray(body.tools) ? body.tools.length : 0;
+  console.log(`[mock] model=${model} msgs=${messages.length} sysChars=${sysChars} tools=${toolsN} user="${String(lastUser).slice(0, 90).replace(/\n/g, " ")}"`);
   const { reasoning, content } = buildReply(model, messages);
   const id = uid();
   const created = Math.floor(Date.now() / 1000);
 
   if (!body.stream) {
+    // Native tool calling: when the harness sent a `tools` schema array and
+    // this is a tool-call answer, return REAL OpenAI tool_calls (not JSON in
+    // text) — exactly what DeepSeek/OpenAI/OpenRouter do on the wire.
+    if (toolsN > 0 && typeof content === "string" && content.trim().startsWith("{") && content.includes('"tool_calls"')) {
+      try {
+        const parsed = JSON.parse(content) as { tool_calls?: { tool?: string; args?: Record<string, unknown> }[] };
+        const native = (parsed.tool_calls ?? []).filter((c) => typeof c?.tool === "string").map((c, i) => ({
+          id: `call_${i + 1}`,
+          type: "function",
+          function: { name: c.tool, arguments: JSON.stringify(c.args ?? {}) },
+        }));
+        if (native.length > 0) {
+          return json({
+            id,
+            object: "chat.completion",
+            created,
+            model,
+            choices: [{ index: 0, message: { role: "assistant", content: null, tool_calls: native }, finish_reason: "tool_calls" }],
+            usage: { prompt_tokens: 96, completion_tokens: 48, total_tokens: 144 },
+          });
+        }
+      } catch {
+        /* not tool JSON after all — fall through to text */
+      }
+    }
     return json({
       id,
       object: "chat.completion",
