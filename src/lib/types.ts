@@ -509,6 +509,10 @@ export interface AgentPluginDTO {
   pipeline: PluginStepSpec[]
   proactiveRules: PluginProactiveRule[]
   quickPrompt: string
+  /** R78 / PR-009: the SERVER-COMPUTED permission grant (from the pipeline
+   *  modules). Never taken from a plugin's own declaration; execution
+   *  re-checks the pipeline against it. Absent only on un-fetched rows. */
+  permissions?: string[]
 }
 
 export interface ProactiveAlertDTO {

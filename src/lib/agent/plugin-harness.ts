@@ -38,6 +38,31 @@ import { getGeminiClient } from './llm'
 
 
 const SUPPORTED_PLUGIN_MODULES = new Set(['inventory_audit', 'sales_analytics', 'margin_audit', 'receivables_aging', 'supplier_payables', 'expiry_shield'])
+
+// R78 / PR-009 (final plan v2 §8.3): the plugin MANIFEST permission model.
+// Permissions are NEVER read from a plugin spec — they are COMPUTED by the
+// server from the pipeline modules (the only code plugins may reference).
+// A spec that declares extra permissions is lying; the grant is the
+// server-computed set, locked at install time and re-checked at execution.
+export const MODULE_PERMISSIONS: Record<string, string> = {
+  inventory_audit: 'read:inventory',
+  expiry_shield: 'read:inventory',
+  sales_analytics: 'read:sales',
+  margin_audit: 'read:financial',
+  receivables_aging: 'read:financial',
+  supplier_payables: 'read:financial',
+}
+
+/** The effective permission grant of a pipeline — server-computed, sorted. */
+export function effectivePluginPermissions(pipeline: PluginStepSpec[]): string[] {
+  return [...new Set(pipeline.map((s) => MODULE_PERMISSIONS[s.module]).filter(Boolean))].sort()
+}
+
+/** True iff every supported module is read-only (the plugin boundary). */
+export function allPluginModulesReadOnly(): boolean {
+  return [...SUPPORTED_PLUGIN_MODULES].every((m) => (MODULE_PERMISSIONS[m] ?? '').startsWith('read:'))
+}
+
 function validatePluginPipeline(pipeline: PluginStepSpec[]): void {
   if (!Array.isArray(pipeline) || !pipeline.length || pipeline.length > 6 || pipeline.some((step) => !SUPPORTED_PLUGIN_MODULES.has(step.module))) throw new Error('unsupported_capability: الإضافة لازم تكون من وحدات التحليل المتاحة؛ مفيش كود حر أو استعلام وهمي')
   for (const step of pipeline) {
@@ -215,6 +240,11 @@ interface StoredPluginConfig {
   pipeline?: PluginStepSpec[]
   proactiveRules?: PluginProactiveRule[]
   quickPrompt?: string
+  /** R78 / PR-009: the SERVER-COMPUTED grant, locked at install time.
+   *  Execution refuses a pipeline that needs anything beyond this set. */
+  grantedPermissions?: string[]
+  /** R78 / PR-009: upgrade history (max 3) for one-step rollback. */
+  previousVersions?: { version: string; config: string; at: string }[]
 }
 
 function parsePluginConfig(raw: string, fallbackName: string): StoredPluginConfig {
@@ -272,6 +302,9 @@ export async function getBusinessPlugins(businessId: string): Promise<AgentPlugi
       proactiveRules: Array.isArray(cfg.proactiveRules) ? cfg.proactiveRules : [],
       quickPrompt: cfg.quickPrompt || `شغّل بلاجن ${row.name}`,
     }
+    // R78 / PR-009: the grant is always recomputed server-side from the
+    // stored pipeline — a tampered/lying `grantedPermissions` field is noise.
+    dto.permissions = effectivePluginPermissions(dto.pipeline)
     installedBySlug.set(slug, dto)
     if (!STARTER_PLUGIN_CATALOG.some((s) => s.slug === slug)) {
       customInstalled.push(dto)
@@ -514,6 +547,12 @@ export class PluginRegistry {
     }
     throw new Error('الأداة المطلوبة غير موجودة')
   }
+}
+
+// R78 / PR-009: every starter's grant is COMPUTED from its pipeline, never
+// hand-declared — one source of truth for the whole catalog.
+for (const s of STARTER_PLUGIN_CATALOG) {
+  s.permissions = effectivePluginPermissions(s.pipeline)
 }
 
 export const pluginRegistry = new PluginRegistry(STARTER_PLUGIN_CATALOG)
@@ -851,6 +890,21 @@ export async function installOrUpdatePlugin(params: {
       return cfg.slug === spec.slug || normalizeAr(r.name) === normalizeAr(spec.name)
     })
 
+    // R78 / PR-009: the grant is SERVER-COMPUTED from the pipeline. Any
+    // `permissions` array the spec carries is ignored on purpose — a plugin
+    // can never grant itself permissions.
+    const granted = effectivePluginPermissions(spec.pipeline)
+
+    // R78 / PR-009: one-step rollback — an upgrade archives the previous
+    // config (max 3 generations), so the owner can step back after a bad
+    // version instead of rebuilding from nothing.
+    const previousVersions = existing
+      ? [
+          ...(parsePluginConfig(existing.config, existing.name).previousVersions ?? []),
+          { version: parsePluginConfig(existing.config, existing.name).version ?? '0.0.0', config: existing.config, at: new Date().toISOString() },
+        ].slice(-3)
+      : []
+
     const configJson = JSON.stringify({
       slug: spec.slug,
       description: spec.description,
@@ -863,6 +917,8 @@ export async function installOrUpdatePlugin(params: {
       pipeline: spec.pipeline,
       proactiveRules: spec.proactiveRules,
       quickPrompt: spec.quickPrompt,
+      grantedPermissions: granted,
+      previousVersions,
     } satisfies StoredPluginConfig)
 
     const row = existing
@@ -903,7 +959,9 @@ export async function installOrUpdatePlugin(params: {
         })
     }
 
-    await tx.auditEvent.create({ data: { businessId, actor: userId, action: 'plugin.installed', detail: JSON.stringify({ slug: spec.slug, modules: spec.pipeline.map((p) => p.module) }) } })
+    const priorVersion = existing ? parsePluginConfig(existing.config, existing.name).version : null
+    const action = priorVersion && priorVersion !== spec.version ? 'plugin.upgraded' : 'plugin.installed'
+    await tx.auditEvent.create({ data: { businessId, actor: userId, action, detail: JSON.stringify({ slug: spec.slug, modules: spec.pipeline.map((p) => p.module), from: priorVersion ?? undefined, to: spec.version, granted }) } })
     return {
       ...spec,
       id: row.id,
@@ -911,6 +969,7 @@ export async function installOrUpdatePlugin(params: {
       installed: true,
       usageCount: row.usageCount,
       lastUsedAt: row.lastUsedAt ? row.lastUsedAt.toISOString() : null,
+      permissions: granted,
     }
   })
   pluginRegistry.register(businessId, new BasePlugin(spec))
@@ -938,6 +997,31 @@ export async function deletePlugin(pluginId: string, businessId: string, userId:
   await db.customTool.delete({ where: { id: pluginId, businessId } })
   await db.quickCommand.deleteMany({ where: { businessId: row.businessId, label: row.name } }).catch(() => {})
   return true
+}
+
+/** R78 / PR-009: step back to the previous installed version (max 3 deep).
+ *  Restores the previous pipeline AND re-locks the grant for it. */
+export async function rollbackPlugin(pluginId: string, businessId: string, userId: string): Promise<AgentPluginDTO | null> {
+  await requirePermission(businessId, userId, 'tools.manage')
+  const row = await db.customTool.findFirst({ where: { id: pluginId, businessId } })
+  if (!row || row.kind !== 'plugin') return null
+  const cfg = parsePluginConfig(row.config, row.name)
+  const history = cfg.previousVersions ?? []
+  const prev = history[history.length - 1]
+  if (!prev) return null
+  const prevCfg = parsePluginConfig(prev.config, row.name)
+  if (!Array.isArray(prevCfg.pipeline) || prevCfg.pipeline.length === 0) return null
+  validatePluginPipeline(prevCfg.pipeline)
+  const restored: StoredPluginConfig = {
+    ...prevCfg,
+    grantedPermissions: effectivePluginPermissions(prevCfg.pipeline),
+    previousVersions: history.slice(0, -1),
+  }
+  await db.customTool.update({ where: { id: row.id, businessId }, data: { config: JSON.stringify(restored) } })
+  await db.auditEvent.create({ data: { businessId, actor: userId, action: 'plugin.rolled_back', detail: JSON.stringify({ slug: cfg.slug, from: cfg.version, to: prevCfg.version }) } })
+  if (cfg.slug) pluginRegistry.unregister(businessId, cfg.slug)
+  const all = await getBusinessPlugins(row.businessId)
+  return all.find((p) => p.id === pluginId) ?? null
 }
 
 // ---------------------------------------------------------------------------
@@ -997,6 +1081,23 @@ export async function executePlugin(params: {
     throw new Error('not_connected: لا يوجد موصل خارجي موثّق؛ لم تتم مزامنة بيانات')
   }
   validatePluginPipeline(plugin.pipeline)
+
+  // R78 / PR-009: the grant was LOCKED at install time. If the stored
+  // pipeline now needs permissions beyond that grant, the config was
+  // out-of-band modified — refuse (a plugin never grants itself at runtime).
+  if (plugin.installed && !plugin.id.startsWith('catalog:')) {
+    const row = await db.customTool.findFirst({ where: { id: plugin.id, businessId }, select: { config: true } })
+    if (row) {
+      const storedCfg = parsePluginConfig(row.config, '')
+      const storedGrant = Array.isArray(storedCfg.grantedPermissions) && storedCfg.grantedPermissions.length > 0
+        ? storedCfg.grantedPermissions
+        : effectivePluginPermissions(storedCfg.pipeline ?? plugin.pipeline) // legacy rows: first check self-locks
+      const needed = effectivePluginPermissions(plugin.pipeline)
+      if (!needed.every((p) => storedGrant.includes(p))) {
+        throw new Error('plugin_scope_violation: صلاحيات الإضافة تغيّرت عن الإذن المثبّت — ثبّتها تاني من الإعدادات')
+      }
+    }
+  }
 
   // Increment usage count if persisted in CustomTool
   if (plugin.installed && !plugin.id.startsWith('catalog:')) {
