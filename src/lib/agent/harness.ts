@@ -93,6 +93,7 @@ import { buildAdvisoryPrompt, buildAgentSystemPrompt, buildReplyPrompt, buildSys
 import { harnessesPromptBlock } from './cli-anything/harness-installer'
 import { brainToolSchemas } from './tool-schemas'
 import { verifyToolContract } from './tool-contract'
+import { localVectorDB } from './vector-memory'
 import { READ_TOOLS, runReadTool, TYPE_AR, isQuestionWord, opMoney, type ReadTool } from './tools'
 import { startOfCairoDay } from '@/app/api/_lib/dates'
 import {
@@ -3881,6 +3882,9 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     let replyText: string
     if (target) {
       await db.agentMemory.update({ where: { id: target.id }, data: { active: false, updatedAt: new Date() } })
+      // PR-008: forget removes the memory AND its index — a soft-deleted row
+      // must stop being retrieved on the very next turn, not after a rebuild.
+      localVectorDB.removeDocument(business.id, target.id)
       done(IDX.verify, 'اتمسحت فعليًا (متفعّلة لأ)')
       emit({ event: 'step', label: 'بامسح من ذاكرتي', state: 'done' })
       replyText = `اتمسحت من ذاكرة وكيل ✅ — الكلام ده: «${target.text.slice(0, 100)}».\nلو احتجته تاني في يوم من الأيام قولي «احفظ» وأرجعه لك.`
@@ -4638,6 +4642,9 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           const target = findMemoryByReference(q, memories)
           if (target) {
             await db.agentMemory.update({ where: { id: target.id }, data: { active: false, updatedAt: new Date() } })
+            // PR-008: forget removes the memory AND its index (same contract
+            // as the deterministic path) — no retrieval of a forgotten row.
+            localVectorDB.removeDocument(business.id, target.id)
             step.detail = target.text.slice(0, 60)
             report({ tool: 'memory_forget', ok: true, forgotten: target.text.slice(0, 80) })
             replyParts.push(`اتمسحت من ذاكرتي ✅ — «${target.text.slice(0, 100)}»`)
