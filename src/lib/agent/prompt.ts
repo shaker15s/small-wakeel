@@ -17,6 +17,7 @@ import type { Item, Customer, Supplier, Business, User } from '@prisma/client'
 import { egp } from '@/lib/format'
 import { getVertical } from '@/lib/verticals'
 import { brainToolDescriptions, brainToolSections } from './tool-schemas'
+import { SYSTEMS } from './system-contracts'
 import { appSkillsPromptBlock } from '@/lib/agent/cli-anything/app-skills'
 import type { BusinessSnapshot } from './memory'
 import { memoryQuotesForAdvisory } from './memory'
@@ -72,9 +73,14 @@ const CATALOG_SECTION_TITLES: Record<string, string> = {
 function buildCatalogAppendix(): string {
   const sections = brainToolSections()
   const descs = brainToolDescriptions()
-  return (['read', 'write', 'mind', 'system'] as const)
+  const cats = (['read', 'write', 'mind', 'system'] as const)
     .map((sec) => `**${CATALOG_SECTION_TITLES[sec]}:**\n` + sections[sec].map((n) => `   - \`${n}()\` → ${descs[n] ?? ''}`).join('\n'))
     .join('\n\n')
+  // R69: the system map — every tool has exactly one responsible system with a
+  // risk ceiling; the model must not treat an R3 system's tools as routine.
+  const systemsLine = SYSTEMS.map((s) => `${s.labelAr} [${s.risk}]`).join(' · ')
+  return cats +
+    `\n\n**النظم اللي الأدوات ديه بتعمرها (كل أداة لها نظام مسؤول واحد و سقف مخاطرة):**\n   ${systemsLine}\n   نظام حساس [R3] معناه: سبب إلزامي + اعتماد من صاحبه — متعاملوش كأنه حركة عادية.`
 }
 const catalogAppendix = buildCatalogAppendix()
 
