@@ -28,9 +28,15 @@ export interface NewItemSlots {
   total: number | null // EGP — may stay null for a known item (catalog price applies)
   unitPrice: number | null // EGP
   note?: string
+  /** R48 credit_new_customer: the unregistered customer the credit sale heads to. */
+  customerName?: string | null
+  /** R48 credit_new_customer: pre-existing debt the owner stated («عليه ٢٠» / «جديد»→0). */
+  openingBalance?: number | null
+  /** R48 credit_new_customer: the ORIGINAL sale sentence — the draft is built from it. */
+  sourceText?: string
 }
 
-export type PendingKind = 'purchase_new_item' | 'purchase_known_item'
+export type PendingKind = 'purchase_new_item' | 'purchase_known_item' | 'credit_new_customer' | 'cash_new_customer'
 
 const PENDING_TTL_MS = 20 * 60 * 1000 // same grace as CashbookDialogue
 
@@ -66,6 +72,9 @@ export function parseSlots(raw: string): NewItemSlots {
       total: typeof o.total === 'number' ? o.total : null,
       unitPrice: typeof o.unitPrice === 'number' ? o.unitPrice : null,
       note: typeof o.note === 'string' ? o.note : undefined,
+      customerName: typeof o.customerName === 'string' ? o.customerName : null,
+      openingBalance: typeof o.openingBalance === 'number' ? o.openingBalance : null,
+      sourceText: typeof o.sourceText === 'string' ? o.sourceText : '',
     }
   } catch {
     return {
@@ -79,6 +88,9 @@ export function parseSlots(raw: string): NewItemSlots {
       suggestedSupplier: null,
       total: null,
       unitPrice: null,
+      customerName: null,
+      openingBalance: null,
+      sourceText: '',
     }
   }
 }
@@ -309,6 +321,42 @@ export function looksLikeNewTopic(norm: string): boolean {
   return false
 }
 
+/**
+ * R48 — parse the owner's answer to «عليه كام من قبل؟».
+ *  • an explicit zero-word («جديد / مش عليه / من عندنا / صفر») → 0
+ *  • the first number in the sentence → the opening balance (EGP)
+ *  • anything else (a new command / no number) → null (still open)
+ * A work-verb in the sentence means the owner moved on — that is a NEW topic,
+ * not a balance, so it resolves to null and the caller checks looksLikeNewTopic.
+ */
+const CREDIT_ZERO_RE =
+  /^(?:جديد|جديدك|مش عليه|مش عليه حاجه|مش عليه حاجة|من عندنا|مفيش|مفيش عليه|صفر|ولا جنيه|ولا حاجه|ولا حاجة|ولا حاجة عليه|نظيف|0|٠)[\s؟?!.،,]*(?:يا\s+\S+)?[\s؟?!.،,]*$/
+const CREDIT_CMD_RE =
+  /(?:^| )(?:بعت|بيعت|بيع|جبت|جيب|اشتريت|شرا|شراء|مصروف|صرفت|تحصيل|حصلت|دفع|دفعت|سدد|سددت|سجل|سجلت|ضيف|ضيفت|اعكس|ملش|الغيت|الغي|يلغي|امسح|جرد)(?: |$)/
+export function parseCreditBalance(norm: string): number | null {
+  const t = norm.trim()
+  if (CREDIT_ZERO_RE.test(t)) return 0
+  // A fresh work command is not a balance — the owner moved on.
+  if (CREDIT_CMD_RE.test(t)) return null
+  const nums = numsIn(norm)
+  return nums.length > 0 ? nums[0] : null
+}
+
+/** R48 — is the message a fresh WORK command (so the credit request releases)? */
+export function isCreditCommand(norm: string): boolean {
+  return CREDIT_CMD_RE.test(norm.trim())
+}
+
+/**
+ * R49 — the owner answered the cash-sale hint («لو عايزه مسجل قولي»):
+ * «سجله / زوده / ضيفه» — register the typed name as a customer.
+ */
+const REGISTER_CMD_RE =
+  /(?:^| )(?:سجل|سجله|سجلها|سجلته|سجلتها|سجللي|سجل لي|زود|زوده|زودته|زودتها|ضيف|ضفه|ضيفه|ضيفته)(?: |$)/
+export function isRegisterCommand(norm: string): boolean {
+  return REGISTER_CMD_RE.test(norm.trim())
+}
+
 /** The outstanding question, in the employee's voice (Egyptian, warm, precise). */
 export function pendingQuestionText(slots: NewItemSlots, kind: PendingKind): string {
   const { itemName, qty, unitLabel, paid, suggestedSupplier } = slots
@@ -316,6 +364,13 @@ export function pendingQuestionText(slots: NewItemSlots, kind: PendingKind): str
   const qtyTxt = qty != null ? `${numAr(qty)} ${unitTxt}`.trim() : null
   const paidTxt = paid != null ? `ودفعت ${numAr(paid)}` : null
   const known = [qtyTxt, paidTxt].filter(Boolean).join('، ')
+
+  // R48 credit_new_customer: the ONLY missing slot is the opening balance.
+  if (kind === 'credit_new_customer') {
+    const name = slots.customerName ?? ''
+    const q = qtyTxt ? ` — ${qtyTxt} ${itemName}` : ''
+    return `«${name}» مش مسجل في حسابات العملاء${q}. عليه كام من قبل؟ قولي رقمه وأنا أسجله وأنزل عليه البيعة، أو قولي «جديد» لو من عندنا.`
+  }
 
   // KNOWN-catalog item: the only missing slot is the supplier — ONE question.
   if (kind === 'purchase_known_item') {
@@ -339,6 +394,9 @@ export function pendingQuestionText(slots: NewItemSlots, kind: PendingKind): str
 
 /** Follow-up question when part of the slots is still missing. */
 export function pendingFollowUpText(slots: NewItemSlots, kind: PendingKind): string {
+  if (kind === 'credit_new_customer') {
+    return `«${slots.customerName ?? ''}» عليه كام من قبل؟ قولي رقمه وأنا أسجله — أو «جديد» لو من عندنا.`
+  }
   const parts: string[] = []
   if (!slots.supplierName && !slots.suggestedSupplier) parts.push(`مين بتاع ${slots.itemName}؟`)
   // A known item prices itself from the catalog — never ask its total.

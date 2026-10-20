@@ -19,6 +19,11 @@ import { completeChat, normalizeNativeToolCalls } from '@/lib/agent/llm'
 import { brainToolSchemas, brainToolCount } from '@/lib/agent/tool-schemas'
 import { encryptProviderKey } from '@/lib/security/provider-secrets'
 
+// Save-and-restore: bun runs every test file in ONE process, so a leaked
+// env flag rewrites the security defaults of files running concurrently
+// (speech.test.ts expects 'Non-public' and got a masked 502 — live flake).
+const hadAllowLocal = 'WAKIL_ALLOW_LOCAL_PROVIDERS' in process.env
+const prevAllowLocal = process.env.WAKIL_ALLOW_LOCAL_PROVIDERS
 process.env.WAKIL_ALLOW_LOCAL_PROVIDERS = '1'
 const hadOffline = 'WAKIL_OFFLINE' in process.env
 const prevOffline = process.env.WAKIL_OFFLINE
@@ -125,6 +130,8 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
+  if (hadAllowLocal) process.env.WAKIL_ALLOW_LOCAL_PROVIDERS = prevAllowLocal
+  else delete process.env.WAKIL_ALLOW_LOCAL_PROVIDERS
   if (hadOffline) process.env.WAKIL_OFFLINE = prevOffline
   else delete process.env.WAKIL_OFFLINE
   server?.close()

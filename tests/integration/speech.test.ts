@@ -9,7 +9,8 @@ const db = await testDb()
 let businessId: string, userId: string, providerId: string, original: SpeechSettings | null
 const headers = () => ({ 'x-wakil-business': businessId, 'x-wakil-user': userId, 'x-wakil-audio-consent': 'review-only', 'content-type': 'audio/wav' })
 function wave() { const b = Buffer.alloc(100); b.write('RIFF'); b.write('WAVE', 8); return b }
-const request = (body: BodyInit, extra: Record<string, string> = {}) => new Request('http://localhost/api/speech', { method: 'POST', headers: { ...headers(), ...extra }, body })
+// duplex: 'half' is required by node's undici for streaming bodies; bun accepts the same option.
+const request = (body: BodyInit, extra: Record<string, string> = {}) => new Request('http://localhost/api/speech', { method: 'POST', headers: { ...headers(), ...extra }, body, duplex: 'half' } as RequestInit)
 beforeAll(async () => {
   businessId = (await db.business.create({ data: { name: randomUUID(), type: 'attar' } })).id
   userId = (await db.user.create({ data: { businessId, name: 'اختبار الصوت', role: 'owner' } })).id
@@ -45,9 +46,21 @@ test('explicit provider selection revalidates enabled model, protects stored uns
   expect((await configure(config({ providerId, remoteId: 'does-not-exist' }))).status).toBe(422)
   expect((await configure(config({ providerId, remoteId: 'speech-test' }))).status).toBe(200)
   const selected = await speechSelection(); expect(selected?.remoteId).toBe('speech-test')
-  await expect(transcribeAudio(await readAudio(request(wave())), selected!)).rejects.toThrow('Non-public')
-  const res = await POST(request(wave())); expect(res.status).toBe(500)
-  expect(JSON.stringify(await res.json())).not.toContain('never-output-this-secret')
+  // HERMETIC: stored-URL protection is the PRODUCTION contract. A parallel
+  // test file may hold the dev flag WAKIL_ALLOW_LOCAL_PROVIDERS=1 (bun runs
+  // every file in one process) — pin the strict semantics for every
+  // flag-sensitive assertion (the 'Non-public' throw AND the 500 mapping) so
+  // the suite is green under any scheduling.
+  const hadAllowLocal = 'WAKIL_ALLOW_LOCAL_PROVIDERS' in process.env
+  const prevAllowLocal = process.env.WAKIL_ALLOW_LOCAL_PROVIDERS
+  delete process.env.WAKIL_ALLOW_LOCAL_PROVIDERS
+  try {
+    await expect(transcribeAudio(await readAudio(request(wave())), selected!)).rejects.toThrow('Non-public')
+    const res = await POST(request(wave())); expect(res.status).toBe(500)
+    expect(JSON.stringify(await res.json())).not.toContain('never-output-this-secret')
+  } finally {
+    if (hadAllowLocal) process.env.WAKIL_ALLOW_LOCAL_PROVIDERS = prevAllowLocal
+  }
   expect(await db.operation.count({ where: { businessId } })).toBe(0)
   await db.modelConfig.updateMany({ where: { providerId }, data: { enabled: false } })
   expect(await speechSelection()).toBeNull()

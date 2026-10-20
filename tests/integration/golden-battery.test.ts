@@ -10,13 +10,21 @@
 // Run alone:  bun test tests/integration/golden-battery.test.ts   (~3 min)
 import { expect, test } from 'bun:test'
 import { spawn } from 'node:child_process'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const ROOT = join(import.meta.dir, '..', '..')
+// import.meta.dir is bun-only; the dirname(fileURLToPath(...)) form works in both.
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
+// The battery runner is TS + '@/'-aliased: bun runs it natively; plain node
+// needs the sandbox loader (tests/node/register.mjs) — see the shim there.
+const BATTERY_CMD =
+  process.versions.bun !== undefined
+    ? [process.execPath, 'tests/evals/run.ts', '--json']
+    : [process.execPath, '--import', join(ROOT, 'tests/node/register.mjs'), 'tests/evals/run.ts', '--json']
 
 function runBattery(timeoutMs: number): Promise<{ passed: number; total: number; results: { text: string; expect: string; ok: boolean; note: string }[] }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['tests/evals/run.ts', '--json'], {
+    const child = spawn(BATTERY_CMD[0], BATTERY_CMD.slice(1), {
       cwd: ROOT,
       env: { ...process.env, WAKIL_OFFLINE: '1', NODE_ENV: 'test' },
       stdio: ['ignore', 'pipe', 'pipe'],

@@ -114,12 +114,15 @@ export function ActionCard({
   onReject,
   busy,
   outcome,
+  keyboard = false,
 }: {
   card: ActionCardDTO
   onApprove?: (reason?: string) => void
   onReject?: (reason?: string) => void
   busy?: boolean
   outcome?: ActionCardOutcome
+  /** this card answers to the keyboard: A = اعتماد, X = إلغاء */
+  keyboard?: boolean
 }) {
   const [reason, setReason] = useState('')
   const risk = RISK_META[card.risk]
@@ -326,6 +329,7 @@ export function ActionCard({
                     <CheckCircle2 className="size-4" aria-hidden="true" />
                   )}
                   اعتماد العملية
+                  {keyboard && <kbd className="num ms-1 rounded border border-border bg-background/60 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">A</kbd>}
                 </Button>
                 <Button
                   type="button"
@@ -336,6 +340,7 @@ export function ActionCard({
                 >
                   <XCircle className="size-4" aria-hidden="true" />
                   إلغاء المسودة
+                  {keyboard && <kbd className="num ms-1 rounded border border-border bg-background/60 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">X</kbd>}
                 </Button>
               </div>
             </div>
@@ -381,7 +386,8 @@ export function ActionCard({
                   {outcome.effects.map((e, i) => (
                     <div
                       key={`${e.label}-${i}`}
-                      className="flex items-baseline justify-between gap-3 text-sm"
+                      className="finding-enter flex items-baseline justify-between gap-3 text-sm"
+                      style={{ animationDelay: `${outcome.checks.length * 60 + 120 + i * 60}ms` }}
                     >
                       <span className="text-muted-foreground">{e.label}</span>
                       <span className={cn('font-semibold', toneClass(e.tone))}>

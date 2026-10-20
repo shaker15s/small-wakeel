@@ -4,7 +4,7 @@ import { cashbookCash } from '@/lib/domain/cashbook'
 // Results are structured ResultCardDTOs the UI renders as tables/kv cards.
 
 import type { Item, Customer, Supplier, Operation } from '@prisma/client'
-import { normalizeAr } from './arabic'
+import { normalizeAr, toWesternDigits } from './arabic'
 import { searchWeb } from './websearch'
 import { db } from '@/lib/db'
 import type { ResultCardDTO } from '@/lib/types'
@@ -32,6 +32,9 @@ export type ReadTool =
   | 'get_profit_margin'
   | 'forecast_stockout'
   | 'get_customer_history'
+  | 'get_supplier_history'
+  | 'get_contact_info'
+  | 'get_financial_position'
   | 'compare_periods'
   | 'expense_breakdown'
   | 'get_period_totals'
@@ -71,6 +74,9 @@ export const READ_TOOLS: ReadonlySet<string> = new Set<string>([
   'get_profit_margin',
   'forecast_stockout',
   'get_customer_history',
+  'get_supplier_history',
+  'get_contact_info',
+  'get_financial_position',
   'compare_periods',
   'expense_breakdown',
   'search_web',
@@ -231,6 +237,11 @@ function opLines(payload: string): { itemId: string; qty: number; total: number 
   } catch {
     return []
   }
+}
+
+/** Money value of an operation payload, whatever shape it stored. */
+export function opMoney(payload: string): number {
+  return payloadMoney(readPayload(payload))
 }
 
 /** Sales rows (SUCCEEDED) inside a window, newest first. */
@@ -401,7 +412,11 @@ export async function runReadTool(
       // «النهارده» is the Cairo day, not «now − 24h»: the shop's day starts at
       // midnight, and a 24h window silently includes yesterday evening (live
       // R31: «صرفت كام النهارده؟» counted 10 old expenses).
-      const from = days === 1 ? startOfCairoDay(0) : new Date(Date.now() - days * 86400000)
+      // R58: امبارح is a full Cairo day on its own — «بعت كام امبارح؟» must NOT
+      // return 30 days of sales (the old fallback) and NOT today.
+      const isYesterday = args.yesterday === true
+      const from = isYesterday ? startOfCairoDay(1) : days === 1 ? startOfCairoDay(0) : new Date(Date.now() - days * 86400000)
+      const when = isYesterday ? { gte: from, lt: startOfCairoDay(0) } : { gte: from }
       const types =
         metric === 'sales'
           ? ['sale', 'membership']
@@ -412,7 +427,7 @@ export async function runReadTool(
               : ['expense']
       const label = metric === 'sales' ? 'مبيعات' : metric === 'collections' ? 'تحصيلات' : metric === 'purchases' ? 'مشتريات' : 'مصروفات'
       const ops = await db.operation.findMany({
-        where: { businessId, status: 'SUCCEEDED', type: { in: types }, createdAt: { gte: from } },
+        where: { businessId, status: 'SUCCEEDED', type: { in: types }, createdAt: when },
       })
       const money = (payload: string): number => payloadMoney(readPayload(payload))
       const flat = (x: string) => normalizeAr(x).replace(/\s+/g, ' ').trim()
@@ -435,7 +450,22 @@ export async function runReadTool(
       // a gym «sells» memberships: call them مبيعات in the same number
       const total = matched.reduce((sum, o) => sum + money(o.payload), 0)
       const qty = metric === 'sales' ? matched.reduce((sum, o) => sum + payloadQty(readPayload(o.payload)), 0) : 0
-      const period = days === 1 ? 'النهارده' : days === 7 ? 'آخر ٧ أيام' : `آخر ${fmtQty(days)} يوم`
+      // R56: of the money we SOLD, how much is actually in hand vs. on account?
+      // The owner manages exposure by this split every single day. Sales only
+      // (memberships settle in full).
+      let cashSold = 0
+      let creditSold = 0
+      if (metric === 'sales') {
+        for (const o of matched) {
+          if (o.type !== 'sale') continue
+          const p = readPayload(o.payload)
+          const t = Number(p.total ?? 0) || 0
+          const paid = Math.min(Math.max(0, Number(p.paid ?? 0)), t)
+          cashSold += paid
+          creditSold += t - paid
+        }
+      }
+      const period = isYesterday ? 'امبارح' : days === 1 ? 'النهارده' : days === 7 ? 'آخر ٧ أيام' : `آخر ${fmtQty(days)} يوم`
       return [
         {
           kind: 'kv',
@@ -443,6 +473,16 @@ export async function runReadTool(
           rows: [
             { label: 'الإجمالي', value: egp(total) },
             ...(qty > 0 ? [{ label: 'الكمية', value: fmtQty(qty) }] : []),
+            ...(metric === 'sales' && (cashSold > 0 || creditSold > 0)
+              ? [
+                  { label: 'كاش (في اليد)', value: egp(cashSold) },
+                  { label: 'على الحساب (عند العملاء)', value: egp(creditSold) },
+                ]
+              : []),
+            // R59: the planning number — what a NORMAL day looks like.
+            ...(matched.length > 0 && days > 1 && total > 0
+              ? [{ label: 'المتوسط اليومي', value: egp(Math.round(total / days)) }]
+              : []),
             { label: 'عدد العمليات', value: fmtQty(matched.length) },
           ],
           ...(matched.length === 0
@@ -452,6 +492,42 @@ export async function runReadTool(
       ]
     }
 
+    case 'get_financial_position': {
+      // R55 — «فلوسي واقفين فين؟» — the owner's single snapshot of where the
+      // money sits: cash + at the customers + on the shelves − owed to
+      // suppliers = working capital. Same readers as get_cash_position and
+      // get_stock_value so every screen adds the ledger the same way.
+      const [cashEntries, customers, suppliers, items] = await Promise.all([
+        db.cashEntry.findMany({ where: { businessId }, select: { direction: true, amount: true } }),
+        db.customer.findMany({ where: { businessId }, select: { balance: true } }),
+        db.supplier.findMany({ where: { businessId }, select: { balance: true } }),
+        db.item.findMany({ where: { businessId } }),
+      ])
+      const cash =
+        biz.openingCash + cashEntries.reduce((s, e) => s + (e.direction === 'in' ? e.amount : -e.amount), 0)
+      const receivables = customers.reduce((s, c) => s + Math.max(0, c.balance), 0)
+      const payables = suppliers.reduce((s, sp) => s + Math.max(0, sp.balance), 0)
+      const stock = items.reduce((s, it) => s + it.stockQty * it.costPrice, 0)
+      const net = cash + receivables + stock - payables
+      return [
+        {
+          kind: 'kv',
+          title: 'المركز المالي — فلوسي واقفين فين',
+          rows: [
+            { label: 'كاش في الخزنة', value: egp(cash) },
+            { label: 'فلوسي عند العملاء', value: egp(receivables) },
+            { label: 'بضاعة على الرف (تكلفة)', value: egp(stock) },
+            { label: 'علينا للموردين', value: `- ${egp(payables)}` },
+            { label: 'رأس المال العامل التقريبي', value: egp(net) },
+          ],
+        },
+        {
+          kind: 'text',
+          title: 'ببساطة',
+          body: `فلوسك دلوقتي: ${egp(cash)} كاش في الخزنة + ${egp(receivables)} عند العملاء + ${egp(stock)} بضاعة على الرف، ومعنا ${egp(payables)} عند الموردين. الصافي التقريبي ${egp(net)}.`,
+        },
+      ]
+    }
     case 'get_stock_value': {
       // «المخزون ده مكلّفني كام؟» — the capital asleep on the shelves. The
       // owner asks this before every restock, and it must be exact: cost basis
@@ -1071,22 +1147,81 @@ export async function runReadTool(
     }
 
     case 'get_transaction_status': {
-      const ref = String(args.ref ?? '')
-      const op = await db.operation.findFirst({ where: { businessId, ref } })
-      return [
-        {
-          kind: 'kv',
-          title: `العملية ${ref}`,
-          rows: op
-            ? [
-                { label: 'النوع', value: TYPE_AR[op.type] ?? op.type },
-                { label: 'الحالة', value: STATUS_AR[op.status] ?? op.status },
-                { label: 'الملخص', value: op.summary },
-                { label: 'وقت التنفيذ', value: op.executedAt ? arTime(op.executedAt) : 'لسه' },
+      // «الفاتورة WKL 1032 دي كانت فيها إيه؟» — ref normalization first:
+      // Arabic digits, spaces, underscores, missing dash, all tolerated.
+      const rawRef = String(args.ref ?? '')
+      const clean = toWesternDigits(rawRef).replace(/[\s_-]+/g, '').toUpperCase()
+      let op: Operation | null = null
+      if (clean) {
+        op = await db.operation.findFirst({ where: { businessId, ref: clean } })
+        if (!op) {
+          // Digit-by-digit match, the same contract as /api/search:
+          // «1032» or «WKL1032» finds WKL-1032. Prefer the exact WKL-<digits>.
+          const digits = clean.replace(/\D/g, '')
+          if (digits.length >= 3) {
+            const cands = await db.operation.findMany({
+              where: { businessId, ref: { contains: digits } },
+              orderBy: { createdAt: 'desc' },
+              take: 5,
+            })
+            const exact = cands.find((c) => c.ref === `WKL-${digits}`)
+            if (exact) op = exact
+            else if (cands.length === 1) op = cands[0]
+            else if (cands.length > 1) {
+              const list = cands.slice(0, 3).map((c) => `${c.ref} (${TYPE_AR[c.type] ?? c.type})`).join(' · ')
+              return [
+                {
+                  kind: 'kv',
+                  title: `الرقم ${digits}`,
+                  rows: [{ label: 'النتيجة', value: `أكتر من عملية فيها الأرقام دي: ${list} — قولّي الرقم كله (زي WKL-1032)` }],
+                },
               ]
-            : [{ label: 'النتيجة', value: `ملقيتش عملية بالرقم ${ref}` }],
-        },
-      ]
+            }
+          }
+        }
+      }
+      if (!op) {
+        return [
+          {
+            kind: 'kv',
+            title: `العملية ${rawRef}`,
+            rows: [{ label: 'النتيجة', value: `ملقيتش عملية بالرقم ${rawRef || 'ده'}` }],
+          },
+        ]
+      }
+      const cards: ResultCardDTO[] = []
+      // The real receipt: line items + total, straight from the payload.
+      const lines = opLines(op.payload)
+      if (lines.length > 0) {
+        const items = await db.item.findMany({ where: { businessId } })
+        const nameOf = new Map(items.map((i) => [i.id, i.name]))
+        const total = lines.reduce((s, l) => s + l.total, 0)
+        cards.push({
+          kind: 'table',
+          title: `فيها إيه — ${op.ref}`,
+          columns: [
+            { key: 'name', label: 'الصنف' },
+            { key: 'qty', label: 'الكمية', align: 'end' },
+            { key: 'total', label: 'المبلغ', align: 'end' },
+          ],
+          rows: lines.map((l) => ({ name: nameOf.get(l.itemId) ?? 'صنف', qty: fmtQty(l.qty), total: egp(l.total) })),
+          footer: [{ label: 'الإجمالي', value: egp(total) }],
+        })
+      }
+      const p = readPayload(op.payload)
+      cards.push({
+        kind: 'kv',
+        title: `العملية ${op.ref}`,
+        rows: [
+          { label: 'النوع', value: TYPE_AR[op.type] ?? op.type },
+          { label: 'الحالة', value: STATUS_AR[op.status] ?? op.status },
+          ...(String(p.customerName ?? p.supplierName ?? '') ? [{ label: 'المعاملة مع', value: String(p.customerName ?? p.supplierName) }] : []),
+          { label: 'الإجمالي', value: egp(Number(p.total ?? p.amount ?? 0) || lines.reduce((s, l) => s + l.total, 0)) },
+          { label: 'الملخص', value: op.summary },
+          { label: 'وقت التنفيذ', value: op.executedAt ? arTime(op.executedAt) : 'لسه' },
+        ],
+      })
+      return cards
     }
 
     // ---------------------------------------------------------------
@@ -1309,7 +1444,152 @@ export async function runReadTool(
         },
       ]
     }
+    case 'get_supplier_history': {
+      // R52 — the payables mirror of get_customer_history: «كام علينا لمحمد
+      // تاجر الجملة؟» must answer with THAT supplier's account, not the whole
+      // list and not the generic «النت تقيل» dead-end.
+      const name = String(args.name ?? '').trim()
+      const suppliers = await db.supplier.findMany({ where: { businessId } })
+      const flat = (x: string) => normalizeAr(x).replace(/\s+/g, ' ').trim()
+      const wordCount = (x: string) => flat(x).split(' ').filter(Boolean).length
+      // Same disambiguation contract as the customer file: an exact name wins,
+      // a lone shared first word never silently lands on someone else's debt.
+      const exact = suppliers.find((s) => flat(s.name) === flat(name))
+      const strong = suppliers
+        .filter((s) => flat(s.name).includes(flat(name)) && (wordCount(name) >= 2 || flat(name).length >= 6))
+        .filter((s) => !isQuestionWord(name))
+      const partial = exact ?? (strong.length === 1 ? strong[0] : undefined)
+      if (!partial) {
+        const near = suppliers.filter((s) => flat(s.name).includes(flat(name))).slice(0, 3)
+        return [
+          {
+            kind: 'kv',
+            title: 'ملف المورد',
+            rows: [
+              { label: 'النتيجة', value: `ملقيتش مورد بالاسم «${name}» — مفيش مورد بالاسم ده في السجل` },
+              ...(near.length > 0
+                ? [{ label: 'قصدت؟', value: `${near.map((s) => `${s.name} (علينا ${egp(s.balance)})`).join(' · ')} — اكتب الاسم زي ما هو في السجل` }]
+                : [{ label: 'الخطوة', value: `قولّي «جبت من ${name}» وأنا أسجله في السجل` }]),
+            ],
+          },
+        ]
+      }
+      const found = partial
+      const ops = await db.operation.findMany({
+        where: { businessId, status: 'SUCCEEDED', OR: [{ summary: { contains: found.name } }, { type: { in: ['payment', 'purchase'] } }] },
+        orderBy: { createdAt: 'desc' },
+        take: 60,
+      })
+      const mine = ops.filter((op) => op.summary.includes(found.name) || opLines(op.payload).length > 0)
+      const payments = mine.filter((op) => op.type === 'payment')
+      const avgPayment =
+        payments.length > 0 ? Math.round(payments.reduce((s2, o) => s2 + opAmount(o.payload), 0) / payments.length) : 0
+      const addOp = mine.find((op) => op.type === 'supplier_add')
+      let sinceLabel: string | null = null
+      if (addOp) {
+        try {
+          const pj = JSON.parse(addOp.payload) as { since?: string }
+          if (pj.since) {
+            const d = new Date(pj.since)
+            if (!Number.isNaN(d.getTime())) sinceLabel = arDate(d)
+          }
+        } catch {
+          /* payload not JSON — the balance is still shown */
+        }
+      }
+      const gapDays =
+        payments.length >= 2
+          ? Math.round((payments[0].createdAt.getTime() - payments[payments.length - 1].createdAt.getTime()) / 86400000 / (payments.length - 1))
+          : null
+      return [
+        {
+          kind: 'kv',
+          title: `ملف ${found.name}`,
+          rows: [
+            { label: 'المستحق له (رصيدنا عليه)', value: egp(found.balance) },
+            { label: 'آخر سداد', value: payments[0] ? `${egp(opAmount(payments[0].payload))} — ${arDate(payments[0].createdAt)}` : 'مفيش' },
+            { label: 'متوسط السداد', value: avgPayment > 0 ? egp(avgPayment) : '—' },
+            { label: 'بنسدد كل', value: gapDays != null ? `${gapDays} يوم تقريبًا` : 'مفيش بيانات كفاية' },
+            ...(sinceLabel ? [{ label: 'الحساب اتفتح من', value: sinceLabel }] : []),
+            ...(found.phone ? [{ label: 'التليفون', value: found.phone }] : []),
+          ],
+        },
+        {
+          kind: 'table',
+          title: `آخر حركات ${found.name}`,
+          columns: [
+            { key: 'ref', label: 'الرقم' },
+            { key: 'type', label: 'النوع' },
+            { key: 'amount', label: 'المبلغ' },
+            { key: 'date', label: 'التاريخ' },
+          ],
+          rows: mine.slice(0, 6).map((op) => ({
+            ref: op.ref,
+            type: TYPE_AR[op.type] ?? op.type,
+            amount: egp(opAmount(op.payload)),
+            date: arDate(op.createdAt),
+          })),
+        },
+      ]
+    }
 
+    case 'get_contact_info': {
+      // R54 — «رقم تليفون أم حسن؟» / «اتصل بـ محمد تاجر الجملة». One number,
+      // plus the balance as context (a call is usually to collect or to order).
+      // Customers first, suppliers second; the same exact > strong-partial
+      // contract as the two history files — never one person's number for
+      // another person.
+      const name = String(args.name ?? '').trim()
+      const flat = (x: string) => normalizeAr(x).replace(/\s+/g, ' ').trim()
+      const wordCount = (x: string) => flat(x).split(' ').filter(Boolean).length
+      const [customers, suppliers] = await Promise.all([
+        db.customer.findMany({ where: { businessId } }),
+        db.supplier.findMany({ where: { businessId } }),
+      ])
+      const pick = <T extends { name: string }>(list: T[]): T | undefined => {
+        const exact = list.find((c) => flat(c.name) === flat(name))
+        if (exact) return exact
+        if (!name || isQuestionWord(name)) return undefined
+        const strong = list.filter(
+          (c) => flat(c.name).includes(flat(name)) && (wordCount(name) >= 2 || flat(name).length >= 6),
+        )
+        return strong.length === 1 ? strong[0] : undefined
+      }
+      const cust = pick(customers)
+      const sup = cust ? undefined : pick(suppliers)
+      const found = (cust ?? sup) as (Customer & { phone: string | null; balance: number }) | undefined
+      if (!found) {
+        const near = [...customers.map((c) => c.name), ...suppliers.map((s2) => s2.name)]
+          .filter((n) => flat(n).includes(flat(name)))
+          .slice(0, 3)
+        return [
+          {
+            kind: 'kv',
+            title: 'رقم التليفون',
+            rows: [
+              { label: 'النتيجة', value: `ملقيتش «${name}» في سجل العملاء ولا الموردين` },
+              ...(near.length > 0
+                ? [{ label: 'قصدت؟', value: near.join(' · ') }]
+                : [{ label: 'الخطوة', value: `قولّي «ضيف ${name}» وبرضه رقم تليفونه وأنا أسجله` }]),
+            ],
+          },
+        ]
+      }
+      const isCust = cust != null
+      return [
+        {
+          kind: 'kv',
+          title: `تليفون ${found.name}`,
+          rows: [
+            { label: 'النوع', value: isCust ? 'عميل' : 'مورد' },
+            ...(found.phone
+              ? [{ label: 'التليفون', value: found.phone }]
+              : [{ label: 'التليفون', value: 'مش مسجل في السجل — قولّي رقمه وأنا أضيفة' }]),
+            { label: 'الرصيد', value: isCust ? `عليه ${egp(found.balance)}` : `رصيدنا عليه ${egp(found.balance)}` },
+          ],
+        },
+      ]
+    }
     case 'compare_periods': {
       // «أنا أحسن من الأسبوع اللي فات؟» — two windows, one honest verdict.
       const days = Math.min(90, Math.max(2, Number(args.days ?? 7) || 7))

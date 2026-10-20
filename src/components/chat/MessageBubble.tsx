@@ -105,6 +105,7 @@ export function MessageBubble({
   onRetry,
   reveal = false,
   error = false,
+  keyboard = false,
 }: {
   turn: ChatTurnWithMeta
   userDisplayText?: string
@@ -118,6 +119,8 @@ export function MessageBubble({
   onRetry?: () => void
   /** true only while the just-finalized turn reveals its visuals (stagger) */
   reveal?: boolean
+  /** this card is the keyboard quick-approve target (A / X) */
+  keyboard?: boolean
   /** failed turn → error styling + retry button */
   error?: boolean
 }) {
@@ -349,6 +352,7 @@ export function MessageBubble({
           <motion.div {...revealProps(cardDelay)} className="w-full">
             <ActionCard
               card={card}
+              keyboard={keyboard}
               busy={busyOpId != null && busyOpId === card.opId}
               outcome={turn.outcome}
               onApprove={

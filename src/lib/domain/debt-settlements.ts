@@ -24,7 +24,20 @@ export async function recordLegacyDebtEffects(tx: Prisma.TransactionClient, busi
   const customer = type === 'sale' || type === 'collection'
   const amount = settlement ? Number(p.amount) : Number(p.total) - Number(p.paid)
   if (amount <= 0) return
-  const partyId = String(customer ? p.customerId : p.supplierId)
+  // R50: a credit draft may carry a TYPED NAME only (customer_add / new
+  // supplier born at approval) — resolve it before mirroring the debt lot,
+  // and skip quietly when there is genuinely no counterparty to mirror.
+  let partyId = customer ? (p.customerId ? String(p.customerId) : null) : (p.supplierId ? String(p.supplierId) : null)
+  if (!partyId) {
+    const name = customer ? String(p.customerName ?? '') : String(p.supplierName ?? '')
+    if (name.trim()) {
+      const found = customer
+        ? await tx.customer.findFirst({ where: { businessId, name: name.trim() } })
+        : await tx.supplier.findFirst({ where: { businessId, name: name.trim() } })
+      if (found) partyId = found.id
+    }
+  }
+  if (!partyId) return
   const party = customer ? await tx.customer.findFirstOrThrow({ where: { businessId, id: partyId } }) : await tx.supplier.findFirstOrThrow({ where: { businessId, id: partyId } })
   const op = await tx.operation.findFirstOrThrow({ where: { businessId, ref } })
   const allocations = settlement ? await allocateDebtSettlement(tx, businessId, partyId, customer, amount) : []

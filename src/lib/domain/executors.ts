@@ -117,7 +117,11 @@ export async function createDraft(params: {
 // A savepoint lets a verified rollback record FAILED_SAFE atomically; if storage
 // cannot roll back or record failure, the entire transaction (claim too) aborts.
 class FailedVerification extends Error {
-  constructor(readonly outcome: ExecOutcome) { super(outcome.failReason ?? 'فشل التحقق') }
+  readonly outcome: ExecOutcome
+  constructor(outcome: ExecOutcome) {
+    super(outcome.failReason ?? 'فشل التحقق')
+    this.outcome = outcome
+  }
 }
 
 export async function executeOperation(opId: string, decidedBy: string, reason?: string): Promise<{ op: Operation; outcome: ExecOutcome }> {
@@ -311,7 +315,22 @@ function executorsFor(db: Prisma.TransactionClient): Record<OpType, Executor> {
         if (total <= 0) return { ok: false, checks: [], effects: [], failReason: 'الإجمالي لازم يكون أكبر من صفر' }
         const paid = Math.min(Number(p.paid ?? total), total)
         const remaining = total - paid
-        const customerId = p.customerId ? String(p.customerId) : null
+        // R48: a sale drafted under a typed name («العميل محمد») resolves the
+        // customer AT APPROVAL — the customer_add draft of the same turn is
+        // approved first, so the name is in the book by then.
+        const customerId = p.customerId
+          ? String(p.customerId)
+          : p.customerName
+            ? (await db.customer.findFirst({ where: { businessId, name: String(p.customerName) } }))?.id ?? null
+            : null
+        if (remaining > 0 && !customerId) {
+          return {
+            ok: false,
+            checks: [],
+            effects: [],
+            failReason: `البيع فيه آجل ${egp(remaining)} لعميل «${p.customerName ?? 'غير محدد'}» مش مسجل — سجّل العميل الأول واعتمد البيعة تاني`,
+          }
+        }
 
         await apply([
           ...resolved.map((r) => db.item.update({ where: { id: r.itemId }, data: { stockQty: { decrement: Math.round(r.qty) } } })),
@@ -350,7 +369,22 @@ function executorsFor(db: Prisma.TransactionClient): Record<OpType, Executor> {
       }
       const paid = Number(p.paid ?? total)
       const remaining = total - paid
-      const customerId = p.customerId ? String(p.customerId) : null
+      // R48: resolve a typed customer name at approval time (the customer_add
+      // draft of the same turn is approved first) — and a credit sale must
+      // NEVER book its debt into the void.
+      const customerId = p.customerId
+        ? String(p.customerId)
+        : p.customerName
+          ? (await db.customer.findFirst({ where: { businessId, name: String(p.customerName) } }))?.id ?? null
+          : null
+      if (remaining > 0 && !customerId) {
+        return {
+          ok: false,
+          checks: [],
+          effects: [],
+          failReason: `البيع فيه آجل ${egp(remaining)} لعميل «${p.customerName ?? 'غير محدد'}» مش مسجل — سجّل العميل الأول واعتمد البيعة تاني`,
+        }
+      }
 
       const txOps: Prisma.PrismaPromise<unknown>[] = [
         db.item.update({ where: { id: itemId }, data: { stockQty: { decrement: Math.round(qtyN) } } }),

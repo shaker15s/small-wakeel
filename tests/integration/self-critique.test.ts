@@ -193,5 +193,5 @@ describe('turn.selfCritique', () => {
       expect(s.ms).toBeGreaterThanOrEqual(0)
       expect(s.ms!).toBeLessThan(120_000)
     }
-  })
+  }, 30_000) // full-suite load: one real agent turn must not hit the 5s default
 })

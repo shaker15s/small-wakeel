@@ -68,13 +68,16 @@ import {
   getActivePendingRequest,
   looksLikeNewTopic,
   markPendingDone,
+  isCreditCommand,
+  isRegisterCommand,
+  parseCreditBalance,
   pendingFollowUpText,
   pendingQuestionText,
   savePendingRequest,
   type NewItemSlots,
 } from './pending-request'
 import { parseSinceClause } from './since'
-import { createDraft } from '@/lib/domain/executors'
+import { createDraft, executeOperation, rejectOperation } from '@/lib/domain/executors'
 import { auditDraft } from '@/lib/domain/audit'
 import { getCatalog } from './catalog'
 import type { AuditFindingDTO } from '@/lib/types'
@@ -87,7 +90,8 @@ import { factsFromCards, verifyReply, type VerifyFact } from './verify'
 import { buildAdvisoryPrompt, buildAgentSystemPrompt, buildReplyPrompt, buildSystemPrompt, roleTitle, TONE_AR } from './prompt'
 import { harnessesPromptBlock } from './cli-anything/harness-installer'
 import { brainToolSchemas } from './tool-schemas'
-import { READ_TOOLS, runReadTool, TYPE_AR, type ReadTool } from './tools'
+import { READ_TOOLS, runReadTool, TYPE_AR, isQuestionWord, opMoney, type ReadTool } from './tools'
+import { startOfCairoDay } from '@/app/api/_lib/dates'
 import {
   budgetToolHistory,
   logContextPressure,
@@ -274,6 +278,9 @@ const TOOL_ACTIONS: Record<string, ChatActionDTO[]> = {
   list_expiring: [{ id: 'act-list_expiring', label: 'افتح المخزون', view: 'inventory', icon: 'boxes', tone: 'primary' }],
   list_receivables: [{ id: 'act-list_receivables', label: 'حسابات العملاء', view: 'accounts', icon: 'users', tone: 'primary' }],
   list_payables: [{ id: 'act-list_payables', label: 'حسابات الموردين', view: 'accounts', icon: 'users', tone: 'primary' }],
+  get_supplier_history: [{ id: 'act-get_supplier_history', label: 'حسابات الموردين', view: 'accounts', icon: 'users', tone: 'primary' }],
+  get_contact_info: [{ id: 'act-get_contact_info', label: 'جهات الاتصال', view: 'accounts', icon: 'users', tone: 'primary' }],
+  get_financial_position: [{ id: 'act-get_financial_position', label: 'المركز المالي', view: 'reports', icon: 'wallet', tone: 'primary' }],
   get_activity_history: [{ id: 'act-get_activity_history', label: 'سجل العمليات', view: 'journal', icon: 'journal', tone: 'primary' }],
   search_catalog: [{ id: 'act-search_catalog', label: 'افتح المخزون', view: 'inventory', icon: 'boxes', tone: 'primary' }],
   get_item_stock: [{ id: 'act-get_item_stock', label: 'افتح المخزون', view: 'inventory', icon: 'boxes', tone: 'primary' }],
@@ -293,6 +300,9 @@ const TOOL_LABEL_AR: Record<string, string> = {
   list_low_stock: 'النواقص في المخزون',
   list_receivables: 'الحسابات المستحقة',
   list_payables: 'مستحقات الموردين',
+  get_supplier_history: 'ملف المورد',
+  get_contact_info: 'رقم التليفون',
+  get_financial_position: 'المركز المالي',
   list_expiring: 'الصلاحيات القريبة',
   search_catalog: 'بحث في الكتالوج',
   get_item_stock: 'رصيد صنف',
@@ -530,7 +540,15 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
       }
     }
   }
-  if (/(وضع|رصيد|حاله) الخزنه|الخزنه|كاش/.test(s)) return { intent: 'read', tool: 'get_cash_position', fields: {} }
+  // R55: «فلوسي واقفين فين؟» / «المركز المالي» / «ماليي كام؟» — the whole money
+  // picture (cash + receivables + stock − payables). The cashbox rule owns
+  // «الخزنة/كاش» alone, so any sentence that names the cashbox skips us.
+  if (/(المركز المالي|فلوسي (واقفين فين|فين|كام|اتعمل)|اموالي (فين|كام)|ماليي|رصيدي)/.test(s) && !/خزنه|كاش/.test(s))
+    return { intent: 'read', tool: 'get_financial_position', fields: {} }
+  // R67: «بعت ٢ تونه تونك كاش» is a CASH SALE, not a cashbox question — a
+  // write verb in the sentence disqualifies the cashbox read.
+  if (/(وضع|رصيد|حاله) الخزنه|الخزنه|كاش/.test(s) && !/(^| )(بعت|بيع|اشتريت|اشتري|جبت|سجل|سجلت|حصلت|قبضت|استلمت|صرفت|سددت|دفع)( |$)/.test(s))
+    return { intent: 'read', tool: 'get_cash_position', fields: {} }
   // ---- R36: the weekly ledger questions, answered deterministically -------
   // They must sit BEFORE the generic «مخزون/ناقص» rule: «المخزون ده مكلّفني
   // كام؟» is a VALUE question, not a shortfall list. Patterns use literal
@@ -563,7 +581,7 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
   if (/(كام|قد\s*ايه|قدايه)/.test(s)) {
     const metric = /(حصلت|تحصيل|قبضت|استلمت)/.test(s)
       ? 'collections'
-      : /(اشتريت|مشتريات|الشرا|شراء)/.test(s)
+      : /(اشتريت|مشتريات|الشرا|شراء|جبت)/.test(s)
         ? 'purchases'
         : /(صرفت|مصروف|مصاريف|مصروفات)/.test(s)
           ? 'expenses'
@@ -571,10 +589,21 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
             ? 'sales'
             : null
     if (metric) {
-      const days = /(النهارده|اليوم|دلوقتي)/.test(s) ? 1 : /(اسبوع|الأسبوع|7 ايام|سبعة ايام)/.test(s) ? 7 : 30
+      // R58: امبارح = yesterday's full Cairo day (its own window in the tool).
+      const isYesterday = /(امبارح|امبارح|بارح)/.test(s)
+      // R59: «في اليوم» / «في يوم» means PER DAY («متوسط البيع في اليوم كام؟»),
+      // not TODAY — stripping the prepositional form keeps «اليوم» alone as
+      // the today marker only.
+      const sNoPerDay = s.replace(/(?:^|\s)(?:في\s+|بكل\s+|كل\s+)(?:يوم|اليوم)(?=\s|$|[؟?])/g, ' ')
+      const isToday = /النهارده|دلوقتي/.test(sNoPerDay) || /(^|\s)اليوم(?=\s|$|[؟?])/.test(sNoPerDay)
+      // R63: any stated day count — «بعت كام آخر ٣ أيام؟» must mean 3 days,
+      // not the 30-day fallback. (7 ايام/أسبوع resolve to the same 7.)
+      const mDays = s.match(/([0-9٠-٩]{1,3})\s*(?:يوم|ايام)/)
+      const daysFromText = mDays ? Math.min(365, Math.max(2, Number(toWesternDigits(mDays[1])))) : null
+      const days = isYesterday ? 1 : isToday ? 1 : daysFromText ?? (/(اسبوع|الأسبوع|7 ايام|سبعة ايام)/.test(s) ? 7 : 30)
       const query = s
-        .replace(/(بعت|مبيعات|اتبيع|بيع|حصلت|تحصيل|قبضت|استلمت|اشتريت|مشتريات|الشرا|شراء|صرفت|مصروفات|مصاريف|مصروف)/g, ' ')
-        .replace(/(كام|قد\s*ايه|قدايه|النهارده|اليوم|الشهر|هذا|ده|دي|الاسبوع|الأسبوع|الفتره|الفترة|الماضي|الجاي|علبه|علبة|كرتونه|كرتونة|كيلو|قطعه|قطعة|جرام|شريط|لتر)/g, ' ')
+        .replace(/(بعت|مبيعات|اتبيع|بيع|حصلت|تحصيل|قبضت|استلمت|اشتريت|مشتريات|الشرا|شراء|جبت|صرفت|مصروفات|مصاريف|مصروف)/g, ' ')
+        .replace(/(كام|قد\s*ايه|قدايه|النهارده|اليوم|امبارح|امبارح|الشهر|هذا|ده|دي|الاسبوع|الأسبوع|الفتره|الفترة|الماضي|الجاي|علبه|علبة|كرتونه|كرتونة|كيلو|قطعه|قطعة|جرام|شريط|لتر)/g, ' ')
         // connectors + generic nouns are not names: «اشتريت كام من الموردين؟»
         // must not filter by a customer/supplier called «من المور ن» (the
         // normalizer splits «الموردين»), it must aggregate ALL purchases.
@@ -586,7 +615,7 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
       return {
         intent: 'read',
         tool: 'get_period_totals',
-        fields: { metric, days, ...(query.length >= 2 ? { query } : {}) },
+        fields: { metric, days, ...(isYesterday ? { yesterday: true } : {}), ...(query.length >= 2 ? { query } : {}) },
       }
     }
   }
@@ -621,7 +650,16 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
     const amount = extractStatedPrice(s)
     return { intent: 'write', opType: 'payment', fields: { ...(mSup?.[1] ? { supplierName: mSup[1].trim() } : {}), ...(amount != null ? { amount } : {}) } }
   }
-  if (/(اللي علينا|للمورد|الموردين|مستحق)/.test(s)) return { intent: 'read', tool: 'list_payables', fields: {} }
+  // R52: a NAMED payables question → that supplier's FILE (balance + payment
+  // pattern + last movements) — the mirror of the customer history rule.
+  // «كام علينا لمحمد تاجر الجملة؟» / «تاريخ المورد X» / «حساب المورد X».
+  const mSupQ = s.match(/^(?:كام|كم) علينا (?:ل|لم|لمن)?\s*([^ ،,؟?]+(?:\s+[^ ،,؟?]+){0,3})\s*[؟?]?$/) ?? s.match(/^(?:تاريخ|حساب|ملف) المورد\s+([^ ،,؟?]+(?:\s+[^ ،,؟?]+){0,3})\s*[؟?]?$/)
+  if (mSupQ) {
+    const supName = mSupQ[1].trim()
+    return { intent: 'read', tool: 'get_supplier_history', fields: supName.length >= 2 ? { name: supName } : {} }
+  }
+  // R51: «كام علينا؟» — the everyday payables question (no name → the list).
+  if (/(اللي علينا|للمورد|الموردين|مستحق|كام علينا|كم علينا|كام على المورد|كم على الموردين)/.test(s)) return { intent: 'read', tool: 'list_payables', fields: {} }
   // «النهارده عملت ايه؟» is the same question in a different word order — the
   // owner's first sentence of the day, and it used to fall through to chat.
   if (/(ملخص|كويس اليوم|حال اليوم|عملت\s*ايه|ايه\s*اللي\s*عملته|اخبار\s*اليوم)/.test(s))
@@ -635,13 +673,54 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
   if (/(هيخلص|هينقص|هتخلص|توقع|متوقع|نفض|معدل البيع|كم يوم باقي|يخلص قريب|هيخلص مع|ينتهي قريب)/.test(s)) {
     return { intent: 'read', tool: 'forecast_stockout', fields: {} }
   }
-  // «بيحاسب إزاي؟ / بيسدد كل قد إيه؟ / ملف العميل»
-  if (/(بيسدد|بيحاسب|ملف العميل|تاريخ العميل|بيدفع كل)/.test(s)) {
-    // name = the words after «العميل»/«ملف» or after the verb, e.g.
-    // «ملف العميل أم حسن» / «أم حسن بتسدد كل قد إيه؟»
-    const mName = s.match(/(?:ملف|تاريخ)\s+(?:العميل\s+)?([^ ،,؟?]+(?:\s+[^ ،,؟?]+)?)/) ?? s.match(/^\s*([^ ،,؟?]+(?:\s+[^ ،,؟?]+)?)\s+(?:بتسدد|بيسدد|بيحاسب|بيدفع)/)
+  // «بيحاسب إزاي؟ / بيسدد كل قد إيه؟ / ملف العميل / كم علي أم حسن؟»
+  // R51: «كم علي/كام عليه + name» is THE everyday balance question — it used
+  // to die into the generic «النت تقيل» reply offline.
+  if (/(بيسدد|بيحاسب|ملف العميل|تاريخ العميل|بيدفع كل|كم علي(?:ه|ها)?(?: |$)|كام علي(?:ه|ها)?(?: |$)|كم عليها|كام عليها|عليه قد ايه|عليها قد ايه|رصيده كام|رصيدها كام)/.test(s)) {
+    // name = the words after «العميل»/«ملف»/«كم علي» or before the verb, e.g.
+    // «ملف العميل أم حسن» / «أم حسن بتسدد» / «كم علي أم حسن؟» / «أم حسن عليه كام؟»
+    const mName =
+      s.match(/(?:ملف|تاريخ)\s+(?:العميل\s+)?([^ ،,؟?]+(?:\s+[^ ،,؟?]+)?)/) ??
+      s.match(/^(?:كم|كام) علي(?:ه|ها)?\s+([^ ،,؟?]+(?:\s+[^ ،,؟?]+)?)/) ??
+      s.match(/^\s*([^ ،,؟?]+(?:\s+[^ ،,؟?]+)?)\s+(?:بتسدد|بيسدد|بيحاسب|بيدفع|عليه (?:كام|قد ايه)|عليها (?:كام|قد ايه))/)
     const name = mName ? mName[1].replace(/^(العميل|بتاع|من)\s*/, '').trim() : ''
     return { intent: 'read', tool: 'get_customer_history', fields: name && name.length >= 2 ? { name } : {} }
+  }
+  // R47: undo/reversal of recent work — «ملش آخر بيع» / «الغيت اللي فات» /
+  // «اعكس شرا السمنه». MUST fire before the sale/collection/period rules:
+  // «بيع» inside «اعكس بيع» is not a sale verb, and «اللي فات» here means the
+  // last OPERATION, not a period (the compare-period rule used to steal it).
+  if (
+    /(ملش|ملشت|ملشش|ملشلي|الغيت|الغي|يلغي|ايلغي|امسح|امسحلي|اعكس|اعمل عكس|عكس|اتلغى|اتلغت)( |$)/.test(s) &&
+    (/آخر|اللي فات|التاني|تاني|قبلها/.test(s) || /بيع|شرا|شراء|مصروف|تحصيل|دفعة|دفع|عملية/.test(s)) &&
+    !/مبيعات|مصاريف|تحصيلات|اسبوع|شهر|امبارح|مقارنه/.test(s)
+  ) {
+    return { intent: 'write', opType: 'reversal', fields: {} }
+  }
+  // R53: a receipt REF, read straight off the printed slip — «الفاتورة
+  // WKL-1032 دي فيها إيه؟» / «الورقة WKL 1032 كانت كام؟» / just «WKL-1032».
+  // Sits AFTER the reversal rule (which owns «اعكس WKL-…»); the write-verb
+  // guard keeps «سجل…/سدد…» on the write side. Arabic digits and a missing
+  // dash are tolerated (normalized again inside the tool).
+  const mRef = s.match(/WKL[\s-]?([0-9٠-٩]{3,})/i)
+  if (mRef && !/(سجل|سدد|دفع|ضيف|اشتري|بعت|صرف|عدل|اعكس|الغيت|امسح)/.test(s)) {
+    return { intent: 'read', tool: 'get_transaction_status', fields: { ref: `WKL-${toWesternDigits(mRef[1])}` } }
+  }
+  // R54: a phone question — «رقم تليفون أم حسن؟» / «اتصل بـ محمد تاجر الجملة» /
+  // «تليفون المورد محمد تاجر الجملة كام؟». Sits AFTER the mRef rule (a ref
+  // question carries WKL-… and wins) and BEFORE the payables substring rule.
+  const mPhone = s.match(
+    /(?:^|\s)(?:رقم(?: تليفون)?|تليفون|التليفون|جوال|اتصل)(?: ب(?:ـ)?|\s+(?:تليفون|الرقم|رقم|بتاع|بتاعت|اللي))?[\s-]*([^\s؟?]+(?:\s+[^\s؟?]+){0,4})/,
+  )
+  if (mPhone && !/(سجل|ضيف|اضف|اضيف)/.test(s)) {
+    const n = mPhone[1]
+      .replace(/^(?:ال)?(?:عميل|عميله|مورد|مورده|زبون|بتاع|بتاعت|ب)\s+/, '')
+      .replace(/\s+(?:هو|هي|ايه|إيه|كام|متاح|رقمه|رقمها)(?:\s|$)/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+    if (n.length >= 2 && !isQuestionWord(n)) {
+      return { intent: 'read', tool: 'get_contact_info', fields: { name: n } }
+    }
   }
   // «أنا أحسن من الأسبوع اللي فات؟ / قارن»
   if (/(احسن من|أحسن من|قارن|مقارنه|مقارنة|اللي فات|الشهر اللي فات|الاسبوع اللي فات)/.test(s)) {
@@ -1292,12 +1371,45 @@ function stripItemName(text: string, item: { name: string; aliases?: string | nu
   return out
 }
 
+/**
+ * R47 — an explicitly typed name («عميل اسمه أحمد زكي اللي مش معارفه») is
+ * captured greedily, so trim trailing function words that are not part of the
+ * name. A name must never be drafted as «أحمد زكي اللي».
+ */
+function cleanTypedName(raw: string): string {
+  // The capture is GREEDY (up to 25 chars of the sentence), so the name ends
+  // at the FIRST function word — «عميل اسمه محمد اللي مش معارفه آجل» → محمد.
+  const stop = new Set(['اللي', 'اللي', 'ده', 'دي', 'دى', 'مش', 'معرفه', 'معارفه', 'معرفش', 'لي', 'لـ', 'بـ', 'ل', 'ب', 'في', 'من', 'لو', 'قالي', 'يقول', 'يعني', 'يعنيها', 'اجل', 'نقدي', 'دفعت', 'دفع'])
+  const words = raw.replace(/\u0640/g, '').trim().split(/\s+/)
+  const out: string[] = []
+  for (const w of words) {
+    if (out.length > 0 && stop.has(w)) break
+    out.push(w)
+  }
+  return out.slice(0, 3).join(' ')
+}
 function findPartyMention<T extends { name: string }>(
   text: string,
   parties: T[],
   marker: 'ل' | 'من' = 'ل',
 ): T | null {
   const norm = normalizeAr(text)
+  // R47 SAFETY: an explicitly typed full name («عميل اسمه أحمد زكي») must NEVER
+  // partial-match a different registered person («أحمد عبد الرحمن») — a word
+  // hit + role word used to draft a sale onto the wrong customer (live probe).
+  // With an explicit phrase, a party matches only if the phrase is the party
+  // name itself or a leading part of it. No prefix match => NOT that party.
+  const explicitPhrase = cleanTypedName(norm.match(/اسمه\s+([ء-ي][ء-ي\s]{1,25})/)?.[1] ?? '')
+  if (explicitPhrase) {
+    const ph = explicitPhrase.split(/\s+/).filter((w) => w.length >= 2).slice(0, 3).join(' ')
+    if (ph.length >= 2) {
+      for (const p of parties) {
+        const pn = normalizeAr(p.name).replace(/\s+/g, ' ')
+        if (pn === ph || (pn.length > ph.length && pn.startsWith(ph + ' '))) return p
+      }
+      return null
+    }
+  }
   const hasRoleWord = marker === 'ل' ? norm.includes('عميل') || norm.includes('زبون') : norm.includes('مورد')
   for (const p of parties) {
     const words = normalizeAr(p.name)
@@ -1463,7 +1575,7 @@ async function suggestSupplierForItem(businessId: string, itemName: string): Pro
 const COUNTER_WORDS = new Set([
   'حبه', 'حبة', 'قطعه', 'قطعة', 'كيس', 'اكياس', 'علبه', 'علبة', 'علب', 'شريط', 'اطباق', 'طبق',
   'زجاجه', 'زجاجة', 'برطمان', 'باكيت', 'سلفه', 'صفيحه', 'صفيحة', 'كرتون', 'كرتونه', 'كرتونة',
-  'جركن', 'براد', 'كيسه', 'ربطه', 'ربطة', 'حبهان', 'سرفه', 'دوزه', 'جرعه', 'حبه',
+  'جركن', 'براد', 'كيسه', 'ربطه', 'ربطة', 'حبهان', 'سرفه', 'دوزه', 'جرعه', 'حبه', 'كونه', 'كونة',
 ])
 /** Dialect word variants for item matching (word-level, R44): the owner's
  *  word vs the catalog's word. First variant replaces the canonical. */
@@ -1514,7 +1626,17 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
       // operation (a single basket the cashier approves once), like the real POS.
       // Longest-alias-first + overlap rejection: «بانادول» alone can never fan
       // out into «بانادول أكتيف» + «بانادول شرائط» — the more specific name wins.
-      const segments = scanText.split(/\s*(?:،|,|\+|؛|;)\s*|\s+و\s+|\s+و(?=[٠-٩0-9])/).filter(Boolean)
+      // R51: a GLUED «و» before a counter word is still a conjunction:
+      // «٢ تونة وكونة زيت» = 2 tuna + 1 oil — the leading quantity must not
+      // leak into the second item (live R51: it drafted 2+2). A pre-pass inserts
+      // a space after the glued و so the «و»-splitter below sees a clean join.
+      // Counter words are pure Arabic, so this needs no regex escaping.
+      let prepped = scanText
+      for (const w of COUNTER_WORDS) {
+        prepped = prepped.split('و' + w).join('و ' + w)
+      }
+      const segments = prepped.split(/\s*(?:،|,|\+|؛|;)\s*|\s+و\s+|\s+و(?=[٠-٩0-9])/).filter(Boolean)
+
       const byItem = new Map<string, { item: Item; qty: number | null; unit: string | null }>()
       for (const seg of segments) {
         const segNorm = normalizeAr(seg)
@@ -1617,18 +1739,57 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
         const lexCustomer = type === 'sale' ? lexiconResolve(norm, memCtx.lexicon, customers)?.entity : null
         if (lexCustomer) memCtx.referencedIds.push(...memCtx.lexicon.filter((l) => l.entityRef === lexCustomer.id).map((l) => l.id))
         const customer = lexCustomer ?? (f.customerName ? matchEntity(String(f.customerName), customers)?.entity : null) ?? (type === 'sale' ? findPartyMention(text, customers) : null)
+        // R51: a basket can carry an explicitly typed name too («… لعميل اسمه
+        // أحمد زكي») — same contract as the single-item path: cash drafts
+        // under the name, credit asks to register first (the whole basket is
+        // held as a pending request; the completion re-scans the ORIGINAL
+        // text, so the lines are rebuilt identically).
+        const basketExplicitName = cleanTypedName(norm.match(/اسمه\s+([ء-ي][ء-ي\s]{1,25})/)?.[1] ?? '')
+        const basketTypedName = !customer && type === 'sale' && lexCustomer == null && (String(f.customerName ?? '').trim() || basketExplicitName)
+        if (basketTypedName && total - paid > 0 && !f.creditNewCustomer) {
+          const creditAsk = `«${basketTypedName}» مش مسجل في حسابات العملاء — عليه كام من قبل؟ قولي رقمه وأنا أسجله وأنزل عليه البيعة، أو قولي «جديد» لو من عندنا.`
+          if (ctx.conversationId) {
+            await savePendingRequest({
+              businessId: business.id,
+              conversationId: ctx.conversationId,
+              userId: user.id,
+              kind: 'credit_new_customer',
+              slots: {
+                itemId: null,
+                itemName: lines.map((l) => l.item.name).join(' + '),
+                qty: null,
+                unit: null,
+                unitLabel: null,
+                paid: 0,
+                supplierName: null,
+                suggestedSupplier: null,
+                total,
+                unitPrice: null,
+                customerName: basketTypedName,
+                openingBalance: null,
+                sourceText: text,
+              },
+              question: creditAsk,
+            })
+          }
+          return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'العميل', failMessage: creditAsk }
+        }
         const supplier = (f.supplierName ? matchEntity(String(f.supplierName), suppliers)?.entity : null) ?? (type === 'purchase' ? findPartyMention(text, suppliers, 'من') : null)
 
         const payload: Record<string, unknown> = {
           lines: lines.map((l) => ({ itemId: l.item.id, name: l.item.name, qty: l.qty, unit: l.item.unit, unitPrice: l.unitPrice, total: l.total })),
           total,
           paid,
-          ...(type === 'sale' && customer ? { customerId: customer.id, customerName: customer.name } : {}),
+          ...(type === 'sale' && customer
+            ? { customerId: customer.id, customerName: customer.name }
+            : type === 'sale' && basketTypedName
+              ? { customerName: basketTypedName }
+              : {}),
           ...(type === 'purchase' && supplier ? { supplierId: supplier.id, supplierName: supplier.name } : {}),
         }
         const ref = `WKL-DRAFT` // replaced by real ref from createDraft
         const risk = computeRisk(type, total)
-        const summary = `${type === 'sale' ? 'بيع' : 'شرا'} ${lines.map((l) => `${fmtQty(l.qty, arUnit(l.item.unit))} ${l.item.name}`).join(' + ')} بـ${egp(total)}${type === 'sale' && customer ? ` — ${customer.name}` : ''}${type === 'purchase' && supplier ? ` — من ${supplier.name}` : ''}`
+        const summary = `${type === 'sale' ? 'بيع' : 'شرا'} ${lines.map((l) => `${fmtQty(l.qty, arUnit(l.item.unit))} ${l.item.name}`).join(' + ')} بـ${egp(total)}${type === 'sale' && (customer || basketTypedName) ? ` — ${customer?.name ?? basketTypedName}` : ''}${type === 'purchase' && supplier ? ` — من ${supplier.name}` : ''}`
         // BUSINESS_DNA credit-limit enforcement (آجل on a capped party)
         let dangerNote: string | undefined
         let creditField: { label: string; value: string; hint?: string } | undefined
@@ -1645,7 +1806,11 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
           { label: 'الإجمالي', value: egp(total) },
           { label: 'مدفوع', value: egp(paid) },
           ...(total - paid > 0 ? [{ label: 'باقي (آجل)', value: egp(total - paid) }] : []),
-          ...(type === 'sale' && customer ? [{ label: 'العميل', value: customer.name }] : []),
+          ...(type === 'sale' && customer
+            ? [{ label: 'العميل', value: customer.name }]
+            : type === 'sale' && basketTypedName
+              ? [{ label: 'العميل', value: `${basketTypedName} — مش مسجل`, hint: 'مسودة نقدي بالاسم. لو عايزه مسجل قولي «سجله» وأنا أسجله' }]
+              : []),
           ...(type === 'purchase' && supplier ? [{ label: 'المورد', value: supplier.name }] : []),
           ...(creditField ? [creditField] : []),
           ...issues.map((i) => ({ label: '⚠ مش ضمن المسودة', value: i })),
@@ -1653,6 +1818,32 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
           ...lines.map((l) => ({ label: `مخزون ${l.item.name}`, value: `${fmtQty(l.item.stockQty, arUnit(l.item.unit))} ← ${fmtQty(l.item.stockQty + (type === 'sale' ? -l.qty : l.qty), arUnit(l.item.unit))}`, tone: 'neutral' as const })),
           { label: 'الخزنة', value: egp(type === 'sale' ? paid : -paid), tone: type === 'sale' ? 'good' as const : 'bad' as const },
         ], dangerNote ?? RISK_META[risk].hint)
+        // R51: the cash basket keeps the R49 promise too — «سجله» next
+        // registers the typed name.
+        if (type === 'sale' && basketTypedName && ctx.conversationId) {
+          await savePendingRequest({
+            businessId: business.id,
+            conversationId: ctx.conversationId,
+            userId: user.id,
+            kind: 'cash_new_customer',
+            slots: {
+              itemId: null,
+              itemName: lines.map((l) => l.item.name).join(' + '),
+              qty: null,
+              unit: null,
+              unitLabel: null,
+              paid,
+              supplierName: null,
+              suggestedSupplier: null,
+              total,
+              unitPrice: null,
+              customerName: basketTypedName,
+              openingBalance: null,
+              sourceText: text,
+            },
+            question: '',
+          })
+        }
         return { ok: true, opType: type, payload, summary, card, issues: issues.length > 0 ? issues : undefined }
       }
 
@@ -1890,7 +2081,10 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
         typeof f.amount === 'number' && f.amount > 0 ? f.amount : typeof f.amount === 'string' && Number(f.amount) > 0 ? Number(f.amount) : null
       const statedEgp = priceCue ? rawAmount : null
       let priceOverride = false
-      if (type === 'sale' && statedEgp != null) {
+      // R47: the owner's stated number wins for purchases too (R40 contract:
+      // «جبت ٥ كرتونة لبن بـ٣٠» — the ٣٠ IS the deal total). Live probe: the
+      // override was sale-only, so a purchase silently used catalog × qty.
+      if (statedEgp != null) {
         const statedPiastres = Math.round(statedEgp * 100)
         if (statedPiastres > 0) {
           // «بـ٤٥٠ للكيلو» is a UNIT price, not the deal total: 2 kg = ٩٠٠.
@@ -1910,12 +2104,51 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
       const lexCustomer = type === 'sale' ? lexiconResolve(norm, memCtx.lexicon, customers)?.entity : null
       if (lexCustomer) memCtx.referencedIds.push(...memCtx.lexicon.filter((l) => l.entityRef === lexCustomer.id).map((l) => l.id))
       const customer = lexCustomer ?? (customerName ? matchEntity(customerName, customers)?.entity : null) ?? (type === 'sale' ? findPartyMention(text, customers) : null)
-      const supplierName = String(f.supplierName ?? '')
+      // R47: an explicitly typed name («عميل اسمه أحمد زكي») that is NOT a
+      // registered party is the party itself: a CASH sale drafts under the
+      // typed name (no customerId), a credit sale asks to register first, and
+      // a purchase makes it a NEW supplier born at approval.
+      const explicitPartyName = cleanTypedName(norm.match(/اسمه\s+([ء-ي][ء-ي\s]{1,25})/)?.[1] ?? '')
+      const typedCustomerName = !customer && type === 'sale' && lexCustomer == null && (customerName.trim() || explicitPartyName)
+      const supplierName = String(f.supplierName ?? '') || (type === 'purchase' ? explicitPartyName : '')
       const supplier = (supplierName ? matchEntity(supplierName, suppliers)?.entity : null) ?? (type === 'purchase' ? findPartyMention(text, suppliers, 'من') : null)
       // R41: a supplier name the owner EXPLICITLY gave but that is not in the
       // book yet is a NEW supplier (born at approval) — never a hard fail,
       // never re-asked.
       const supplierIsNew = !supplier && type === 'purchase' && supplierName.trim().length >= 2
+      // R47: a CREDIT sale to an unregistered person is a debt — it must never
+      // be drafted onto a name string. Register first: one precise question.
+      // R48: the question is kept HONEST — the whole sale is held as a pending
+      // request, so the owner's ONE answer («عليه ٢٠» / «جديد») completes it:
+      // register the customer, then draft the sale on his account.
+      if (typedCustomerName && total - paid > 0 && !f.creditNewCustomer) {
+        const creditAsk = `«${typedCustomerName}» مش مسجل في حسابات العملاء — عليه كام من قبل؟ قولي رقمه وأنا أسجله وأنزل عليه البيعة، أو قولي «جديد» لو من عندنا.`
+        if (ctx.conversationId) {
+          await savePendingRequest({
+            businessId: business.id,
+            conversationId: ctx.conversationId,
+            userId: user.id,
+            kind: 'credit_new_customer',
+            slots: {
+              itemId: item.id,
+              itemName: item.name,
+              qty: qtyN,
+              unit: item.unit,
+              unitLabel: null,
+              paid: 0,
+              supplierName: null,
+              suggestedSupplier: null,
+              total,
+              unitPrice: qtyN > 0 ? total / qtyN : null,
+              customerName: typedCustomerName,
+              openingBalance: null,
+              sourceText: text,
+            },
+            question: creditAsk,
+          })
+        }
+        return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'العميل', failMessage: creditAsk }
+      }
 
       // ---- R41 «موظف حقيقي»: a purchase that leaves a balance needs its
       // counterparty. «جبت 80 سمنه ودفعتله 500 بس» — the «له» implies a
@@ -1957,7 +2190,11 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
         total,
         paid,
         ...(priceOverride ? { priceOverride: true } : {}),
-        ...(type === 'sale' && customer ? { customerId: customer.id, customerName: customer.name } : {}),
+        ...(type === 'sale' && customer
+          ? { customerId: customer.id, customerName: customer.name }
+          : type === 'sale' && typedCustomerName
+            ? { customerName: typedCustomerName }
+            : {}),
         ...(type === 'purchase' && (supplier || supplierIsNew)
           ? {
               supplierId: supplier?.id ?? null,
@@ -1968,7 +2205,7 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
       }
       const ref = `WKL-DRAFT` // replaced by real ref from createDraft
       const risk = computeRisk(type, total)
-      const summary = `${type === 'sale' ? 'بيع' : 'شرا'} ${fmtQty(qtyN, arUnit(item.unit))} ${item.name} بـ${egp(total)}${type === 'sale' && customer ? ` — ${customer.name}` : ''}${type === 'purchase' && (supplier || supplierIsNew) ? ` — من ${supplier?.name ?? supplierName.trim()}` : ''}`
+      const summary = `${type === 'sale' ? 'بيع' : 'شرا'} ${fmtQty(qtyN, arUnit(item.unit))} ${item.name} بـ${egp(total)}${type === 'sale' && (customer || typedCustomerName) ? ` — ${customer?.name ?? typedCustomerName}` : ''}${type === 'purchase' && (supplier || supplierIsNew) ? ` — من ${supplier?.name ?? supplierName.trim()}` : ''}`
       // BUSINESS_DNA credit-limit enforcement (آجل on a capped party)
       let dangerNote: string | undefined
       let creditField: { label: string; value: string; hint?: string } | undefined
@@ -1987,7 +2224,11 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
         { label: 'الإجمالي', value: egp(total) },
         { label: 'مدفوع', value: egp(paid) },
         ...(total - paid > 0 ? [{ label: 'باقي (آجل)', value: egp(total - paid) }] : []),
-        ...(type === 'sale' && customer ? [{ label: 'العميل', value: customer.name }] : []),
+        ...(type === 'sale' && customer
+          ? [{ label: 'العميل', value: customer.name }]
+          : type === 'sale' && typedCustomerName
+            ? [{ label: 'العميل', value: `${typedCustomerName} — مش مسجل`, hint: 'مسودة نقدي بالاسم. لو عايزه مسجل قولي «سجله» وأنا أسجله' }]
+            : []),
         ...(type === 'purchase' && (supplier || supplierIsNew)
           ? [{ label: 'المورد', value: `${supplier?.name ?? supplierName.trim()}${supplierIsNew ? ' — هيتسجل جديد' : ''}` }]
           : []),
@@ -1999,6 +2240,32 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
           ? [{ label: 'المستحق للمورد', value: egp(total - paid), tone: 'bad' as const }]
           : []),
       ], dangerNote ?? RISK_META[risk].hint)
+      // R49: the cash card's hint promised «لو عايزه مسجل قولي» — hold the
+      // typed name so the owner's NEXT message «سجله» knows who to register.
+      if (type === 'sale' && typedCustomerName && ctx.conversationId) {
+        await savePendingRequest({
+          businessId: business.id,
+          conversationId: ctx.conversationId,
+          userId: user.id,
+          kind: 'cash_new_customer',
+          slots: {
+            itemId: item.id,
+            itemName: item.name,
+            qty: qtyN,
+            unit: item.unit,
+            unitLabel: null,
+            paid,
+            supplierName: null,
+            suggestedSupplier: null,
+            total,
+            unitPrice: qtyN > 0 ? total / qtyN : null,
+            customerName: typedCustomerName,
+            openingBalance: null,
+            sourceText: text,
+          },
+          question: '',
+        })
+      }
       return { ok: true, opType: type, payload, summary, card }
     }
 
@@ -2329,6 +2596,47 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
         if (best) {
           original = best.op
           ref = best.op.ref
+        }
+      }
+      // R47: «آخر بيع» / «آخر شرا» — the TYPE word pins the operation type, no
+      // summary overlap needed: take the most recent op of that type.
+      if (!original) {
+        const typeMap: Array<[RegExp, string]> = [
+          [/بيع|بعت/, 'sale'],
+          [/شرا|شراء|جبت/, 'purchase'],
+          [/مصروف|صرفت|صرف/, 'expense'],
+          [/تحصيل|حصلت|قبض/, 'collection'],
+          [/دفعة|سداد|سدد|دفع/, 'payment'],
+        ]
+        for (const [re, ot] of typeMap) {
+          if (re.test(norm)) {
+            const last = await db.operation.findFirst({
+              where: { businessId: business.id, type: ot, status: 'SUCCEEDED', reversedByRef: null },
+              orderBy: { createdAt: 'desc' },
+            })
+            if (last) {
+              original = last
+              ref = last.ref
+            }
+            break
+          }
+        }
+        // «الغيت اللي فات» — no type word: the most recent FINANCIAL operation
+        // (reversable types only — a customer_add has no reversal path).
+        if (!original) {
+          const last = await db.operation.findFirst({
+            where: {
+              businessId: business.id,
+              type: { in: ['sale', 'purchase', 'expense', 'collection', 'payment', 'stock_adjustment', 'membership'] },
+              status: 'SUCCEEDED',
+              reversedByRef: null,
+            },
+            orderBy: { createdAt: 'desc' },
+          })
+          if (last) {
+            original = last
+            ref = last.ref
+          }
         }
       }
       if (!original) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'رقم العملية', failMessage: 'عايز تعكس أنهي عملية؟ اكتب رقمها (زي WKL-1006) أو اسم الصنف بتاعها' }
@@ -3032,6 +3340,34 @@ async function reflectOnDraft(args: {
   return { findings: result.findings, confidence: result.confidence, risk: danger ? 'R3' : undefined, ms: result.ms }
 }
 
+/** R66: the party a pronoun points at — the most recent known name in the
+ * last 4 messages of the conversation. «كام بقى عليها؟» after a credit turn
+ * to أم حسن is a question about أم حسن, and the rule ladder (text-only)
+ * cannot know that without this lookup. */
+function resolveAnaphoricParty(
+  history: { role: string; text: string }[],
+  customers: Customer[],
+  suppliers: Supplier[],
+): { name: string; kind: 'customer' | 'supplier' } | null {
+  const names = [
+    ...customers.map((c) => ({ name: c.name, kind: 'customer' as const })),
+    ...suppliers.map((sp) => ({ name: sp.name, kind: 'supplier' as const })),
+  ]
+  for (let i = history.length - 1; i >= Math.max(0, history.length - 4); i--) {
+    const t = normalizeAr(history[i].text)
+    if (t.length < 3) continue
+    for (const n of names) {
+      const f = normalizeAr(n.name)
+      if (f.length >= 3 && t.includes(f)) return n
+    }
+  }
+  return null
+}
+
+/** «كام عليها؟» / «كم بقي عليه كده؟» — the WHOLE message is a pronoun
+ * balance question (anchored), so it can never swallow a write sentence. */
+const PRONOUN_BALANCE_RE = /^(?:كام|كم)\s*(?:(?:بقي|بقى|باقي|باقيه|باقيها|عليها|عليه|عليهم)\s*)*(?:عليها|عليه|عليهم)\s*(?:كده|ده|دلوقتي|الحين)?\s*[؟?]*$/
+
 async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMeta): Promise<TurnResult> {
   const liveUser = await requireBusinessUser(ctx.business.id, ctx.user.id)
   const ownedConversation = await db.conversation.findFirst({ where: { id: ctx.conversationId, businessId: ctx.business.id, userId: liveUser.id }, select: { id: true } })
@@ -3170,6 +3506,89 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
 
   const norm = normalizeAr(text)
 
+  // ---- R66: anaphoric balance question — «كام بقى عليها كده؟» right after a
+  // credit turn naming أم حسن. Resolve the pronoun to the party FIRST, then
+  // answer with that party's real file (the rule ladder is text-only and
+  // would fall to a generic summary — the live-probed failure).
+  if (PRONOUN_BALANCE_RE.test(norm) && ctx.history.length >= 2) {
+    const party = resolveAnaphoricParty(ctx.history, customers, suppliers)
+    if (party) {
+      const cards = await runReadTool(
+        party.kind === 'customer' ? 'get_customer_history' : 'get_supplier_history',
+        business.id,
+        { name: party.name },
+      )
+      done(IDX.understand, `سؤال على الضمير — رجّعته على ${party.name} من آخر الكلام`)
+      done(IDX.reply)
+      const replyText = deterministicReadReply(cards)
+      await streamDeterministic(replyText, emit, 500)
+      return { replyText, card: null, cards, thinking: steps, modelLabel, actions: null }
+    }
+  }
+
+  // ---- R67: typed approval/rejection — «اعملها» / «اعتمد» / «سجلها» against
+  // the pending draft of THIS conversation, and «الغيها» / «اقفلها» to kill it.
+  // Conservative by design: only explicit action verbs (never bare «تمام»/
+  // «ايوه» — those acknowledge ANYTHING), only a pending op of this
+  // conversation, and R3 drafts keep the typed-reason button flow. The domain
+  // layer owns CAS/risk/reason enforcement (same canonical path as the
+  // confirm API), so a repeated word is a no-op, not a double execution.
+  {
+    const CONFIRM_RE = /^(?:اعملها|اعمل|اعملها يا ريس|اعملها يا وكيل|اعتمد|اعتمدتها|اعتمدها|سجلها|سجلها فورا|سجل|كمل|كملي|كمّلها|كمّل)\s*[!.،,؟?\s]*$/
+    const REJECT_RE = /^(?:الغيها|اقفلها|اقفل|اقفها|منعها|ملهاش|ملها|مش عايزها|مش عايزه)\s*[!.،,؟?\s]*$/
+    if (CONFIRM_RE.test(norm) || REJECT_RE.test(norm)) {
+      const pendingOp = await db.operation.findFirst({
+        where: { businessId: business.id, conversationId: ctx.conversationId, status: 'AWAITING_APPROVAL' },
+        orderBy: { createdAt: 'desc' },
+      })
+      if (pendingOp) {
+        const approve = CONFIRM_RE.test(norm)
+        if (approve && pendingOp.risk === 'R3') {
+          const replyText = `العملية ${pendingOp.ref} حساسة (R3) — السبب كتابة مش كلمة: اكتبه في الكارت واعتمد بالزر. مش هاعتمد حاجة حساسة من غير سبب موثّق.`
+          done(IDX.understand, 'اعتماد كتابة على عملية حساسة — مرفوض بدون سبب')
+          done(IDX.reply)
+          await streamDeterministic(replyText, emit, 400)
+          return { replyText, card: null, cards: null, thinking: steps, modelLabel, actions: null }
+        }
+        let replyText: string
+        let rows: { label: string; value: string }[]
+        let title: string
+        if (approve) {
+          const { op: updated, outcome } = await executeOperation(pendingOp.id, user.id)
+          title = outcome.ok ? `تم — موثّق ومتحقق (${updated.ref})` : `فشلت بأمان (${updated.ref})`
+          rows = [
+            { label: 'العملية', value: updated.summary },
+            { label: 'الحالة', value: updated.status },
+            ...outcome.checks.map((c) => ({ label: c.label, value: `المتوقع ${c.expected} → الفعلي ${c.actual}` })),
+            ...(outcome.failReason ? [{ label: 'سبب الفشل', value: outcome.failReason }] : []),
+          ]
+          replyText = outcome.ok
+            ? `تم — موثّق ومتحقق ✅ ${updated.ref} — ${updated.summary}`
+            : `معلش — العملية فشلت بأمان من غير أي أثر ❌ ${updated.ref}: ${outcome.failReason ?? 'راجع الكارت'}`
+        } else {
+          const updated = await rejectOperation(pendingOp.id, user.id, 'رفض من المحادثة', 'reject')
+          title = `اتلغت (${updated.ref})`
+          rows = [
+            { label: 'العملية', value: updated.summary },
+            { label: 'الحالة', value: updated.status },
+          ]
+          replyText = `تم — اتلغت المسودة ${updated.ref} من غير أي أثر 🗑️`
+        }
+        done(IDX.understand, approve ? 'اعتماد كتابة لمسودة مستنية' : 'إلغاء كتابة لمسودة مستنية')
+        done(IDX.reply)
+        await streamDeterministic(replyText, emit, 400)
+        return {
+          replyText,
+          card: null,
+          cards: [{ kind: 'kv' as const, title, rows }],
+          thinking: steps,
+          modelLabel,
+          actions: null,
+        }
+      }
+    }
+  }
+
   // ---- PRE-STEP WATERFALL (DeepSeek-Harness `agent/pre-step`, R45) ----
   // Typed hooks validate the turn BEFORE any path is admitted (direct
   // commands, deterministic passes, or the model). A hook can authoritatively
@@ -3203,15 +3622,49 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   // weak model it could get small-talk instead of work. A greeting is a
   // greeting: warm, brief, and steered straight back to the job.
   if (isGreeting(norm)) {
-    const replyText = greetingReply(user.name)
+    let replyText = greetingReply(user.name)
     done(IDX.understand, 'تحية — برد فور من غير موديل')
+    // R62: a greeting is the day's ritual — answer the hi, then hand over a
+    // zero-LLM snapshot: yesterday's sales, cash in hand, items at the
+    // shortage line, and any draft waiting on the owner's approval.
+    const today = startOfCairoDay(0)
+    const yesterdayFrom = startOfCairoDay(1)
+    const [salesYesterday, cashEntries, pendingOps] = await Promise.all([
+      db.operation.findMany({
+        where: { businessId: business.id, status: 'SUCCEEDED', type: { in: ['sale', 'membership'] }, createdAt: { gte: yesterdayFrom, lt: today } },
+      }),
+      db.cashEntry.findMany({ where: { businessId: business.id }, select: { direction: true, amount: true } }),
+      db.operation.findMany({ where: { businessId: business.id, status: 'AWAITING_APPROVAL' } }),
+    ])
+    const ySales = salesYesterday.reduce((s2, o) => s2 + opMoney(o.payload), 0)
+    const cash = business.openingCash + cashEntries.reduce((s2, e) => s2 + (e.direction === 'in' ? e.amount : -e.amount), 0)
+    const lowStock = items.filter((i) => i.stockQty <= i.lowStockThreshold).length
+    replyText += ' وشلتلك نظرة النهارده تحت 👇'
     done(IDX.reply)
     await streamDeterministic(replyText, emit, 600)
     const actions: ChatActionDTO[] = [
       { id: 'act-today', label: 'لوحة اليوم', view: 'today', icon: 'today', tone: 'primary' },
     ]
     emit({ event: 'actions', actions })
-    return { replyText, card: null, cards: null, thinking: steps, modelLabel, actions }
+    return {
+      replyText,
+      card: null,
+      cards: [
+        {
+          kind: 'kv' as const,
+          title: 'نظرة سريعة على الشغل',
+          rows: [
+            { label: 'بعت امبارح', value: egp(ySales) },
+            { label: 'كاش في الخزنة', value: egp(cash) },
+            { label: 'أصناف على حدود النقص', value: fmtQty(lowStock) },
+            ...(pendingOps.length > 0 ? [{ label: 'مسودات مستنية اعتماد', value: fmtQty(pendingOps.length) }] : []),
+          ],
+        },
+      ],
+      thinking: steps,
+      modelLabel,
+      actions,
+    }
   }
 
   // ---- PASS 0a: Identity question → instant, deterministic, zero LLM ----
@@ -3263,7 +3716,10 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   }
 
   // ---- PASS 0b: Memory save (preference OR BUSINESS_DNA rule) → instant, persisted, zero LLM ----
-  const saveRequest = extractSaveRequest(text, norm) ?? extractRuleRequest(text, norm)
+  // R65: forget wins over save — «انسى إنك حافظ إن X» carries «حافظ» and the
+  // save detector used to fire FIRST, saving the forget sentence as a rule.
+  const isForgetSentence = extractForgetRequest(text, norm) != null
+  const saveRequest = isForgetSentence ? null : (extractSaveRequest(text, norm) ?? extractRuleRequest(text, norm))
   if (saveRequest && containsMemorySecret(saveRequest.text)) {
     const replyText = 'لحمايتك، مش هحفظ كلمات مرور أو رموز أمان في ذاكرة المحادثة. استخدم مدير كلمات مرور أو إعدادات الأسرار المخصصة.'
     await streamDeterministic(replyText, emit, 400)
@@ -3350,6 +3806,8 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   // new-item purchase draft, (b) partial → one follow-up question, or
   // (c) clearly a new topic → released and handled normally.
   let pendingWriteIntent: ExtractedIntent | null = null
+  /** R48: a completed credit-to-new-customer request = TWO deterministic subs. */
+  let creditSubs: SubIntent[] | null = null
   if (ctx.conversationId) {
     const pending = await getActivePendingRequest(business.id, ctx.conversationId)
     if (pending && (pending.kind === 'purchase_new_item' || pending.kind === 'purchase_known_item')) {
@@ -3435,6 +3893,75 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         return { replyText: q, card: null, cards: null, thinking: steps, modelLabel, actions: null }
       }
     }
+    // ---- R48: CREDIT sale held for an unregistered customer ----
+    // The owner's ONE answer completes it: «عليه ٢٠» (or «جديد») → register the
+    // customer WITH his opening balance, then draft the sale on his account.
+    if (pending && pending.kind === 'credit_new_customer') {
+      const s = pending.slots
+      const name = s.customerName ?? ''
+      const balance = parseCreditBalance(norm)
+      if (balance == null) {
+        // Release ONLY on a fresh work command («بعت ٢ تونة لأم حسن» / «الغيت
+        // اللي فات») or a real READ question («كم علي أم حسن؟»). Confusion
+        // («ما ايه») or silence is NOT a new topic — a real employee simply
+        // repeats the one question he asked.
+        const readQ = (() => {
+          const r = ruleBasedIntent(text, business.type)
+          return r.intent === 'read' && !!r.tool && !/[0-9٠-٩]/.test(text)
+        })()
+        if (isCreditCommand(norm) || readQ) {
+          await markPendingDone(ctx.conversationId, 'cancelled')
+        } else {
+          const q = pendingQuestionText(s, 'credit_new_customer')
+          await savePendingRequest({
+            businessId: business.id,
+            conversationId: ctx.conversationId,
+            userId: user.id,
+            kind: 'credit_new_customer',
+            slots: s,
+            question: q,
+          })
+          done(IDX.understand, 'طلب معلق مفتوح — بكمّل الناقص')
+          done(IDX.reply)
+          await streamDeterministic(q, emit, 900)
+          return { replyText: q, card: null, cards: null, thinking: steps, modelLabel, actions: null }
+        }
+      } else {
+        creditSubs = [
+          { intent: 'write', opType: 'customer_add', fields: { name, balance }, sourceText: text },
+          {
+            intent: 'write',
+            opType: 'sale',
+            fields: {
+              ...(s.itemId ? { itemId: s.itemId } : {}),
+              itemName: s.itemName,
+              qty: s.qty,
+              customerName: name,
+              creditNewCustomer: true,
+            },
+            sourceText: s.sourceText || text,
+          },
+        ]
+        await markPendingDone(ctx.conversationId, 'resolved')
+        done(IDX.understand, `طلب معلق اكتمل — بتسجيل «${name}» وأنزل عليه البيعة`)
+      }
+    }
+    // ---- R49: CASH sale drafted under a typed name («— مش مسجل») ----
+    // The card's hint promised «لو عايزه مسجل قولي» — hold the name so the
+    // owner's «سجله» knows WHO. No open question was asked, so: a register
+    // command completes it (one customer_add draft); ANYTHING else releases
+    // silently and is handled normally. Never a re-ask.
+    if (pending && pending.kind === 'cash_new_customer') {
+      if (isRegisterCommand(norm)) {
+        const name = pending.slots.customerName ?? ''
+        const balance = parseCreditBalance(norm) ?? 0
+        pendingWriteIntent = { intent: 'write', opType: 'customer_add', fields: { name, balance } }
+        await markPendingDone(ctx.conversationId, 'resolved')
+        done(IDX.understand, `«${name}» — بتسجله عميل`)
+      } else {
+        await markPendingDone(ctx.conversationId, 'cancelled')
+      }
+    }
   }
 
   // ---- PASS 0d: DEEP RESEARCH (user-toggled OR auto-detected) — R15 ----
@@ -3445,7 +3972,15 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   // Auto-research must not hijack a concrete command («حسن دفع ٥٠ من اللي عليه»
   // contains «ليه» but is a collection, not a research question).
   const wantsAutoResearch = ctx.deepResearch !== true && RESEARCH_TRIGGER_RE.test(text)
-  const autoResearchBlocked = wantsAutoResearch && isActionableIntent(ruleBasedIntent(text, business.type))
+  const autoResearchBlocked =
+    wantsAutoResearch &&
+    (isActionableIntent(ruleBasedIntent(text, business.type)) ||
+      !!creditSubs ||
+      // R49: «سجله عليه ٥٠» is a completed pending, not a research question
+      !!pendingWriteIntent)
+  // R48: «عليه ٢٠» (a balance answer) must never trigger auto-research — a
+  // completed credit request owns the turn (creditSubs), and an answer to the
+  // open credit question is a slot fill, not a research question.
   if (ctx.deepResearch === true || (wantsAutoResearch && !autoResearchBlocked)) {
     meta.kind = 'research'
     const researchResult = await runDeepResearch({
@@ -4368,7 +4903,9 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   // R41: a COMPLETED pending request is a deterministic write — it bypasses
   // the brain loop so the model cannot re-interpret the follow-up sentence
   // («المورد … والحساب 2000» is slots for the open request, not a new command).
-  if (!pendingWriteIntent) {
+  // R48: a COMPLETED credit-to-new-customer request owns the turn — it is two
+  // deterministic writes, and the model (or deep research) must not take over.
+  if (!pendingWriteIntent && !creditSubs) {
     // All user queries flow through the genuine Gemini model via runBrainTurn() first.
     // Rule-based intent patterns are preserved strictly as an offline fallback when the LLM
     // is unreachable or times out, never intercepting when the model is operational.
@@ -4404,6 +4941,9 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       'get_price_check',
       'get_reorder_list',
       'get_profit_by_item',
+      'get_supplier_history',
+      'get_contact_info',
+      'get_financial_position',
     ])
     if (!SAFE.has(r.tool)) return null
     const hasDigits = /[0-9٠-٩۰-۹]/.test(text)
@@ -4426,6 +4966,9 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     // R41: the completed pending request OWNS this turn — no model, no rules.
     llmSingle = pendingWriteIntent
     done(IDX.understand, 'طلب معلق اكتمل — بجهّز المسودة من معلوماتك')
+  } else if (creditSubs) {
+    // R48: same guarantee for the two-draft credit completion.
+    done(IDX.understand, 'طلب معلق اكتمل — بتسجيل العميل وأنزل عليه البيعة')
   } else {
   try {
     const baseSystem = buildSystemPrompt({ business, user, items, customers, suppliers, memories: promptMemories, rules, history: ctx.history, userToolsLine })
@@ -4480,6 +5023,14 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     // Offline / LLM-failure fallback ONLY: rule-based intent
     const rule = offlineFallbackRule ?? ruleBasedIntent(text, business.type)
     llmSingle = rule
+  }
+
+  // R48: a completed credit-to-new-customer request OWNS this turn — it is
+  // exactly TWO deterministic writes (register, then sell), no model, no rules.
+  if (creditSubs) {
+    llmRaws = []
+    llmSingle = null
+    subs = creditSubs
   }
 
   // ---- PASS 2+3: Act ----

@@ -4,7 +4,8 @@ import { providerFetch, providerUrl } from '@/lib/security/provider-network'
 import { decryptProviderKey } from '@/lib/security/provider-secrets'
 
 export const AUDIO_LIMIT = 4 * 1024 * 1024
-export class SpeechError extends Error { constructor(message: string, readonly status = 422) { super(message) } }
+export class SpeechError extends Error { status = 422
+  constructor(message: string, status?: number) { super(message); this.status = status ?? 422 } }
 const types: Record<string, string> = { 'audio/webm': 'webm', 'audio/ogg': 'ogg', 'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/mp4': 'm4a', 'audio/mpeg': 'mp3' }
 export async function speechSelection() {
   const setting = await db.speechSettings.findUnique({ where: { id: 'global' }, include: { provider: true } })

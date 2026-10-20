@@ -72,7 +72,10 @@ export async function validateOperationPayload(
     if (
       Number(p.paid) < Number(p.total) &&
       !(type === 'sale'
-        ? p.customerId
+        // R48: a credit sale drafted under a TYPED name («العميل محمد») is
+        // valid — the customer is born at approval by the customer_add draft
+        // of the same turn, and the sale executor resolves the name then.
+        ? p.customerId || String(p.customerName ?? '').trim().length >= 2
         : p.supplierId || (p.newSupplier === true && String(p.supplierName ?? '').trim().length >= 2))
     ) {
       throw new OperationValidationError('الحركة الآجلة محتاجة عميل أو مورد من النشاط الحالي')

@@ -60,7 +60,7 @@ async function main() {
 
     const started = Date.now()
     try {
-      const result = await runAgentTurn(
+      const turnOne = await runAgentTurn(
         {
           business,
           user,
@@ -71,9 +71,30 @@ async function main() {
         },
         () => {},
       )
-      const ok = c.check(result)
+      // R48: multi-turn cases — the check applies to turn TWO (the answer the
+      // owner gives to the agent's question).
+      const result = c.followUp
+        ? await runAgentTurn(
+            {
+              business,
+              user,
+              conversationId: conversation.id,
+              text: c.followUp,
+              modelKey: null,
+              history: [
+                { role: 'user', text: c.text },
+                { role: 'assistant', text: turnOne.replyText },
+              ],
+            },
+            () => {},
+          )
+        : turnOne
+      // Explicit boolean: some legacy checks return a truthy non-boolean
+      // (a card object / a count) — it used to survive in-process but vanish
+      // in the JSON round-trip (suite saw ok=undefined → phantom failure).
+      const ok = Boolean(c.check(result))
       return {
-        text: c.text,
+        text: c.followUp ? `${c.text} → ${c.followUp}` : c.text,
         expect: c.expect,
         ok,
         ms: Date.now() - started,

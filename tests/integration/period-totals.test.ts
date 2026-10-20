@@ -77,15 +77,15 @@ describe('period totals — بيع/شرا/مصروف/تحصيل في فترة', 
       const egp = new Intl.NumberFormat('ar-EG', { style: 'currency', currency: 'EGP', maximumFractionDigits: 0 }).format(expected / 100)
       expect(body.includes(egp) || body.includes(new Intl.NumberFormat('ar-EG').format(expected / 100))).toBe(true)
     }
-  })
+  }, 30_000) // full agent turn — must not hit the 5s default under suite load
 
   test('a question never produces a draft', async () => {
     const { cards } = await turn('صرفت كام النهارده؟')
     expect(cards.every((c: { kind: string }) => c.kind !== 'draft')).toBe(true)
-  })
+  }, 30_000)
 
   test('a plain command still drafts (no over-correction)', async () => {
     const { cards } = await turn('صرفت ١٥٠ كهربا')
     expect(cards.some((c: { kind: string }) => c.kind === 'draft')).toBe(true)
-  })
+  }, 30_000)
 })

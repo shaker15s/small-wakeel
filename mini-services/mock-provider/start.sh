@@ -15,7 +15,12 @@ perl -MPOSIX=setsid -e '
   chdir($ARGV[0]) or die "chdir";
   open(STDOUT, ">", $ARGV[1]) or die "log";
   open(STDERR, ">&STDOUT");
-  exec("bun", "--hot", "index.ts") or die "exec";' "$(pwd)" /tmp/mock-provider.log
+  # bun when present (dev machines); plain node otherwise (node >= 22.18 runs
+  # this TS file natively — the server tail picks Bun.serve or node:http).
+  if (my $bun = `command -v bun 2>/dev/null`) { chomp $bun;
+    exec($bun, "--hot", "index.ts") or die "exec bun: $!";
+  }
+  exec("node", "index.ts") or die "exec node: $!";' "$(pwd)" /tmp/mock-provider.log
 for i in $(seq 1 20); do
   if curl -s --max-time 2 http://127.0.0.1:3031/health 2>/dev/null | grep -q '"ok":true'; then
     echo "mock-provider listening on :3031 (log: /tmp/mock-provider.log)"; exit 0
