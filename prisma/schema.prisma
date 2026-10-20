@@ -26,6 +26,7 @@ model Business {
   cashbookEntries CashbookEntry[]
   shopReminders ShopReminder[]
   workspacePreferences WorkspacePreference[]
+  notifications TaskNotification[]
   users          User[]
   items          Item[]
   customers      Customer[]
@@ -294,16 +295,54 @@ model ScheduledTask {
   whenLabel      String
   scheduledFor   DateTime
   recurrence     String? // daily | weekly | monthly
-  status         String    @default("pending") // pending | running | done | failed | cancelled
+  status         String    @default("pending") // pending | running | retry_wait | done | failed | cancelled
   result         String?
   failReason     String?
   createdAt      DateTime  @default(now())
   executedAt     DateTime?
   /** set when a runner atomically claims the task (stuck-run recovery uses it) */
   claimedAt      DateTime?
+  /** which worker holds the lease (PR-010 durable runner) */
+  leaseOwner     String?
+  /** bounded retry budget: a failed run waits until nextRetryAt, then retries */
+  attempts       Int       @default(0)
+  maxAttempts    Int       @default(3)
+  nextRetryAt    DateTime?
+  /** firing generation — keys the outbox row (crash-safe idempotency) */
+  executionCount Int       @default(0)
+  /** last COMPLETED step — the honest task box shows this + the next step */
+  lastStep       String?
+
+  notifications  TaskNotification[]
 
   @@index([status, scheduledFor])
+  @@index([status, nextRetryAt])
   @@index([businessId, userId, status])
+}
+
+// PR-010 — transactional outbox: a task's result is delivered as a separately
+// claimed/committed notification. «task finished» ≠ «notification delivered».
+// The row id is deterministic (`tn_<taskId>_<generation>`) so a crashed and
+// retried firing can never enqueue the same notification twice.
+model TaskNotification {
+  id             String    @id
+  taskId         String
+  task           ScheduledTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  businessId     String
+  business       Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  userId         String
+  conversationId String?
+  payload        String // JSON: { messageId, text, cards?, detail }
+  status         String    @default("pending") // pending | sending | sent | failed
+  attempts       Int       @default(0)
+  claimedAt      DateTime?
+  claimedBy      String?
+  failReason     String?
+  sentAt         DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([status])
+  @@index([taskId])
 }
 
 model AgentMemory {
