@@ -27,6 +27,9 @@ model Business {
   shopReminders ShopReminder[]
   workspacePreferences WorkspacePreference[]
   notifications TaskNotification[]
+  companionEnrollments CompanionEnrollment[]
+  companionDevices CompanionDevice[]
+  companionJobs CompanionJob[]
   users          User[]
   items          Item[]
   customers      Customer[]
@@ -701,4 +704,61 @@ model SpeechSettings {
   provider ModelProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
   remoteId String
   updatedAt DateTime @updatedAt
+}
+
+// PR-011 — companion enrollment: short-lived, single-use activation codes.
+model CompanionEnrollment {
+  id         String    @id @default(cuid())
+  businessId String
+  business   Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  codeHash   String    @unique
+  deviceName String
+  expiresAt  DateTime
+  usedAt     DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([businessId])
+}
+
+// PR-011 — a companion device on the owner's machine. Read-only by
+// construction: its allowlist is explicit (path roots + pinned executables),
+// the secret lives only as a sha256 hash, and revocation is immediate.
+model CompanionDevice {
+  id         String    @id @default(cuid())
+  businessId String
+  business   Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name       String
+  status     String    @default("ACTIVE") // ACTIVE | REVOKED
+  tokenHash  String
+  allowlist  String    @default("{}") // JSON: { paths: string[], cli: [{command,label}] }
+  createdAt  DateTime  @default(now())
+  activatedAt DateTime?
+  revokedAt  DateTime?
+  lastSeenAt DateTime?
+  jobs       CompanionJob[]
+
+  @@index([businessId])
+}
+
+// PR-011 — one signed, expiring, single-purpose job for a companion device.
+model CompanionJob {
+  id           String    @id @default(cuid())
+  businessId   String
+  business     Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  deviceId     String
+  device       CompanionDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  tool         String // list_dir | read_file | run_cli
+  args         String // JSON
+  status       String    @default("QUEUED") // QUEUED | CLAIMED | DELIVERED | FAILED | EXPIRED
+  nonce        String
+  envelopeHmac String
+  expiresAt    DateTime
+  claimedAt    DateTime?
+  result       String? // JSON evidence: { hash, size, lines?, truncated, exitCode? }
+  errorReason  String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @default(now())
+
+  @@index([deviceId, status])
+  @@index([businessId])
 }

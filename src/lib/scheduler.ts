@@ -18,6 +18,7 @@
 import { runCashbookFollowups } from './domain/cashbook-followups'
 import { requeueStuckNotifications, requeueStuckTasks, runDueTasks } from './tasks/runner'
 import { expireStaleDrafts } from './domain/hygiene'
+import { expireLapsedCompanionJobs } from './companion/companion'
 
 const DEFAULT_INTERVAL_MS = 60_000
 
@@ -63,6 +64,8 @@ async function sweep(): Promise<void> {
     // in-flight notifications (crash-safe exactly-once delivery).
     await requeueStuckTasks()
     await requeueStuckNotifications()
+    // Companion jobs are single-purpose and expiring — sweep what lapsed.
+    await expireLapsedCompanionJobs()
     await runCashbookFollowups()
     // Retire drafts nobody approved (default: older than 72h). Cheap and
     // idempotent; a human decision already in flight wins the atomic update.
