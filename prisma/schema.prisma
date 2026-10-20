@@ -68,10 +68,10 @@ model Item {
   aliases           String    @default("") // comma-separated alt names
   unit              String // piece | kg | gram | liter | milli | box | strip | capsule | session
   category          String    @default("")
-  costPrice         Int       @default(0) // piastres per unit
-  sellPrice         Int       @default(0) // piastres per unit
-  stockQty          Int       @default(0) // in base unit (gram for attar, etc.)
-  lowStockThreshold Int       @default(0)
+  costPrice         Int? // piastres per unit — NULL = غير مسجل (R70: unknown stays unknown, never invented)
+  sellPrice         Int? // piastres per unit — NULL = غير مسجل (R70)
+  stockQty          Int? // base unit (gram for attar, etc.) — NULL = quantity never counted (R70)
+  lowStockThreshold Int? // NULL = no threshold set (R70: a made-up threshold fakes shortages)
   barcode           String? // scanned at the counter (EAN-13 / code-128 / QR)
   batchNo           String? // pharmacy
   expiresAt         DateTime? // pharmacy

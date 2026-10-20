@@ -171,8 +171,12 @@ export async function upsertCatalogItemInDb(params: {
     return { created: false, item }
   }
 
-  const sell = sellPrice ?? 5000
-  const cost = costPrice ?? Math.round(sell * 0.75)
+  // R70 / PR-001 (الخطة النهائية v2 — «المجهول ما يصيرش حقيقة»): unknown
+  // financial facts are stored as NULL, NEVER invented. The old defaults
+  // (sell=50 EGP, cost=75% of sell, stock=10, threshold=5) became real
+  // operating facts: margin "calculated" against a fake cost, stock checks
+  // against a phantom 10, shortages at a made-up level. category/unit are
+  // classification labels, not financial facts — defaults are fine there.
   const item = await db.item.create({
     data: {
       businessId: params.businessId,
@@ -180,10 +184,10 @@ export async function upsertCatalogItemInDb(params: {
       aliases: cleanName,
       category: params.category?.trim() || 'عام',
       unit: params.unit?.trim() || 'piece',
-      sellPrice: sell,
-      costPrice: cost,
-      stockQty: params.stockQty ?? 10,
-      lowStockThreshold: params.minQty ?? 5,
+      sellPrice,
+      costPrice,
+      stockQty: params.stockQty != null ? Math.round(Number(params.stockQty)) : null,
+      lowStockThreshold: params.minQty != null ? Math.round(Number(params.minQty)) : null,
     },
   })
   invalidateCatalog(params.businessId)

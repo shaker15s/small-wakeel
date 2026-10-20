@@ -1054,19 +1054,28 @@ async function runPluginStep(
         }
       }
 
-      const totalStockCost = items.reduce((s, i) => s + Math.round(i.stockQty * i.costPrice), 0)
-      const totalStockRetail = items.reduce((s, i) => s + Math.round(i.stockQty * i.sellPrice), 0)
-      const lowItems = items.filter((i) => i.stockQty <= i.lowStockThreshold)
-      const deadItems = items.filter((i) => i.stockQty > i.lowStockThreshold && (soldMap.get(i.id) ?? 0) === 0)
-      const deadCapital = deadItems.reduce((s, i) => s + Math.round(i.stockQty * i.costPrice), 0)
+      // R70 / PR-001: totals cover KNOWN values; unpriced/uncounted items are
+      // counted, never valued at a fake 0.
+      let totalStockCost = 0
+      let totalStockRetail = 0
+      let unknownValueItems = 0
+      for (const i of items) {
+        if (i.stockQty == 0) continue
+        if (i.stockQty == null || i.costPrice == null) unknownValueItems += 1
+        else totalStockCost += Math.round((i.stockQty as number) * (i.costPrice as number))
+        if (i.stockQty != null && i.sellPrice != null) totalStockRetail += Math.round((i.stockQty as number) * (i.sellPrice as number))
+      }
+      const lowItems = items.filter((i) => i.stockQty != null && i.lowStockThreshold != null && i.stockQty <= i.lowStockThreshold)
+      const deadItems = items.filter((i) => i.stockQty != null && i.lowStockThreshold != null && i.stockQty > i.lowStockThreshold && (soldMap.get(i.id) ?? 0) === 0)
+      const deadCapital = deadItems.reduce((s, i) => s + Math.round((i.stockQty as number) * (i.costPrice ?? 0)), 0)
 
       // ABC classification by stock value + sales velocity
       const enriched = items
         .map((it) => {
-          const stockVal = Math.round(it.stockQty * it.costPrice)
+          const stockVal = it.stockQty != null && it.costPrice != null ? Math.round((it.stockQty as number) * (it.costPrice as number)) : null
           const sold30 = soldMap.get(it.id) ?? 0
-          const rev30 = Math.round(sold30 * it.sellPrice)
-          const score = rev30 * 2 + stockVal
+          const rev30 = it.sellPrice != null ? Math.round(sold30 * (it.sellPrice as number)) : null
+          const score = (rev30 ?? 0) * 2 + (stockVal ?? 0)
           return { it, stockVal, sold30, rev30, score }
         })
         .sort((a, b) => b.score - a.score)
@@ -1076,7 +1085,7 @@ async function runPluginStep(
           kind: 'kv',
           title: `${plugin.name} — ملخص صحة المخزون وتصنيف ABC`,
           rows: [
-            { label: 'إجمالي قيمة المخزون بالتكلفة', value: egp(totalStockCost) },
+            { label: 'إجمالي قيمة المخزون بالتكلفة', value: unknownValueItems > 0 ? `${egp(totalStockCost)} (+ ${unknownValueItems} صنف غير مسجل)` : egp(totalStockCost) },
             { label: 'القيمة البيعية المتوقعة للمخزون', value: egp(totalStockRetail), tone: 'good' },
             { label: 'الأصناف تحت حد الأمان (نواقص)', value: `${fmtQty(lowItems.length)} من ${fmtQty(items.length)}`, tone: lowItems.length > 0 ? 'bad' : 'good' },
             { label: 'رأس المال المجمد في أصناف راكدة', value: deadCapital > 0 ? `${egp(deadCapital)} (${fmtQty(deadItems.length)} صنف)` : 'لا يوجد ركود', tone: deadCapital > 0 ? 'neutral' : 'good' },
@@ -1095,14 +1104,14 @@ async function runPluginStep(
           ],
           rows: enriched.slice(0, step.params?.limit ?? 10).map((row, idx) => {
             const abc = idx < Math.ceil(enriched.length * 0.25) ? 'فئة A (حيوي)' : idx < Math.ceil(enriched.length * 0.65) ? 'فئة B (متوسط)' : 'فئة C'
-            const isLow = row.it.stockQty <= row.it.lowStockThreshold
-            const isDead = row.sold30 === 0 && row.it.stockQty > row.it.lowStockThreshold
+            const isLow = row.it.stockQty != null && row.it.lowStockThreshold != null && row.it.stockQty <= row.it.lowStockThreshold
+            const isDead = row.sold30 === 0 && row.it.stockQty != null && row.it.lowStockThreshold != null && row.it.stockQty > row.it.lowStockThreshold
             return {
               name: row.it.name,
               class: abc,
-              stock: fmtQty(row.it.stockQty, arUnit(row.it.unit)),
+              stock: row.it.stockQty == null ? 'غير مسجل' : fmtQty(row.it.stockQty, arUnit(row.it.unit)),
               sold30: fmtQty(row.sold30, arUnit(row.it.unit)),
-              stockVal: egp(row.stockVal),
+              stockVal: row.stockVal == null ? 'غير مسجل' : egp(row.stockVal),
               status: isLow ? 'اطلب فوراً' : isDead ? 'روّج بعرض خاص' : 'رصيد مثالي',
             }
           }),
@@ -1156,7 +1165,8 @@ async function runPluginStep(
       let rev7d = 0
       let rev30d = 0
       let profit30d = 0
-      const itemStats = new Map<string, { name: string; unit: string; qty: number; rev: number; profit: number }>()
+      let profitUnknownLines = 0
+      const itemStats = new Map<string, { name: string; unit: string; qty: number; rev: number; profit: number; unknownProfit: number }>()
 
       for (const op of ops30) {
         try {
@@ -1175,15 +1185,19 @@ async function runPluginStep(
             const it = itemMap.get(id)
             const q = Number(l.qty ?? 0)
             const lineRev = Number(l.total ?? (q * Number(l.unitPrice ?? it?.sellPrice ?? 0)))
-            const lineCost = it ? Math.round(q * it.costPrice) : 0
-            const lineProfit = lineRev - lineCost
-            profit30d += lineProfit
+            // R70 / PR-001: an unrecorded cost means an UNKNOWN line profit —
+            // counted, never assumed 0.
+            const lineCost = it && it.costPrice != null ? Math.round(q * it.costPrice) : null
+            const lineProfit = lineCost != null ? lineRev - lineCost : null
+            if (lineProfit != null) profit30d += lineProfit
+            else if (it) profitUnknownLines += 1
 
             if (it && q > 0) {
-              const prev = itemStats.get(id) ?? { name: it.name, unit: it.unit, qty: 0, rev: 0, profit: 0 }
+              const prev = itemStats.get(id) ?? { name: it.name, unit: it.unit, qty: 0, rev: 0, profit: 0, unknownProfit: 0 }
               prev.qty += q
               prev.rev += lineRev
-              prev.profit += lineProfit
+              prev.profit += lineProfit ?? 0
+              if (lineProfit == null) prev.unknownProfit += 1
               itemStats.set(id, prev)
             }
           }
@@ -1203,7 +1217,7 @@ async function runPluginStep(
             { label: 'مبيعات اليوم', value: egp(revToday), tone: 'good' },
             { label: 'مبيعات آخر ٧ أيام', value: egp(rev7d) },
             { label: 'إجمالي مبيعات ٣٠ يوم', value: egp(rev30d), tone: 'good' },
-            { label: 'مجمل الربح المحقق (٣٠ يوم)', value: egp(profit30d), tone: profit30d > 0 ? 'good' : 'neutral' },
+            { label: 'مجمل الربح المحقق (٣٠ يوم)', value: profitUnknownLines > 0 ? `${egp(profit30d)} (أقصى تقدير — ${profitUnknownLines} بنود غير مسجل تكلفتها)` : egp(profit30d), tone: profit30d > 0 ? 'good' : 'neutral' },
             { label: 'عدد الفواتير المنفذة', value: `${fmtQty(ops30.length)} عملية بيع` },
           ],
         },
@@ -1221,7 +1235,7 @@ async function runPluginStep(
             name: r.name,
             qty: fmtQty(r.qty, arUnit(r.unit)),
             rev: egp(r.rev),
-            profit: egp(r.profit),
+            profit: r.unknownProfit > 0 ? `${egp(r.profit)} (جزء غير مسجل)` : egp(r.profit),
             velocity: r.qty >= 10 ? 'سريع جداً (Star)' : r.qty >= 4 ? 'نشط' : 'هادئ',
           })),
         },
@@ -1233,7 +1247,7 @@ async function runPluginStep(
           category: 'opportunity',
           level: 'info',
           title: `«${topStar.name}» يتصدر المبيعات بـ ${egp(topStar.rev)}`,
-          detail: `بلاجن «${plugin.name}» يوصي بتأمين مخزون إضافي من «${topStar.name}» لأنه يحقق أعلى مساهمة ربحية (${egp(topStar.profit)}).`,
+          detail: `بلاجن «${plugin.name}» يوصي بتأمين مخزون إضافي من «${topStar.name}» لأنه يحقق أعلى مساهمة ربحية (${topStar.unknownProfit > 0 ? `${egp(topStar.profit)} (جزء غير مسجل)` : egp(topStar.profit)}).`,
           metricValue: egp(topStar.rev),
           sourcePlugin: plugin.name,
           actionLabel: 'فحص رصيد الصنف',
@@ -1247,13 +1261,15 @@ async function runPluginStep(
     case 'margin_audit': {
       const items = await db.item.findMany({ where: { businessId }, orderBy: { name: 'asc' } })
       const minMargin = step.params?.minMarginPct ?? 20
-
+      // R70 / PR-001: margin needs BOTH prices recorded; unpriced items are
+      // reported as unpriced, not audited at a fake 0.
+      const unpricedCount = items.filter((it) => it.sellPrice == null || it.costPrice == null).length
       const rows = items
-        .filter((it) => it.sellPrice > 0)
+        .filter((it) => it.sellPrice != null && it.costPrice != null && it.sellPrice > 0)
         .map((it) => {
-          const spread = it.sellPrice - it.costPrice
-          const marginPct = Math.round((spread / it.sellPrice) * 100)
-          const targetSell = it.costPrice > 0 ? Math.ceil(it.costPrice / (1 - 0.25) / 50) * 50 : it.sellPrice
+          const spread = (it.sellPrice as number) - (it.costPrice as number)
+          const marginPct = Math.round((spread / (it.sellPrice as number)) * 100)
+          const targetSell = (it.costPrice as number) > 0 ? Math.ceil((it.costPrice as number) / (1 - 0.25) / 50) * 50 : (it.sellPrice as number)
           return {
             it,
             spread,
@@ -1278,12 +1294,15 @@ async function runPluginStep(
         ],
         rows: rows.slice(0, step.params?.limit ?? 10).map((r) => ({
           name: r.it.name,
-          cost: egp(r.it.costPrice),
-          sell: egp(r.it.sellPrice),
+          cost: egp(r.it.costPrice as number),
+          sell: egp(r.it.sellPrice as number),
           margin: `${r.marginPct}%`,
-          suggested: r.isLowMargin && r.targetSell > r.it.sellPrice ? egp(r.targetSell) : 'تسعير ممتاز',
+          suggested: r.isLowMargin && r.targetSell > (r.it.sellPrice as number) ? egp(r.targetSell) : 'تسعير ممتاز',
         })),
-        footer: [{ label: 'أصناف تحت الهامش المستهدف', value: `${fmtQty(lowMarginCount)} صنف` }],
+        footer: [
+          { label: 'أصناف تحت الهامش المستهدف', value: `${fmtQty(lowMarginCount)} صنف` },
+          ...(unpricedCount > 0 ? [{ label: 'أصناف غير مسجل أسعارها', value: `${fmtQty(unpricedCount)} صنف (غير قابلة للفحص)` }] : []),
+        ],
       })
 
       if (lowMarginCount > 0) {
@@ -1396,7 +1415,10 @@ async function runPluginStep(
         const days = Math.ceil((it.expiresAt.getTime() - Date.now()) / 86400000)
         return days <= windowDays
       })
-      const atRiskCost = expiring.reduce((s, it) => s + Math.round(it.stockQty * it.costPrice), 0)
+      // R70 / PR-001: the at-risk value needs a recorded qty AND cost.
+      const atRiskKnown = expiring.filter((it) => it.stockQty != null && it.costPrice != null)
+      const atRiskCost = atRiskKnown.reduce((s, it) => s + Math.round((it.stockQty as number) * (it.costPrice as number)), 0)
+      const atRiskUnknown = expiring.length - atRiskKnown.length
 
       cards.push({
         kind: 'table',
@@ -1412,10 +1434,10 @@ async function runPluginStep(
           name: it.name,
           batch: it.batchNo ?? '—',
           expiry: it.expiresAt ? arDate(it.expiresAt) : '—',
-          stock: fmtQty(it.stockQty, arUnit(it.unit)),
-          riskValue: egp(Math.round(it.stockQty * it.costPrice)),
+          stock: it.stockQty == null ? 'غير مسجل' : fmtQty(it.stockQty, arUnit(it.unit)),
+          riskValue: it.stockQty == null || it.costPrice == null ? 'غير مسجل' : egp(Math.round((it.stockQty as number) * (it.costPrice as number))),
         })),
-        footer: [{ label: 'إجمالي القيمة المعرضة لانتهاء الصلاحية', value: egp(atRiskCost) }],
+        footer: [{ label: 'إجمالي القيمة المعرضة لانتهاء الصلاحية', value: atRiskUnknown > 0 ? `${egp(atRiskCost)} (+ ${atRiskUnknown} صنف غير مسجل)` : egp(atRiskCost) }],
       })
       break
     }

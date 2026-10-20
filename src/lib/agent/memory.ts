@@ -592,7 +592,8 @@ export async function getSnapshot(business: Business): Promise<BusinessSnapshot>
   const expensesToday = sumOf('expense')
   const inn = cashEntries.filter((e) => e.direction === 'in').reduce((s, e) => s + e.amount, 0)
   const out = cashEntries.filter((e) => e.direction === 'out').reduce((s, e) => s + e.amount, 0)
-  const low = items.filter((it) => it.stockQty <= it.lowStockThreshold)
+  // R70 / PR-001: a shortage needs a COUNTED stock and a recorded threshold.
+  const low = items.filter((it) => it.stockQty != null && it.lowStockThreshold != null && it.stockQty <= it.lowStockThreshold)
   const receivables = customers.filter((c) => c.balance > 0).sort((a, b) => b.balance - a.balance)
   const expiring = items.filter((it) => {
     if (!it.expiresAt) return false

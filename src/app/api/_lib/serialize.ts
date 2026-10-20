@@ -82,7 +82,7 @@ export function serializeItem(item: Item): ItemDTO {
     batchNo: item.batchNo,
     expiresAt: item.expiresAt ? item.expiresAt.toISOString() : null,
     daysToExpiry: item.expiresAt ? daysFromTodayCairo(item.expiresAt) : null,
-    valueAtCost: item.stockQty * item.costPrice,
+    valueAtCost: item.stockQty != null && item.costPrice != null ? item.stockQty * item.costPrice : null,
   }
 }
 

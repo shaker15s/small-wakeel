@@ -61,15 +61,17 @@ export interface ItemDTO {
   aliases: string
   unit: string
   category: string
-  costPrice: number // piastres
-  sellPrice: number
-  stockQty: number
-  lowStockThreshold: number
+  // R70 / PR-001: financial facts are NULL until recorded — the UI renders
+  // «غير مسجل» for null. Zero is a real, known value; null is "never entered".
+  costPrice: number | null // piastres
+  sellPrice: number | null
+  stockQty: number | null
+  lowStockThreshold: number | null
   barcode?: string | null
   batchNo?: string | null
   expiresAt?: string | null
   daysToExpiry?: number | null
-  valueAtCost?: number
+  valueAtCost?: number | null
 }
 
 export interface CustomerDTO {
@@ -240,7 +242,7 @@ export type ResultCardDTO =
 
 /** «تأمل وكيل» — one deterministic finding about a draft. */
 export interface AuditFindingDTO {
-  code: 'price_anomaly' | 'oversell' | 'duplicate' | 'overpay' | 'expense_spike' | 'unknown_entity'
+  code: 'price_anomaly' | 'oversell' | 'unknown_stock' | 'duplicate' | 'overpay' | 'expense_spike' | 'unknown_entity'
   severity: 'info' | 'warn' | 'danger'
   message: string
   detail?: string

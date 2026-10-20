@@ -232,10 +232,12 @@ function executorsFor(db: Prisma.TransactionClient): Record<OpType, Executor> {
   async function apply(queries: Prisma.PrismaPromise<unknown>[]) {
     for (const query of queries) await query
   }
-  async function stockBefore(itemId: string): Promise<number> {
+  async function stockBefore(itemId: string): Promise<number | null> {
     const it = await db.item.findUniqueOrThrow({ where: { id: itemId }, select: { stockQty: true } })
     return it.stockQty
   }
+  // R70 / PR-001: an uncounted stock is «غير مسجل» — never 0, never a number.
+  const stockStr = (v: number | null, unit: string) => (v == null ? 'غير مسجل' : fmtQty(v, unit))
   async function cashNet(businessId: string): Promise<number> {
     const entries = await db.cashEntry.findMany({ where: { businessId }, select: { direction: true, amount: true } })
     const inn = entries.filter((e) => e.direction === 'in').reduce((s, e) => s + e.amount, 0)
@@ -264,15 +266,25 @@ function executorsFor(db: Prisma.TransactionClient): Record<OpType, Executor> {
       (i) => normName(i.name) === normName(name) || (i.aliases ?? '').split(',').some((a) => a.trim() && normName(a) === normName(name)),
     )
     if (found) return found
+    // R70 / PR-001: a newborn item inherits ONLY what the approved
+    // transaction actually says. cost = the purchase price (explicit, or
+    // exactly implied by total/qty); sell = only if the owner stated one —
+    // it is NEVER copied from cost (the old code made cost the "sell" price).
+    // stockQty 0 is a fact here (the item is created by this purchase, whose
+    // qty the executor adds); the threshold is left unknown until the owner
+    // sets it — a made-up 5 would fake shortages.
+    const impliedCost = p.unitPrice != null ? Math.round(Number(p.unitPrice))
+      : Number(p.qty) > 0 && Number(p.total) % Number(p.qty) === 0 ? Math.round(Number(p.total) / Number(p.qty))
+      : null
     const created = await db.item.create({
       data: {
         businessId,
         name,
         unit: String(p.unit ?? 'piece'),
-        costPrice: Math.round(Number(p.unitPrice ?? 0)),
-        sellPrice: Math.round(Number(p.sellPrice ?? p.unitPrice ?? 0)),
+        costPrice: impliedCost,
+        sellPrice: p.sellPrice != null ? Math.round(Number(p.sellPrice)) : null,
         stockQty: 0,
-        lowStockThreshold: 0,
+        lowStockThreshold: null,
       },
     })
     invalidateCatalog()
@@ -294,7 +306,7 @@ function executorsFor(db: Prisma.TransactionClient): Record<OpType, Executor> {
       // Multi-line basket (chat drafts with 2+ items — one approval, one receipt)
       const rawLines = Array.isArray(p.lines) ? (p.lines as Record<string, unknown>[]).filter((l) => l && typeof l === 'object') : []
       if (rawLines.length > 0) {
-        type Res = { itemId: string; name: string; qty: number; unit: string; unitPrice: number; total: number; before: number }
+        type Res = { itemId: string; name: string; qty: number; unit: string; unitPrice: number; total: number; before: number | null }
         const resolved: Res[] = []
         for (const l of rawLines) {
           const item = await db.item.findUnique({ where: { id: String(l.itemId) } })
@@ -307,6 +319,11 @@ function executorsFor(db: Prisma.TransactionClient): Record<OpType, Executor> {
           resolved.push({ itemId: item.id, name: item.name, qty, unit: item.unit, unitPrice, total: Math.round(qty * unitPrice), before: await stockBefore(item.id) })
         }
         for (const r of resolved) {
+          // R70 / PR-001: selling against an UNCOUNTED stock is forbidden —
+          // we can't promise availability we never measured. Ask for a count.
+          if (r.before == null) {
+            return { ok: false, checks: [], effects: [], failReason: `الكمية في مخزون «${r.name}» غير مسجلة — اعمل جرد (سجّل الكمية الموجودة) الأول عشان نتأكد إن في كمية تكفي` }
+          }
           if (r.qty > r.before) {
             return { ok: false, checks: [], effects: [], failReason: `الكمية المطلوبة من ${r.name} (${fmtQty(r.qty, arUnit(r.unit))}) أكبر من المتاح (${fmtQty(r.before, arUnit(r.unit))})` }
           }
@@ -338,16 +355,18 @@ function executorsFor(db: Prisma.TransactionClient): Record<OpType, Executor> {
           ...(customerId && remaining !== 0 ? [db.customer.update({ where: { id: customerId }, data: { balance: { increment: remaining } } })] : []),
         ])
 
-        // Verification read-back — per line
+        // Verification read-back — per line (before is non-null here: the
+        // uncounted-stock guard above rejected the whole basket otherwise)
         const checks: { label: string; expected: string; actual: string; pass: boolean }[] = []
         const effects: { label: string; value: string; tone: 'good' | 'bad' | 'neutral' }[] = []
         let allOk = true
         for (const r of resolved) {
+          const b = r.before as number
           const after = await stockBefore(r.itemId)
-          const pass = after === r.before - Math.round(r.qty)
+          const pass = after !== null && after === b - Math.round(r.qty)
           allOk = allOk && pass
-          checks.push({ label: `مخزون ${r.name} نقص بالمقدار الصح`, expected: fmtQty(r.before - r.qty, arUnit(r.unit)), actual: fmtQty(after, arUnit(r.unit)), pass })
-          effects.push({ label: `مخزون ${r.name}`, value: `${fmtQty(r.before, arUnit(r.unit))} ← ${fmtQty(after, arUnit(r.unit))}`, tone: 'neutral' })
+          checks.push({ label: `مخزون ${r.name} نقص بالمقدار الصح`, expected: fmtQty(b - r.qty, arUnit(r.unit)), actual: stockStr(after, arUnit(r.unit)), pass })
+          effects.push({ label: `مخزون ${r.name}`, value: `${stockStr(b, arUnit(r.unit))} ← ${stockStr(after, arUnit(r.unit))}`, tone: 'neutral' })
         }
         effects.push(
           { label: 'خزنة (قبض)', value: egp(paid), tone: 'good' },
@@ -364,6 +383,10 @@ function executorsFor(db: Prisma.TransactionClient): Record<OpType, Executor> {
       const total = Number(p.total ?? 0)
       if (total <= 0) return { ok: false, checks: [], effects: [], failReason: 'الإجمالي لازم يكون أكبر من صفر' }
       const before = await stockBefore(itemId)
+      // R70 / PR-001: never sell against an uncounted stock (unknown ≠ 0).
+      if (before == null) {
+        return { ok: false, checks: [], effects: [], failReason: `الكمية في مخزون «${item.name}» غير مسجلة — اعمل جرد (سجّل الكمية الموجودة) الأول عشان نتأكد إن في كمية تكفي` }
+      }
       if (qtyN > before) {
         return { ok: false, checks: [], effects: [], failReason: `الكمية المطلوبة (${fmtQty(qtyN, arUnit(item.unit))}) أكبر من المتاح (${fmtQty(before, arUnit(item.unit))})` }
       }
@@ -398,13 +421,13 @@ function executorsFor(db: Prisma.TransactionClient): Record<OpType, Executor> {
       // Verification read-back
       const after = await stockBefore(itemId)
       const checks = [
-        { label: 'المخزون نقص بالمقدار الصح', expected: fmtQty(before - qtyN, arUnit(item.unit)), actual: fmtQty(after, arUnit(item.unit)), pass: after === before - Math.round(qtyN) },
+        { label: 'المخزون نقص بالمقدار الصح', expected: fmtQty(before - qtyN, arUnit(item.unit)), actual: stockStr(after, arUnit(item.unit)), pass: after !== null && after === before - Math.round(qtyN) },
       ]
       return {
         ok: checks.every((c) => c.pass),
         checks,
         effects: [
-          { label: `مخزون ${item.name}`, value: `${fmtQty(before, arUnit(item.unit))} ← ${fmtQty(after, arUnit(item.unit))}`, tone: 'neutral' },
+          { label: `مخزون ${item.name}`, value: `${stockStr(before, arUnit(item.unit))} ← ${stockStr(after, arUnit(item.unit))}`, tone: 'neutral' },
           { label: 'خزنة (قبض)', value: egp(paid), tone: 'good' },
           ...(remaining > 0 && customerId ? [{ label: `رصيد العميل (آجل)`, value: egp(remaining), tone: 'bad' as const }] : []),
         ],
@@ -415,7 +438,7 @@ function executorsFor(db: Prisma.TransactionClient): Record<OpType, Executor> {
       // Multi-line basket (chat drafts with 2+ items)
       const rawLines = Array.isArray(p.lines) ? (p.lines as Record<string, unknown>[]).filter((l) => l && typeof l === 'object') : []
       if (rawLines.length > 0) {
-        type Res = { itemId: string; name: string; qty: number; unit: string; unitPrice: number; total: number; before: number }
+        type Res = { itemId: string; name: string; qty: number; unit: string; unitPrice: number; total: number; before: number | null; explicitPrice: boolean }
         const resolved: Res[] = []
         for (const l of rawLines) {
           let item: Item | null
@@ -432,7 +455,7 @@ function executorsFor(db: Prisma.TransactionClient): Record<OpType, Executor> {
           const qty = Number(l.qty ?? 0)
           if (!(qty > 0)) return { ok: false, checks: [], effects: [], failReason: `كمية ${item.name} لازم تكون أكبر من صفر` }
           const unitPrice = Number(l.unitPrice ?? item.costPrice)
-          resolved.push({ itemId: item.id, name: item.name, qty, unit: item.unit, unitPrice, total: Math.round(qty * unitPrice), before: await stockBefore(item.id) })
+          resolved.push({ itemId: item.id, name: item.name, qty, unit: item.unit, unitPrice, total: Math.round(qty * unitPrice), before: await stockBefore(item.id), explicitPrice: l.unitPrice != null })
         }
         const total = resolved.reduce((s, r) => s + r.total, 0)
         if (total <= 0) return { ok: false, checks: [], effects: [], failReason: 'الإجمالي لازم يكون أكبر من صفر' }
@@ -442,8 +465,14 @@ function executorsFor(db: Prisma.TransactionClient): Record<OpType, Executor> {
 
         // ONE transaction: stock movements, the cash entry and the supplier
         // balance either all land or none do (no half-executed purchase).
+        // R70 / PR-001: an explicit purchase price resolves an UNKNOWN cost —
+        // the approved transaction is a trusted source. It only fills a NULL
+        // (updateMany where costPrice IS NULL): a known cost is never
+        // overwritten here — changing a known cost is a price_change decision.
+        // Unknown stock stays unknown (unknown + qty ≠ known total).
         await apply([
           ...resolved.map((r) => db.item.update({ where: { id: r.itemId }, data: { stockQty: { increment: Math.round(r.qty) } } })),
+          ...resolved.filter((r) => r.explicitPrice).map((r) => db.item.updateMany({ where: { id: r.itemId, costPrice: null }, data: { costPrice: r.unitPrice } })),
           db.cashEntry.create({ data: { businessId, direction: 'out', amount: paid, reason: `شرا — ${resolved.map((r) => r.name).join(' + ')}`, ref } }),
           ...(supplierId && remaining !== 0 ? [db.supplier.update({ where: { id: supplierId }, data: { balance: { increment: remaining } } })] : []),
         ])
@@ -464,10 +493,21 @@ function executorsFor(db: Prisma.TransactionClient): Record<OpType, Executor> {
         let allOk = true
         for (const r of resolved) {
           const after = await stockBefore(r.itemId)
-          const pass = after === r.before + Math.round(r.qty)
+          // R70 / PR-001: an uncounted stock stays unknown after the purchase
+          // — we can't claim a total we never measured.
+          const pass = r.before == null ? after === null : after === r.before + Math.round(r.qty)
           allOk = allOk && pass
-          checks.push({ label: `مخزون ${r.name} زاد بالمقدار الصح`, expected: fmtQty(r.before + r.qty, arUnit(r.unit)), actual: fmtQty(after, arUnit(r.unit)), pass })
-          effects.push({ label: `مخزون ${r.name}`, value: `${fmtQty(r.before, arUnit(r.unit))} ← ${fmtQty(after, arUnit(r.unit))}`, tone: 'neutral' })
+          checks.push({
+            label: r.before == null ? `الشراء اتسجل (مخزون ${r.name} غير مسجل)` : `مخزون ${r.name} زاد بالمقدار الصح`,
+            expected: stockStr(r.before == null ? null : r.before + r.qty, arUnit(r.unit)),
+            actual: stockStr(after, arUnit(r.unit)),
+            pass,
+          })
+          effects.push({
+            label: `مخزون ${r.name}`,
+            value: r.before == null ? `غير مسجل (شُترى ${fmtQty(r.qty, arUnit(r.unit))})` : `${stockStr(r.before, arUnit(r.unit))} ← ${stockStr(after, arUnit(r.unit))}`,
+            tone: 'neutral',
+          })
         }
         effects.push(
           { label: 'خزنة (دفع)', value: egp(-paid), tone: 'bad' },
@@ -500,9 +540,16 @@ function executorsFor(db: Prisma.TransactionClient): Record<OpType, Executor> {
       const remaining = total - paid
       const supplierId = await resolveSupplierId(businessId, p)
       const before = await stockBefore(itemId)
+      // R70 / PR-001: an explicit (or exactly implied) purchase price resolves
+      // an UNKNOWN cost — the approved transaction is a trusted source. Only
+      // fills NULL; a known cost is a price_change decision, never overwritten.
+      const costToRecord = p.unitPrice != null ? Math.round(Number(p.unitPrice))
+        : qtyN > 0 && total % qtyN === 0 ? Math.round(total / qtyN)
+        : null
 
       const txOps: Prisma.PrismaPromise<unknown>[] = [
         db.item.update({ where: { id: itemId }, data: { stockQty: { increment: Math.round(qtyN) } } }),
+        ...(costToRecord != null ? [db.item.updateMany({ where: { id: itemId, costPrice: null }, data: { costPrice: costToRecord } })] : []),
         db.cashEntry.create({ data: { businessId, direction: 'out', amount: paid, reason: `شرا — ${item.name}`, ref } }),
       ]
       if (supplierId && remaining !== 0) {
@@ -517,14 +564,20 @@ function executorsFor(db: Prisma.TransactionClient): Record<OpType, Executor> {
       if (supplierId) p.supplierId = supplierId
 
       const after = await stockBefore(itemId)
+      // R70 / PR-001: uncounted stock stays unknown after the purchase.
       const checks = [
-        { label: 'المخزون زاد بالمقدار الصح', expected: fmtQty(before + qtyN, arUnit(item.unit)), actual: fmtQty(after, arUnit(item.unit)), pass: after === before + Math.round(qtyN) },
+        {
+          label: before == null ? `الشراء اتسجل (مخزون ${item.name} غير مسجل)` : 'المخزون زاد بالمقدار الصح',
+          expected: stockStr(before == null ? null : before + qtyN, arUnit(item.unit)),
+          actual: stockStr(after, arUnit(item.unit)),
+          pass: before == null ? after === null : after === before + Math.round(qtyN),
+        },
       ]
       return {
         ok: checks.every((c) => c.pass),
         checks,
         effects: [
-          { label: `مخزون ${item.name}`, value: `${fmtQty(before, arUnit(item.unit))} ← ${fmtQty(after, arUnit(item.unit))}`, tone: 'neutral' },
+          { label: `مخزون ${item.name}`, value: before == null ? `غير مسجل (شُترى ${fmtQty(qtyN, arUnit(item.unit))})` : `${stockStr(before, arUnit(item.unit))} ← ${stockStr(after, arUnit(item.unit))}`, tone: 'neutral' },
           { label: 'خزنة (دفع)', value: egp(-paid), tone: 'bad' },
           ...(remaining > 0 && supplierId ? [{ label: 'المستحق للمورد', value: egp(remaining), tone: 'bad' as const }] : []),
         ],
@@ -596,19 +649,28 @@ function executorsFor(db: Prisma.TransactionClient): Record<OpType, Executor> {
       const item = await db.item.findUnique({ where: { id: itemId } })
       if (!item) return { ok: false, checks: [], effects: [], failReason: 'الصنف مش موجود' }
       const delta = Number(p.delta ?? 0)
-      if (delta === 0) return { ok: false, checks: [], effects: [], failReason: 'التسوية صفر' }
+      const absolute = p.absolute === true
+      if (delta === 0 && !absolute) return { ok: false, checks: [], effects: [], failReason: 'التسوية صفر' }
       const before = await stockBefore(itemId)
-      const after = before + Math.round(delta)
-      if (after < 0) return { ok: false, checks: [], effects: [], failReason: `التسوية هتخلي المخزون بالسالب (${fmtQty(after, arUnit(item.unit))})` }
+      // R70 / PR-001: unknown + delta = still unknown (never a fabricated
+      // number) — EXCEPT `absolute`, a stocktake: the counted quantity is the
+      // new known fact (this is how an unrecorded shelf gets recorded).
+      const after = absolute ? Math.round(delta) : before == null ? null : before + Math.round(delta)
+      if (after != null && after < 0) return { ok: false, checks: [], effects: [], failReason: `التسوية هتخلي المخزون بالسالب (${fmtQty(after, arUnit(item.unit))})` }
       const reason = String(p.reason ?? '')
       if (!reason) return { ok: false, checks: [], effects: [], failReason: 'التسوية محتاجة سبب إلزامي' }
       await db.item.update({ where: { id: itemId }, data: { stockQty: after } })
       const verified = await stockBefore(itemId)
-      const checks = [{ label: 'المخزون اتعدل بالمقدار المطلوب', expected: fmtQty(after, arUnit(item.unit)), actual: fmtQty(verified, arUnit(item.unit)), pass: verified === after }]
+      const checks = [{
+        label: absolute ? `الجرد اتسجل (مخزون ${item.name} اتعرف)` : before == null ? `التسوية اتسجلت (مخزون ${item.name} غير مسجل)` : 'المخزون اتعدل بالمقدار المطلوب',
+        expected: stockStr(after, arUnit(item.unit)),
+        actual: stockStr(verified, arUnit(item.unit)),
+        pass: verified === after,
+      }]
       return {
         ok: checks.every((c) => c.pass),
         checks,
-        effects: [{ label: `مخزون ${item.name}`, value: `${fmtQty(before, arUnit(item.unit))} ← ${fmtQty(after, arUnit(item.unit))}`, tone: delta > 0 ? 'good' : 'bad' }],
+        effects: [{ label: `مخزون ${item.name}`, value: `${stockStr(before, arUnit(item.unit))} ← ${stockStr(after, arUnit(item.unit))}${absolute ? '' : ` (${delta > 0 ? '+' : ''}${delta})`}`, tone: delta > 0 ? 'good' : 'bad' }],
       }
     },
 
@@ -619,25 +681,28 @@ function executorsFor(db: Prisma.TransactionClient): Record<OpType, Executor> {
       if (!itemId || newPrice <= 0) return { ok: false, checks: [], effects: [], failReason: 'محتاج الصنف والسعر الجديد' }
       const item = await db.item.findFirst({ where: { id: itemId, businessId } })
       if (!item) return { ok: false, checks: [], effects: [], failReason: 'الصنف مش موجود' }
-      const before = fieldName === 'costPrice' ? item.costPrice : item.sellPrice
+      // R70 / PR-001: `before` may be NULL (never recorded) — «غير مسجل»,
+      // and recording a first price is neutral news, not a «good/bad» move.
+      const before: number | null = fieldName === 'costPrice' ? item.costPrice : item.sellPrice
+      const priceStr = (v: number | null) => (v == null ? 'غير مسجل' : egp(v))
       if (before === newPrice) {
         return {
           ok: true,
-          checks: [{ label: 'السعر', expected: egp(newPrice), actual: egp(before), pass: true }],
+          checks: [{ label: 'السعر', expected: egp(newPrice), actual: priceStr(before), pass: true }],
           effects: [{ label: `سعر ${item.name}`, value: 'مش متغيّر — كان كده بالفعل', tone: 'neutral' }],
         }
       }
       await db.item.update({ where: { id: item.id }, data: { [fieldName]: newPrice } })
       const after = fieldName === 'costPrice' ? (await db.item.findUniqueOrThrow({ where: { id: item.id } })).costPrice : (await db.item.findUniqueOrThrow({ where: { id: item.id } })).sellPrice
-      const checks = [{ label: 'السعر الجديد اتسجل', expected: egp(newPrice), actual: egp(after), pass: after === newPrice }]
+      const checks = [{ label: 'السعر الجديد اتسجل', expected: egp(newPrice), actual: priceStr(after), pass: after === newPrice }]
       return {
         ok: checks.every((c) => c.pass),
         checks,
         effects: [
           {
             label: `${fieldName === 'costPrice' ? 'تكلفة' : 'سعر بيع'} ${item.name}`,
-            value: `${egp(before)} ← ${egp(after)}`,
-            tone: after > before ? 'good' : 'bad',
+            value: `${priceStr(before)} ← ${priceStr(after)}`,
+            tone: before == null || after == null ? 'neutral' : after > before ? 'good' : 'bad',
           },
         ],
       }
@@ -839,7 +904,10 @@ function executorsFor(db: Prisma.TransactionClient): Record<OpType, Executor> {
           const lines = Array.isArray(op.lines) ? (op.lines as Record<string, unknown>[]).filter((l) => l && typeof l === 'object') : []
           const movements = lines.length ? lines : [op]
           for (const line of movements) {
-            if (await stockBefore(String(line.itemId)) < Number(line.qty)) {
+            // R70 / PR-001: an unknown stock can't go negative — the guard
+            // only applies to COUNTED stock.
+            const cur = await stockBefore(String(line.itemId))
+            if (cur != null && cur < Number(line.qty)) {
               return { ok: false, checks: [], effects: [], failReason: 'عكس الشرا هيخلي المخزون بالسالب' }
             }
           }
@@ -901,7 +969,8 @@ function executorsFor(db: Prisma.TransactionClient): Record<OpType, Executor> {
       const inverseNet = inverseEntries.reduce((sum, entry) => sum + (entry.direction === 'in' ? entry.amount : -entry.amount), 0)
       checks.push({ label: 'حركة العكس مرتبطة بالمرجع الصحيح', expected: egp(cashDelta), actual: egp(inverseNet), pass: inverseEntries.length === (cashDelta === 0 ? 0 : 1) && inverseNet === cashDelta })
       for (const stock of stocks) {
-        const expected = stock.before + (original.type === 'sale' ? stock.qty : -stock.qty)
+        // R70 / PR-001: an uncounted stock stays unknown through the reversal.
+        const expected = stock.before == null ? null : stock.before + (original.type === 'sale' ? stock.qty : -stock.qty)
         const actual = await stockBefore(stock.id)
         checks.push({ label: 'مخزون العكس', expected: String(expected), actual: String(actual), pass: actual === expected })
       }

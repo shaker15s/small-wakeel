@@ -149,11 +149,12 @@ async function gymExpiringCards(businessId: string): Promise<ResultCardDTO[]> {
 }
 
 function itemRow(it: Item): Record<string, string> {
+  // R70 / PR-001: unknown facts show «غير مسجل» — never a fake 0.
   return {
     name: it.name,
-    stock: fmtQty(it.stockQty, arUnit(it.unit)),
-    threshold: fmtQty(it.lowStockThreshold, arUnit(it.unit)),
-    price: egp(it.sellPrice),
+    stock: it.stockQty == null ? 'غير مسجل' : fmtQty(it.stockQty, arUnit(it.unit)),
+    threshold: it.lowStockThreshold == null ? 'غير مسجل' : fmtQty(it.lowStockThreshold, arUnit(it.unit)),
+    price: it.sellPrice == null ? 'غير مسجل' : egp(it.sellPrice),
     ...(it.expiresAt ? { expiry: arDate(it.expiresAt) } : {}),
   }
 }
@@ -362,9 +363,12 @@ export async function runReadTool(
       // the owner had to do the subtraction in his head. Cost of goods sold is
       // priced from the catalog (same rule as get_profit_by_item); memberships
       // and collections carry no COGS.
-      const costById = new Map<string, number>(items.map((i: { id: string; costPrice: number }) => [i.id, i.costPrice] as [string, number]))
-      const costByName = new Map<string, number>(items.map((i: { name: string; costPrice: number }) => [i.name, i.costPrice] as [string, number]))
+      // R70 / PR-001: a NULL cost is «غير مسجل» — it is NOT 0. Unknown-cost
+      // lines are counted as unknown; net profit becomes the max possible.
+      const costById = new Map<string, number | null>(items.map((i: { id: string; costPrice: number | null }) => [i.id, i.costPrice] as [string, number | null]))
+      const costByName = new Map<string, number | null>(items.map((i: { name: string; costPrice: number | null }) => [i.name, i.costPrice] as [string, number | null]))
       let cogs = 0
+      let cogsUnknownLines = 0
       for (const op of ops) {
         if (op.type !== 'sale') continue
         const p = readPayload(op.payload) as {
@@ -375,12 +379,14 @@ export async function runReadTool(
         }
         if (Array.isArray(p.lines) && p.lines.length > 0) {
           for (const l of p.lines) {
-            const unitCost = (l.itemId ? costById.get(l.itemId) : undefined) ?? (l.name ? costByName.get(l.name) : undefined) ?? 0
-            cogs += Math.round(Number(l.qty ?? 0) * unitCost)
+            const unitCost = (l.itemId ? costById.get(l.itemId) : undefined) ?? (l.name ? costByName.get(l.name) : undefined) ?? null
+            if (unitCost == null) cogsUnknownLines += 1
+            else cogs += Math.round(Number(l.qty ?? 0) * unitCost)
           }
         } else if (p.qty) {
-          const unitCost = (p.itemId ? costById.get(p.itemId) : undefined) ?? (p.itemName ? costByName.get(p.itemName) : undefined) ?? 0
-          cogs += Math.round(Number(p.qty) * unitCost)
+          const unitCost = (p.itemId ? costById.get(p.itemId) : undefined) ?? (p.itemName ? costByName.get(p.itemName) : undefined) ?? null
+          if (unitCost == null) cogsUnknownLines += 1
+          else cogs += Math.round(Number(p.qty) * unitCost)
         }
       }
       const sales = sum('sale')
@@ -395,8 +401,8 @@ export async function runReadTool(
             { label: 'مصروفات', value: egp(expenses) },
             { label: 'تحصيلات', value: egp(sum('collection')) },
             { label: 'اشتراكات', value: egp(sum('membership')) },
-            { label: 'تكلفة البضاعة المباعة', value: egp(cogs) },
-            { label: 'صافي الربح', value: egp(sales - cogs - expenses) },
+            { label: 'تكلفة البضاعة المباعة', value: cogsUnknownLines > 0 ? `${egp(cogs)} (فيهم ${cogsUnknownLines} بنود غير مسجل تكلفتهم)` : egp(cogs) },
+            { label: 'صافي الربح', value: cogsUnknownLines > 0 ? `${egp(sales - cogs - expenses)} (أقصى تقدير — تكلفة غير مسجلة)` : egp(sales - cogs - expenses) },
             { label: 'عدد العمليات', value: fmtQty(ops.length) },
           ],
         },
@@ -507,7 +513,16 @@ export async function runReadTool(
         biz.openingCash + cashEntries.reduce((s, e) => s + (e.direction === 'in' ? e.amount : -e.amount), 0)
       const receivables = customers.reduce((s, c) => s + Math.max(0, c.balance), 0)
       const payables = suppliers.reduce((s, sp) => s + Math.max(0, sp.balance), 0)
-      const stock = items.reduce((s, it) => s + it.stockQty * it.costPrice, 0)
+      // R70 / PR-001: an item whose qty or cost is unrecorded has an UNKNOWN
+      // value — counted, never silently priced at 0. A genuinely empty shelf
+      // (stock 0) is a known zero, not an unknown.
+      let stock = 0
+      let unknownStockItems = 0
+      for (const it of items) {
+        if (it.stockQty == 0) continue // nothing on the shelf → 0
+        if (it.stockQty == null || it.costPrice == null) unknownStockItems += 1
+        else stock += it.stockQty * it.costPrice
+      }
       const net = cash + receivables + stock - payables
       return [
         {
@@ -516,7 +531,7 @@ export async function runReadTool(
           rows: [
             { label: 'كاش في الخزنة', value: egp(cash) },
             { label: 'فلوسي عند العملاء', value: egp(receivables) },
-            { label: 'بضاعة على الرف (تكلفة)', value: egp(stock) },
+            { label: 'بضاعة على الرف (تكلفة)', value: unknownStockItems > 0 ? `${egp(stock)} (فيهم ${unknownStockItems} صنف غير مسجل كمية أو تكلفة)` : egp(stock) },
             { label: 'علينا للموردين', value: `- ${egp(payables)}` },
             { label: 'رأس المال العامل التقريبي', value: egp(net) },
           ],
@@ -533,17 +548,32 @@ export async function runReadTool(
       // owner asks this before every restock, and it must be exact: cost basis
       // and retail basis, never the same number twice.
       const items = await db.item.findMany({ where: { businessId } })
-      const cost = items.reduce((s, it) => s + it.stockQty * it.costPrice, 0)
-      const retail = items.reduce((s, it) => s + it.stockQty * it.sellPrice, 0)
-      const low = items.filter((it) => it.stockQty <= it.lowStockThreshold).length
+      // R70 / PR-001: totals cover the KNOWN items only; unpriced/uncounted
+      // items are reported as such — an unknown cost is never a 0 in a sum.
+      let cost = 0
+      let retail = 0
+      let unknownCostItems = 0
+      let unknownRetailItems = 0
+      for (const it of items) {
+        if (it.stockQty != 0) {
+          if (it.stockQty == null || it.costPrice == null) unknownCostItems += 1
+          else cost += it.stockQty * it.costPrice
+        }
+        if (it.stockQty != 0) {
+          if (it.stockQty == null || it.sellPrice == null) unknownRetailItems += 1
+          else retail += it.stockQty * it.sellPrice
+        }
+      }
+      const low = items.filter((it) => it.stockQty != null && it.lowStockThreshold != null && it.stockQty <= it.lowStockThreshold).length
+      const partial = unknownCostItems > 0 || unknownRetailItems > 0
       return [
         {
           kind: 'kv',
           title: 'قيمة المخزون',
           rows: [
-            { label: 'بسعر التكلفة', value: egp(cost) },
-            { label: 'لو اتباع بسعر البيع', value: egp(retail) },
-            { label: 'الربح المتوقع', value: egp(retail - cost) },
+            { label: 'بسعر التكلفة', value: unknownCostItems > 0 ? `${egp(cost)} (+ ${unknownCostItems} صنف غير مسجل)` : egp(cost) },
+            { label: 'لو اتباع بسعر البيع', value: unknownRetailItems > 0 ? `${egp(retail)} (+ ${unknownRetailItems} صنف غير مسجل)` : egp(retail) },
+            { label: 'الربح المتوقع', value: partial ? `${egp(Math.max(0, retail - cost))} (على المسجل بس)` : egp(retail - cost) },
             { label: 'عدد الأصناف', value: fmtQty(items.length) },
             { label: 'أصناف ناقصة', value: fmtQty(low) },
           ],
@@ -632,10 +662,12 @@ export async function runReadTool(
         for (const l of linesOf(p)) sold.add(l.name)
         if (typeof p.itemId === 'string') soldIds.add(p.itemId)
       }
+      // R70 / PR-001: an unpriced dead item is still dead — its trapped
+      // capital is UNKNOWN, not 0.
       const dead = items
         .filter((it) => !sold.has(it.name) && !soldIds.has(it.id))
-        .map((it) => ({ it, value: it.stockQty * it.costPrice }))
-        .sort((a, b) => b.value - a.value)
+        .map((it) => ({ it, value: it.stockQty == null || it.costPrice == null ? null : it.stockQty * it.costPrice }))
+        .sort((a, b) => (b.value ?? -1) - (a.value ?? -1))
       if (dead.length === 0) {
         return [
           {
@@ -645,7 +677,8 @@ export async function runReadTool(
           },
         ]
       }
-      const capital = dead.reduce((s, d) => s + d.value, 0)
+      const capital = dead.reduce((s, d) => s + (d.value ?? 0), 0)
+      const unknownCapital = dead.filter((d) => d.value == null).length
       return [
         {
           kind: 'table',
@@ -655,9 +688,9 @@ export async function runReadTool(
             { key: 'stock', label: 'الرصيد' },
             { key: 'value', label: 'رأس المال المحبوس' },
           ],
-          rows: dead.slice(0, 12).map(({ it, value }) => ({ name: it.name, stock: fmtQty(it.stockQty, arUnit(it.unit)), value: egp(value) })),
+          rows: dead.slice(0, 12).map(({ it, value }) => ({ name: it.name, stock: it.stockQty == null ? 'غير مسجل' : fmtQty(it.stockQty, arUnit(it.unit)), value: value == null ? 'غير مسجل' : egp(value) })),
           footer: [
-            { label: 'إجمالي المحبوس', value: egp(capital) },
+            { label: 'إجمالي المحبوس', value: unknownCapital > 0 ? `${egp(capital)} (+ ${unknownCapital} صنف غير مسجل تكلفته)` : egp(capital) },
             { label: 'عدد الأصناف', value: fmtQty(dead.length) },
           ],
         },
@@ -775,17 +808,21 @@ export async function runReadTool(
       // «أشتري إيه؟» — the question that turns a stock report into a purchase
       // order. Quantity targets 2× the alert threshold, priced at cost.
       const items = await db.item.findMany({ where: { businessId } })
+      // R70 / PR-001: a stockout is only real when the stock was COUNTED —
+      // an uncounted item (NULL) is not «out of stock», and a NULL cost means
+      // the order line is unpriced (shown, not summed as 0).
       const need = items
-        .filter((it) => it.lowStockThreshold > 0 && it.stockQty <= it.lowStockThreshold)
+        .filter((it) => it.lowStockThreshold != null && it.lowStockThreshold > 0 && it.stockQty != null && it.stockQty <= it.lowStockThreshold)
         .map((it) => {
-          const qty = Math.max(1, it.lowStockThreshold * 2 - it.stockQty)
-          return { it, qty, cost: qty * it.costPrice }
+          const qty = Math.max(1, (it.lowStockThreshold as number) * 2 - (it.stockQty as number))
+          return { it, qty, cost: it.costPrice != null ? qty * (it.costPrice as number) : null }
         })
-        .sort((a, b) => b.cost - a.cost)
+        .sort((a, b) => (b.cost ?? -1) - (a.cost ?? -1))
       if (need.length === 0) {
         return [{ kind: 'kv', title: 'ورقة الطلب', rows: [{ label: 'النتيجة', value: 'مفيش صنف محتاج طلب دلوقتي — كله فوق حد التنبيه' }] }]
       }
-      const total = need.reduce((s, r) => s + r.cost, 0)
+      const total = need.reduce((s, r) => s + (r.cost ?? 0), 0)
+      const unpriced = need.filter((r) => r.cost == null).length
       return [
         {
           kind: 'table',
@@ -798,12 +835,12 @@ export async function runReadTool(
           ],
           rows: need.slice(0, 12).map(({ it, qty, cost }) => ({
             name: it.name,
-            stock: fmtQty(it.stockQty, arUnit(it.unit)),
+            stock: it.stockQty == null ? 'غير مسجل' : fmtQty(it.stockQty, arUnit(it.unit)),
             qty: fmtQty(qty, arUnit(it.unit)),
-            cost: cost > 0 ? egp(cost) : '—',
+            cost: cost != null && cost > 0 ? egp(cost) : 'غير مسجل',
           })),
           footer: [
-            { label: 'الإجمالي التقديري', value: egp(total) },
+            { label: 'الإجمالي التقديري', value: unpriced > 0 ? `${egp(total)} (+ ${unpriced} صنف غير مسجل تكلفته)` : egp(total) },
             { label: 'عدد الأصناف', value: fmtQty(need.length) },
           ],
         },
@@ -818,7 +855,10 @@ export async function runReadTool(
         db.operation.findMany({ where: { businessId, status: 'SUCCEEDED', type: 'sale', createdAt: { gte: since } }, select: { payload: true } }),
         db.item.findMany({ where: { businessId }, select: { name: true, costPrice: true } }),
       ])
-      const costOf = new Map(items.map((i) => [i.name, i.costPrice]))
+      // R70 / PR-001: an unknown cost means an UNKNOWN profit — never
+      // revenue−0. Such rows are listed (the sale happened) but flagged,
+      // sorted after the known ones, and excluded from the total.
+      const costOf = new Map(items.map((i) => [i.name, i.costPrice] as [string, number | null]))
       const book = new Map<string, { qty: number; revenue: number }>()
       for (const o of ops) {
         for (const l of linesOf(readPayload(o.payload))) {
@@ -828,17 +868,20 @@ export async function runReadTool(
       }
       const rows = [...book.entries()]
         .map(([name, v]) => {
-          const cost = (costOf.get(name) ?? 0) * v.qty
+          const unitCost = costOf.get(name) ?? null
+          if (unitCost == null) return { name, qty: v.qty, revenue: v.revenue, cost: null as number | null, profit: null as number | null, pct: null as number | null }
+          const cost = unitCost * v.qty
           const profit = v.revenue - cost
           return { name, qty: v.qty, revenue: v.revenue, cost, profit, pct: v.revenue > 0 ? (profit / v.revenue) * 100 : 0 }
         })
-        .sort((a, b) => b.profit - a.profit)
+        .sort((a, b) => (b.profit ?? -Infinity) - (a.profit ?? -Infinity))
         .slice(0, 10)
       const period = days === 1 ? 'النهارده' : days === 7 ? 'آخر ٧ أيام' : `آخر ${fmtQty(days)} يوم`
       if (rows.length === 0) {
         return [{ kind: 'kv', title: `الربح من كل صنف · ${period}`, rows: [{ label: 'النتيجة', value: 'مفيش مبيعات في الفترة دي' }] }]
       }
-      const totalProfit = rows.reduce((s, r) => s + r.profit, 0)
+      const totalProfit = rows.reduce((s, r) => s + (r.profit ?? 0), 0)
+      const unknownProfit = rows.filter((r) => r.profit == null).length
       return [
         {
           kind: 'table',
@@ -854,10 +897,10 @@ export async function runReadTool(
             name: r.name,
             qty: fmtQty(r.qty),
             revenue: egp(r.revenue),
-            profit: egp(r.profit),
-            pct: `${fmtQty(Math.round(r.pct))}٪`,
+            profit: r.profit == null ? 'غير مسجل' : egp(r.profit),
+            pct: r.pct == null ? 'غير مسجل' : `${fmtQty(Math.round(r.pct))}٪`,
           })),
-          footer: [{ label: 'إجمالي ربح أعلى ١٠', value: egp(totalProfit) }],
+          footer: [{ label: 'إجمالي ربح أعلى ١٠', value: unknownProfit > 0 ? `${egp(totalProfit)} (فيهم ${unknownProfit} غير مسجل تكلفته)` : egp(totalProfit) }],
         },
       ]
     }
@@ -866,8 +909,11 @@ export async function runReadTool(
       // Selling below cost is silent, permanent loss. The owner never sees it
       // in a sales report — only in the cash drawer at the end of the month.
       const items = await db.item.findMany({ where: { businessId, stockQty: { gt: 0 }, costPrice: { gt: 0 } } })
+      // R70 / PR-001: an unpriced-for-sale item can't be margin-checked —
+      // it is skipped, not assumed to sell at 0.
       const bad = items
-        .map((it) => ({ it, margin: it.sellPrice - it.costPrice, pct: it.costPrice > 0 ? ((it.sellPrice - it.costPrice) / it.costPrice) * 100 : 0 }))
+        .filter((it) => it.sellPrice != null)
+        .map((it) => ({ it, margin: (it.sellPrice as number) - (it.costPrice as number), pct: (it.costPrice as number) > 0 ? (((it.sellPrice as number) - (it.costPrice as number)) / (it.costPrice as number)) * 100 : 0 }))
         .filter((x) => x.pct < 15)
         .sort((a, b) => a.pct - b.pct)
       if (bad.length === 0) {
@@ -892,8 +938,8 @@ export async function runReadTool(
           ],
           rows: bad.slice(0, 12).map(({ it, margin, pct }) => ({
             name: it.name,
-            cost: egp(it.costPrice),
-            sell: egp(it.sellPrice),
+            cost: egp(it.costPrice as number),
+            sell: egp(it.sellPrice as number),
             margin: margin <= 0 ? `${egp(margin)} (خسارة)` : `${egp(margin)} · ${fmtQty(Math.round(pct))}٪`,
           })),
           footer: [
@@ -908,7 +954,10 @@ export async function runReadTool(
       const items = await db.item.findMany({
         where: { businessId, stockQty: { lte: biz.type === 'pharmacy' ? 999999999 : 999999999 } },
       })
-      const low = items.filter((it) => it.stockQty <= it.lowStockThreshold)
+      // R70 / PR-001: a shortage is only real when BOTH the stock and the
+      // threshold were recorded. An uncounted item is not «out of stock», and
+      // an item with no threshold has no alert to fire.
+      const low = items.filter((it) => it.stockQty != null && it.lowStockThreshold != null && it.stockQty <= it.lowStockThreshold)
       return [
         {
           kind: 'table',
@@ -952,7 +1001,7 @@ export async function runReadTool(
             { key: 'expiry', label: 'الصلاحية' },
             { key: 'stock', label: 'الرصيد' },
           ],
-          rows: in30.map((it) => ({ name: it.name, batch: it.batchNo ?? '—', expiry: arDate(it.expiresAt!), stock: fmtQty(it.stockQty, arUnit(it.unit)) })),
+          rows: in30.map((it) => ({ name: it.name, batch: it.batchNo ?? '—', expiry: arDate(it.expiresAt!), stock: it.stockQty == null ? 'غير مسجل' : fmtQty(it.stockQty, arUnit(it.unit)) })),
           footer: [{ label: 'إجمالي', value: fmtQty(in30.length) }],
         },
       ]
@@ -1243,24 +1292,29 @@ export async function runReadTool(
           perItem.set(l.itemId, cur)
         }
       }
+      // R70 / PR-001: margin needs a recorded sell price AND a recorded cost.
+      // Missing either → «غير مسجل», never a number computed off 0.
       const rows = items
         .map((it) => {
           const sold = perItem.get(it.id)
+          const sell = it.sellPrice
           const cost = it.costPrice
-          const margin = it.sellPrice - cost
-          const pct = it.sellPrice > 0 ? Math.round((margin / it.sellPrice) * 100) : 0
-          const profit = sold ? Math.round(sold.revenue - cost * sold.qty) : 0
+          const known = sell != null && cost != null
+          const margin = known ? (sell as number) - (cost as number) : null
+          const pct = known && (sell as number) > 0 ? Math.round((((sell as number) - (cost as number)) / (sell as number)) * 100) : null
+          const profit = known && sold ? Math.round(sold.revenue - (cost as number) * sold.qty) : null
           return { it, sold, margin, pct, profit }
         })
-        .filter((r) => r.it.sellPrice > 0)
-        .sort((a, b) => b.profit - a.profit)
+        .filter((r) => r.it.sellPrice != null)
+        .sort((a, b) => (b.profit ?? -Infinity) - (a.profit ?? -Infinity))
       const sold = rows.filter((r) => r.sold && r.sold.qty > 0).slice(0, 6)
       // No sales in the window? Never answer with an empty table — fall back to
       // the PRICE margins of the catalog, clearly labelled as such. «مفيش
       // مبيعات» is not a useful answer to «بربح كام؟» at 9am before the day starts.
       const best = sold.length > 0 ? sold : rows.slice(0, 6)
-      const thin = rows.filter((r) => r.pct < 12).slice(0, 5)
-      const totalProfit = rows.reduce((s2, r) => s2 + r.profit, 0)
+      const thin = rows.filter((r) => r.pct != null && r.pct < 12).slice(0, 5)
+      const totalProfit = rows.reduce((s2, r) => s2 + (r.profit ?? 0), 0)
+      const unknownMargin = rows.filter((r) => r.profit == null).length
       return [
         {
           kind: 'table',
@@ -1276,11 +1330,11 @@ export async function runReadTool(
             name: r.it.name,
             sold: `${fmtQty(r.sold?.qty ?? 0, arUnit(r.it.unit))}`,
             revenue: egp(r.sold?.revenue ?? 0),
-            profit: egp(r.profit),
-            pct: `${r.pct}%`,
+            profit: r.profit == null ? 'غير مسجل' : egp(r.profit),
+            pct: r.pct == null ? 'غير مسجل' : `${r.pct}%`,
           })),
           footer: [
-            { label: 'إجمالي الربح التقديري', value: egp(totalProfit) },
+            { label: 'إجمالي الربح التقديري', value: unknownMargin > 0 ? `${egp(totalProfit)} (فيهم ${unknownMargin} صنف غير مسجل تكلفته)` : egp(totalProfit) },
             { label: 'أقل الأصناف ربحية', value: thin.length > 0 ? thin.map((r) => r.it.name).join('، ') : 'مفيش' },
             ...(sold.length === 0
               ? [{ label: 'ملاحظة', value: `مفيش مبيعات في آخر ${days} يوم — الجدول بيعرض هوامش الأسعار` }]
@@ -1305,9 +1359,9 @@ export async function runReadTool(
         .map((it) => {
           const soldQty = soldMap.get(it.id) ?? 0
           const perDay = soldQty / days
-          const daysLeft = perDay > 0 ? it.stockQty / perDay : null
-          // order enough for the next 30 days, never less than the threshold
-          const suggested = perDay > 0 ? Math.max(Math.ceil(perDay * 30 - it.stockQty), 0) : 0
+          // R70 / PR-001: you cannot forecast depletion of an UNCOUNTED shelf.
+          const daysLeft = perDay > 0 && it.stockQty != null ? (it.stockQty as number) / perDay : null
+          const suggested = perDay > 0 && it.stockQty != null ? Math.max(Math.ceil(perDay * 30 - (it.stockQty as number)), 0) : 0
           return { it, perDay, daysLeft, suggested }
         })
         .filter((r) => r.daysLeft != null && r.daysLeft <= 10)
@@ -1325,7 +1379,7 @@ export async function runReadTool(
           ],
           rows: atRisk.slice(0, 8).map((r) => ({
             name: r.it.name,
-            left: fmtQty(r.it.stockQty, arUnit(r.it.unit)),
+            left: r.it.stockQty == null ? 'غير مسجل' : fmtQty(r.it.stockQty, arUnit(r.it.unit)),
             rate: r.perDay.toFixed(2),
             days: r.daysLeft != null ? `${Math.max(0, Math.floor(r.daysLeft))} يوم` : '—',
             order: r.suggested > 0 ? fmtQty(r.suggested, arUnit(r.it.unit)) : '—',
@@ -1749,18 +1803,19 @@ export async function runReadTool(
           sold.set(line.itemId, (sold.get(line.itemId) ?? 0) + line.qty)
         }
       }
+      // R70 / PR-001: uncounted stock (NULL) can't be depleted or priced.
       const atRisk = items
         .map((it) => {
           const perDay = (sold.get(it.id) ?? 0) / days
-          return { it, daysLeft: perDay > 0 ? it.stockQty / perDay : null }
+          return { it, daysLeft: perDay > 0 && it.stockQty != null ? (it.stockQty as number) / perDay : null }
         })
         .filter((r) => r.daysLeft != null && r.daysLeft <= 7)
         .sort((a, b) => (a.daysLeft ?? 0) - (b.daysLeft ?? 0))
 
       // Dead stock: real money sitting on the shelf with no movement.
       const dead = items
-        .filter((it) => !sold.has(it.id) && it.stockQty > 0 && it.costPrice > 0)
-        .map((it) => ({ it, value: it.stockQty * it.costPrice }))
+        .filter((it) => !sold.has(it.id) && it.stockQty != null && it.stockQty > 0 && it.costPrice != null && it.costPrice > 0)
+        .map((it) => ({ it, value: (it.stockQty as number) * (it.costPrice as number) }))
         .sort((a, b) => b.value - a.value)
 
       const customers = await db.customer.findMany({ where: { businessId, balance: { gt: 0 } }, orderBy: { balance: 'desc' } })
@@ -1819,6 +1874,9 @@ export async function runReadTool(
       let estimatedCogs = 0
       let expensesTotal = 0
       let membershipsRevenue = 0
+      // R70 / PR-001: sales of items with an unrecorded cost make the COGS —
+      // and hence the "profit" — an UPPER BOUND. Counted, never assumed 0.
+      let cogsUnknownLines = 0
 
       for (const op of ops) {
         try {
@@ -1830,12 +1888,18 @@ export async function runReadTool(
               for (const line of p.lines as Record<string, unknown>[]) {
                 const it = itemMap.get(String(line.itemId ?? ''))
                 const q = Number(line.qty ?? 0)
-                if (it && q > 0) estimatedCogs += Math.round(q * it.costPrice)
+                if (it && q > 0) {
+                  if (it.costPrice == null) cogsUnknownLines += 1
+                  else estimatedCogs += Math.round(q * it.costPrice)
+                }
               }
             } else {
               const it = itemMap.get(String(p.itemId ?? ''))
               const q = Number(p.qty ?? 0)
-              if (it && q > 0) estimatedCogs += Math.round(q * it.costPrice)
+              if (it && q > 0) {
+                if (it.costPrice == null) cogsUnknownLines += 1
+                else estimatedCogs += Math.round(q * it.costPrice)
+              }
             }
           } else if (op.type === 'expense') {
             expensesTotal += Number(p.total ?? p.amount ?? 0)
@@ -1852,19 +1916,27 @@ export async function runReadTool(
       const netOperatingProfit = grossProfit - expensesTotal
       const marginPct = totalRevenue > 0 ? Math.round((grossProfit / totalRevenue) * 100) : 0
 
-      const stockCostValue = items.reduce((s, it) => s + Math.round(it.stockQty * it.costPrice), 0)
-      const stockSellValue = items.reduce((s, it) => s + Math.round(it.stockQty * it.sellPrice), 0)
+      // R70 / PR-001: stock values only over the KNOWN items.
+      let stockCostValue = 0
+      let stockSellValue = 0
+      let unknownStockItems = 0
+      for (const it of items) {
+        if (it.stockQty == 0) continue
+        if (it.stockQty == null || it.costPrice == null) unknownStockItems += 1
+        else stockCostValue += Math.round((it.stockQty as number) * (it.costPrice as number))
+        if (it.stockQty != null && it.sellPrice != null) stockSellValue += Math.round((it.stockQty as number) * (it.sellPrice as number))
+      }
       const potentialStockProfit = Math.max(0, stockSellValue - stockCostValue)
 
       const itemMargins = items
-        .filter((it) => it.sellPrice > 0)
+        .filter((it) => it.sellPrice != null && it.costPrice != null)
         .map((it) => {
-          const profitPerUnit = it.sellPrice - it.costPrice
-          const margin = it.sellPrice > 0 ? Math.round((profitPerUnit / it.sellPrice) * 100) : 0
+          const profitPerUnit = (it.sellPrice as number) - (it.costPrice as number)
+          const margin = (it.sellPrice as number) > 0 ? Math.round((profitPerUnit / (it.sellPrice as number)) * 100) : 0
           return {
             name: it.name,
-            cost: egp(it.costPrice),
-            sell: egp(it.sellPrice),
+            cost: egp(it.costPrice as number),
+            sell: egp(it.sellPrice as number),
             unitProfit: egp(profitPerUnit),
             margin: `${margin}%`,
             marginNum: margin,
@@ -1937,21 +2009,25 @@ export async function runReadTool(
         }
       }
 
+      // R70 / PR-001: an uncounted item can't be forecast — no fake depletion
+      // date, no fake order size. (Flagging «سجّل الجرد» is the proactive
+      // insights' job, not a fake number's.)
       const forecasts = items
         .map((it) => {
           const sold14 = soldByItem.get(it.id) ?? 0
-          const dailyBurn = sold14 > 0 ? sold14 / 14 : it.lowStockThreshold > 0 ? it.lowStockThreshold / 10 : 0.2
-          const daysLeft = dailyBurn > 0 ? Math.max(0, Math.round(it.stockQty / dailyBurn)) : 999
-          const target14d = Math.ceil(dailyBurn * 14) + it.lowStockThreshold
-          const suggestedOrder = Math.max(0, target14d - it.stockQty)
-          const estOrderCost = Math.round(suggestedOrder * it.costPrice)
+          const dailyBurn = sold14 > 0 ? sold14 / 14 : it.lowStockThreshold != null && it.lowStockThreshold > 0 ? (it.lowStockThreshold as number) / 10 : 0.2
+          const counted = it.stockQty != null
+          const daysLeft = counted && dailyBurn > 0 ? Math.max(0, Math.round((it.stockQty as number) / dailyBurn)) : 999
+          const target14d = Math.ceil(dailyBurn * 14) + (it.lowStockThreshold ?? 0)
+          const suggestedOrder = counted ? Math.max(0, target14d - (it.stockQty as number)) : 0
+          const estOrderCost = it.costPrice != null ? Math.round(suggestedOrder * (it.costPrice as number)) : 0
           return {
             it,
             sold14,
             daysLeft,
             suggestedOrder,
             estOrderCost,
-            urgent: it.stockQty <= it.lowStockThreshold || daysLeft <= 7,
+            urgent: counted && ((it.stockQty as number) <= (it.lowStockThreshold ?? 0) || daysLeft <= 7),
           }
         })
         .sort((a, b) => a.daysLeft - b.daysLeft)
@@ -1972,8 +2048,8 @@ export async function runReadTool(
           ],
           rows: forecasts.slice(0, 10).map((f) => ({
             name: f.it.name,
-            stock: fmtQty(f.it.stockQty, arUnit(f.it.unit)),
-            daysLeft: f.daysLeft >= 180 ? 'مستقر (+6 شهور)' : f.daysLeft <= 0 ? 'نفد بالفعل' : `${fmtQty(f.daysLeft)} يوم`,
+            stock: f.it.stockQty == null ? 'غير مسجل' : fmtQty(f.it.stockQty, arUnit(f.it.unit)),
+            daysLeft: f.it.stockQty == null ? 'غير مسجل' : f.daysLeft >= 180 ? 'مستقر (+6 شهور)' : f.daysLeft <= 0 ? 'نفد بالفعل' : `${fmtQty(f.daysLeft)} يوم`,
             reorder: f.suggestedOrder > 0 ? fmtQty(f.suggestedOrder, arUnit(f.it.unit)) : 'لا يحتاج',
             cost: f.estOrderCost > 0 ? egp(f.estOrderCost) : '—',
           })),
@@ -1997,7 +2073,12 @@ export async function runReadTool(
       const inn = entries.filter((e) => e.direction === 'in').reduce((s, e) => s + e.amount, 0)
       const out = entries.filter((e) => e.direction === 'out').reduce((s, e) => s + e.amount, 0)
       const cashNow = biz.openingCash + inn - out
-      const low = items.filter((it) => it.stockQty <= it.lowStockThreshold)
+      // R70 / PR-001: a shortage needs a COUNTED stock and a recorded
+      // threshold. Items never counted get their own honest row — the
+      // proactive nudge to record a stocktake, not a fake «out of stock».
+      const low = items.filter((it) => it.stockQty != null && it.lowStockThreshold != null && it.stockQty <= it.lowStockThreshold)
+      const uncounted = items.filter((it) => it.stockQty == null)
+      const unpriced = items.filter((it) => it.sellPrice == null)
       const totalReceivables = customers.reduce((s, c) => s + c.balance, 0)
       const totalPayables = suppliers.reduce((s, x) => s + x.balance, 0)
 
@@ -2011,6 +2092,12 @@ export async function runReadTool(
               label: 'حالة المخزون والنواقص',
               value: low.length > 0 ? `${fmtQty(low.length)} صنف تحت حد الأمان (${low.slice(0, 3).map((i) => i.name).join('، ')})` : 'مستقر تماماً',
             },
+            ...(uncounted.length > 0
+              ? [{ label: 'أصناف غير مسجل مخزونها', value: `${fmtQty(uncounted.length)} صنف محتاج جرد (${uncounted.slice(0, 3).map((i) => i.name).join('، ')})` }]
+              : []),
+            ...(unpriced.length > 0
+              ? [{ label: 'أصناف غير مسجل سعر بيعها', value: `${fmtQty(unpriced.length)} صنف — سجّل السعر الأول (${unpriced.slice(0, 3).map((i) => i.name).join('، ')})` }]
+              : []),
             {
               label: 'الفلوس اللي لينا بره (مديونيات)',
               value: totalReceivables > 0 ? `${egp(totalReceivables)} عند ${fmtQty(customers.length)} عميل` : 'مفيش مديونيات',

@@ -1726,7 +1726,13 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
           // record what actually happened. «تأمل وكيل» already flags it as an
           // oversell finding (and escalates to R3 when there is nothing on the
           // shelf at all), so the doubt reaches the human instead of the bin.
+          // R70 / PR-001: an UNRECORDED price is a blocker — the line is held
+          // and the owner is asked, never priced at 0.
           const unitPrice = type === 'sale' ? item.sellPrice : item.costPrice
+          if (unitPrice == null) {
+            issues.push(type === 'sale' ? `سعر «${item.name}» غير مسجل — قوللي السعر الأول` : `تكلفة «${item.name}» غير مسجلة — قوللي سعر الشراء الأول`)
+            continue
+          }
           lines.push({ item, qty: qtyN, unitPrice, total: Math.round(qtyN * unitPrice) })
         }
         if (lines.length === 0) {
@@ -1815,7 +1821,13 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
           ...(creditField ? [creditField] : []),
           ...issues.map((i) => ({ label: '⚠ مش ضمن المسودة', value: i })),
         ], [
-          ...lines.map((l) => ({ label: `مخزون ${l.item.name}`, value: `${fmtQty(l.item.stockQty, arUnit(l.item.unit))} ← ${fmtQty(l.item.stockQty + (type === 'sale' ? -l.qty : l.qty), arUnit(l.item.unit))}`, tone: 'neutral' as const })),
+          ...lines.map((l) => ({
+            label: `مخزون ${l.item.name}`,
+            value: l.item.stockQty == null
+              ? `غير مسجل (${type === 'sale' ? `−${fmtQty(l.qty, arUnit(l.item.unit))}` : `+${fmtQty(l.qty, arUnit(l.item.unit))}`}) — محتاج جرد`
+              : `${fmtQty(l.item.stockQty, arUnit(l.item.unit))} ← ${fmtQty(l.item.stockQty + (type === 'sale' ? -l.qty : l.qty), arUnit(l.item.unit))}`,
+            tone: 'neutral' as const,
+          })),
           { label: 'الخزنة', value: egp(type === 'sale' ? paid : -paid), tone: type === 'sale' ? 'good' as const : 'bad' as const },
         ], dangerNote ?? RISK_META[risk].hint)
         // R51: the cash basket keeps the R49 promise too — «سجله» next
@@ -1955,12 +1967,20 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
             return { ok: false, opType: type, payload: {}, summary: '', card: null as never, failMessage: `«${item.name}» بيتاع بـ${arUnit(item.unit)} مش بالوزن — قولي الكمية بالوحدة بتاعته وأنا أحسبها لك` }
           }
           const amountEgp = reverseAmountEgp
+          // R70 / PR-001: the per-gram math needs a RECORDED price — an
+          // unknown price is a question, not a 0.
+          if (item.sellPrice == null) {
+            return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'السعر', failMessage: `سعر «${item.name}» غير مسجل — قوللي سعر ${item.unit === 'kg' ? 'الكيلو' : 'الجرام'} الأول وأنا أحسب الوزن` }
+          }
           const perGram = item.unit === 'gram' ? item.sellPrice : Math.round(item.sellPrice / 1000) // kg → per gram
           const amountPiastres = Math.round(amountEgp * 100)
           if (perGram > 0 && amountPiastres > 0) {
             const grams = Math.round(amountPiastres / perGram)
             if (grams < 1) {
               return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'المبلغ', failMessage: `${egp(amountPiastres)} أقل من سعر الجرام (${egp(perGram)}) — الزبون ده عايز ياخد حاجة تانية؟` }
+            }
+            if (item.stockQty == null) {
+              return { ok: false, opType: type, payload: {}, summary: '', card: null as never, failMessage: `مخزون «${item.name}» غير مسجل — ${egp(amountPiastres)} يعني ${fmtQty(grams, 'جرام')}، سجّل الجرد الأول عشان نتأكد إن في كمية` }
             }
             if (grams > item.stockQty) {
               return { ok: false, opType: type, payload: {}, summary: '', card: null as never, failMessage: `المتاح من ${item.name} ${fmtQty(item.stockQty, arUnit(item.unit))} بس — ${egp(amountPiastres)} يعني ${fmtQty(grams, 'جرام')}` }
@@ -2066,7 +2086,7 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
       // by recording reality instead of by refusing the sale.
       // Total from REAL price
       const unitPrice = type === 'sale' ? item.sellPrice : item.costPrice
-      let total = Math.round(qtyN * unitPrice)
+      let total = unitPrice != null ? Math.round(qtyN * unitPrice) : 0
       // R17 «العقل الحقيقي»: the user HIMSELF stated what he sold it for
       // («بعت آجل لمحمود كرتونة لبن بـ٩٠») — the brain extracts it as
       // fields.amount (EGP). His stated price wins over the catalog default
@@ -2096,6 +2116,11 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
           total = perUnit && qtyN > 0 ? Math.round(statedPiastres * qtyN) : statedPiastres
           priceOverride = true
         }
+      }
+      // R70 / PR-001: no catalog price AND no price stated by the owner →
+      // the draft can't be priced. Ask — never draft at 0.
+      if (unitPrice == null && !priceOverride) {
+        return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'السعر', failMessage: type === 'sale' ? `سعر «${item.name}» غير مسجل — قوللي السعر الأول` : `تكلفة «${item.name}» غير مسجلة — قوللي سعر الشراء الأول` }
       }
       // Paid (آجل = 0, explicit clause wins, default = full cash)
       const paid = resolvePaid(norm, f, total)
@@ -2220,7 +2245,7 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
       const card = fieldsToCard(ref, type, risk, summary, [
         { label: 'الصنف', value: item.name },
         { label: 'الكمية', value: fmtQty(qtyN, arUnit(item.unit)) },
-        { label: `سعر ${type === 'sale' ? 'البيع' : 'الشرا'} (للوحدة)`, value: egp(priceOverride && qtyN > 0 ? Math.round(total / qtyN) : unitPrice), ...(priceOverride ? { hint: 'السعر اللي قلته — بيتقدم على الكتالوج' } : {}) },
+        { label: `سعر ${type === 'sale' ? 'البيع' : 'الشرا'} (للوحدة)`, value: egp(priceOverride && qtyN > 0 ? Math.round(total / qtyN) : (unitPrice as number)), ...(priceOverride ? { hint: 'السعر اللي قلته — بيتقدم على الكتالوج' } : {}) },
         { label: 'الإجمالي', value: egp(total) },
         { label: 'مدفوع', value: egp(paid) },
         ...(total - paid > 0 ? [{ label: 'باقي (آجل)', value: egp(total - paid) }] : []),
@@ -2234,7 +2259,13 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
           : []),
         ...(creditField ? [creditField] : []),
       ], [
-        { label: `مخزون ${item.name}`, value: `${fmtQty(item.stockQty, arUnit(item.unit))} ← ${fmtQty(item.stockQty + (type === 'sale' ? -qtyN : qtyN), arUnit(item.unit))}`, tone: 'neutral' },
+        {
+          label: `مخزون ${item.name}`,
+          value: item.stockQty == null
+            ? `غير مسجل (${type === 'sale' ? `−${fmtQty(qtyN, arUnit(item.unit))}` : `+${fmtQty(qtyN, arUnit(item.unit))}`}) — محتاج جرد`
+            : `${fmtQty(item.stockQty, arUnit(item.unit))} ← ${fmtQty(item.stockQty + (type === 'sale' ? -qtyN : qtyN), arUnit(item.unit))}`,
+          tone: 'neutral',
+        },
         { label: 'الخزنة', value: egp(type === 'sale' ? paid : -paid), tone: type === 'sale' ? 'good' : 'bad' },
         ...(type === 'purchase' && total - paid > 0 && (supplier || supplierIsNew)
           ? [{ label: 'المستحق للمورد', value: egp(total - paid), tone: 'bad' as const }]
@@ -2454,19 +2485,34 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
       const rawItemName = String(f.itemName ?? '')
       const item = matchEntity(rawItemName || text, items)?.entity ?? null
       if (!item) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'الصنف', failMessage: 'تسوية مخزون لأنهي صنف؟' }
+      // R70 / PR-001: an UNRECORDED stock can't be delta-adjusted (unknown ±
+      // qty = unknown). But the owner's number IS a stocktake — it becomes an
+      // ABSOLUTE count that finally records the shelf.
+      const unrecorded = item.stockQty == null
       let delta = (f.delta as number | undefined) ?? null
-      if (delta == null && typeof f.qty === 'number') delta = f.qty - item.stockQty
-      if (delta == null) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'الكمية الجديدة/الفرق', failMessage: `المخزون الحالي ${fmtQty(item.stockQty, arUnit(item.unit))} — عايزه يبقى قد إيه؟` }
-      const reason = String(f.reason ?? '') || 'تسوية جرد'
-      const payload = { itemId: item.id, itemName: item.name, delta, reason, unit: item.unit }
+      let absolute = false
+      if (delta == null && typeof f.qty === 'number') {
+        if (unrecorded) { absolute = true; delta = f.qty }
+        else delta = f.qty - (item.stockQty as number)
+      }
+      if (delta == null) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'الكمية الجديدة/الفرق', failMessage: `المخزون الحالي ${item.stockQty == null ? 'غير مسجل' : fmtQty(item.stockQty, arUnit(item.unit))} — عايزه يبقى قد إيه؟` }
+      if (unrecorded && !absolute) {
+        // a pure delta on an unknown base can't be verified — make it a count
+        absolute = true
+      }
+      const reason = String(f.reason ?? '') || (absolute ? 'جرد — تسجيل الكمية' : 'تسوية جرد')
+      const newQty = absolute ? Math.round(delta) : (item.stockQty as number) + Math.round(delta)
+      const payload: Record<string, unknown> = { itemId: item.id, itemName: item.name, delta, reason, unit: item.unit }
+      if (absolute) payload.absolute = true
       const risk = computeRisk(type)
-      const summary = `تسوية مخزون ${item.name}: ${fmtQty(item.stockQty, arUnit(item.unit))} ← ${fmtQty(item.stockQty + delta, arUnit(item.unit))}`
+      const fromTxt = item.stockQty == null ? 'غير مسجل' : fmtQty(item.stockQty, arUnit(item.unit))
+      const summary = `تسوية مخزون ${item.name}: ${fromTxt} ← ${fmtQty(newQty, arUnit(item.unit))}`
       const card = fieldsToCard('', type, risk, summary, [
         { label: 'الصنف', value: item.name },
-        { label: 'الحالي', value: fmtQty(item.stockQty, arUnit(item.unit)) },
-        { label: 'الجديد', value: fmtQty(item.stockQty + delta, arUnit(item.unit)) },
+        { label: 'الحالي', value: fromTxt },
+        { label: 'الجديد', value: fmtQty(newQty, arUnit(item.unit)), ...(absolute ? { hint: 'جرد — الكمية تتسجل من الصفر' } : {}) },
         { label: 'السبب', value: reason },
-      ], [{ label: `مخزون ${item.name}`, value: `${fmtQty(item.stockQty, arUnit(item.unit))} ← ${fmtQty(item.stockQty + delta, arUnit(item.unit))}`, tone: delta >= 0 ? 'good' : 'bad' }], 'تسوية المخزون عملية حساسة (R3) — محتاجة سبب واعتماد')
+      ], [{ label: `مخزون ${item.name}`, value: `${fromTxt} ← ${fmtQty(newQty, arUnit(item.unit))}`, tone: newQty >= 0 ? 'good' : 'bad' }], 'تسوية المخزون عملية حساسة (R3) — محتاجة سبب واعتماد')
       return { ok: true, opType: type, payload, summary, card }
     }
 
@@ -2483,26 +2529,35 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
           : typeof f.price === 'number' && f.price > 0
             ? f.price
             : parsed?.pounds ?? null
+      const curPriceTxt = item.sellPrice == null ? 'غير مسجل' : egp(item.sellPrice)
       if (pounds == null || !(pounds > 0)) {
-        return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'السعر الجديد', failMessage: `سعر ${item.name} دلوقتي ${egp(item.sellPrice)} — يبقى كام؟` }
+        return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'السعر الجديد', failMessage: `سعر ${item.name} دلوقتي ${curPriceTxt} — يبقى كام؟` }
       }
       const mode = String(f.priceMode ?? parsed?.mode ?? 'absolute')
       const sign = Number(f.priceSign ?? parsed?.sign ?? 1) < 0 ? -1 : 1
-      const newPrice = mode === 'delta' ? item.sellPrice + sign * Math.round(pounds * 100) : Math.round(pounds * 100)
-      if (newPrice <= 0) {
-        return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'السعر الجديد', failMessage: `الحساب ده هيخلي سعر ${item.name} بالسالب — السعر دلوقتي ${egp(item.sellPrice)}` }
+      // R70 / PR-001: a RELATIVE change (+٥ / −١٠) needs a recorded current
+      // price to be computed against. An unrecorded price takes an ABSOLUTE
+      // value — the owner's number becomes the first recorded price.
+      if (mode === 'delta' && item.sellPrice == null) {
+        return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'السعر الجديد', failMessage: `سعر ${item.name} غير مسجل — قوللي السعر كام (مش فرق) وأنا أسجله` }
       }
-      const delta = newPrice - item.sellPrice
-      const pct = item.sellPrice > 0 ? Math.round((delta / item.sellPrice) * 1000) / 10 : null
+      const newPrice = mode === 'delta' ? (item.sellPrice as number) + sign * Math.round(pounds * 100) : Math.round(pounds * 100)
+      if (newPrice <= 0) {
+        return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'السعر الجديد', failMessage: `الحساب ده هيخلي سعر ${item.name} بالسالب — السعر دلوقتي ${curPriceTxt}` }
+      }
+      const delta = newPrice - (item.sellPrice ?? 0)
+      const pct = item.sellPrice != null && item.sellPrice > 0 ? Math.round((delta / item.sellPrice) * 1000) / 10 : null
       const payload = { itemId: item.id, itemName: item.name, newPrice, field: 'sellPrice' }
       const risk = computeRisk(type)
-      const summary = `سعر ${item.name}: ${egp(item.sellPrice)} ← ${egp(newPrice)}`
+      const summary = `سعر ${item.name}: ${curPriceTxt} ← ${egp(newPrice)}`
       const card = fieldsToCard('', type, risk, summary, [
         { label: 'الصنف', value: item.name },
-        { label: 'السعر الحالي', value: egp(item.sellPrice) },
+        { label: 'السعر الحالي', value: curPriceTxt },
         { label: 'السعر الجديد', value: egp(newPrice) },
         ...(pct != null ? [{ label: 'التغيير', value: `${delta >= 0 ? '+' : ''}${egp(delta)}${pct !== 0 ? ` (${pct >= 0 ? '+' : ''}${pct}%)` : ''}` }] : []),
-      ], [{ label: 'هامش الصنف', value: `${egp(newPrice - item.costPrice)} للوحدة بعد التغيير`, tone: newPrice - item.costPrice >= 0 ? 'good' : 'bad' }], RISK_META[risk].hint)
+      ], item.costPrice != null
+        ? [{ label: 'هامش الصنف', value: `${egp(newPrice - item.costPrice)} للوحدة بعد التغيير`, tone: newPrice - item.costPrice >= 0 ? 'good' : 'bad' }]
+        : [], RISK_META[risk].hint)
       return { ok: true, opType: type, payload, summary, card }
     }
 
@@ -3638,7 +3693,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     ])
     const ySales = salesYesterday.reduce((s2, o) => s2 + opMoney(o.payload), 0)
     const cash = business.openingCash + cashEntries.reduce((s2, e) => s2 + (e.direction === 'in' ? e.amount : -e.amount), 0)
-    const lowStock = items.filter((i) => i.stockQty <= i.lowStockThreshold).length
+    const lowStock = items.filter((i) => i.stockQty != null && i.lowStockThreshold != null && i.stockQty <= i.lowStockThreshold).length
     replyText += ' وشلتلك نظرة النهارده تحت 👇'
     done(IDX.reply)
     await streamDeterministic(replyText, emit, 600)
@@ -3669,7 +3724,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
 
   // ---- PASS 0a: Identity question → instant, deterministic, zero LLM ----
   if (isIdentityQuestion(norm)) {
-    const lowStockCount = items.filter((i) => i.stockQty <= i.lowStockThreshold).length
+    const lowStockCount = items.filter((i) => i.stockQty != null && i.lowStockThreshold != null && i.stockQty <= i.lowStockThreshold).length
     const receivablesTotal = customers.reduce((s, c) => s + Math.max(0, c.balance), 0)
     done(IDX.understand, 'سؤال عن هويتي — بجاوب من سجلك من غير موديل')
     done(IDX.search, 'جبت بياناتي من سجلك الحقيقي')

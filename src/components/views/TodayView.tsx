@@ -400,10 +400,10 @@ function InventoryTodayView({ businessId, userId, onNavigate }: ViewProps) {
                 </div>
                 <div className="flex shrink-0 items-baseline gap-2 text-sm">
                   <span className="num font-semibold text-wakil-amber tabular-nums">
-                    {fmtQty(it.stockQty, arUnit(it.unit))}
+                    {it.stockQty == null ? 'غير مسجل' : fmtQty(it.stockQty, arUnit(it.unit))}
                   </span>
                   <span className="text-xs text-muted-foreground">
-                    (الحد: <span className="num tabular-nums">{fmtQty(it.lowStockThreshold, arUnit(it.unit))}</span>)
+                    (الحد: <span className="num tabular-nums">{it.lowStockThreshold == null ? 'غير مسجل' : fmtQty(it.lowStockThreshold, arUnit(it.unit))}</span>)
                   </span>
                 </div>
               </li>
