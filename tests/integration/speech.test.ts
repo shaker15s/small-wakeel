@@ -9,7 +9,8 @@ const db = await testDb()
 let businessId: string, userId: string, providerId: string, original: SpeechSettings | null
 const headers = () => ({ 'x-wakil-business': businessId, 'x-wakil-user': userId, 'x-wakil-audio-consent': 'review-only', 'content-type': 'audio/wav' })
 function wave() { const b = Buffer.alloc(100); b.write('RIFF'); b.write('WAVE', 8); return b }
-const request = (body: BodyInit, extra: Record<string, string> = {}) => new Request('http://localhost/api/speech', { method: 'POST', headers: { ...headers(), ...extra }, body })
+// duplex: 'half' is required by node's undici for streaming bodies; bun accepts the same option.
+const request = (body: BodyInit, extra: Record<string, string> = {}) => new Request('http://localhost/api/speech', { method: 'POST', headers: { ...headers(), ...extra }, body, duplex: 'half' } as RequestInit)
 beforeAll(async () => {
   businessId = (await db.business.create({ data: { name: randomUUID(), type: 'attar' } })).id
   userId = (await db.user.create({ data: { businessId, name: 'اختبار الصوت', role: 'owner' } })).id

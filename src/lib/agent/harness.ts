@@ -77,7 +77,7 @@ import {
   type NewItemSlots,
 } from './pending-request'
 import { parseSinceClause } from './since'
-import { createDraft } from '@/lib/domain/executors'
+import { createDraft, executeOperation, rejectOperation } from '@/lib/domain/executors'
 import { auditDraft } from '@/lib/domain/audit'
 import { getCatalog } from './catalog'
 import type { AuditFindingDTO } from '@/lib/types'
@@ -545,7 +545,10 @@ function ruleBasedIntent(text: string, businessType: string): ExtractedIntent {
   // «الخزنة/كاش» alone, so any sentence that names the cashbox skips us.
   if (/(المركز المالي|فلوسي (واقفين فين|فين|كام|اتعمل)|اموالي (فين|كام)|ماليي|رصيدي)/.test(s) && !/خزنه|كاش/.test(s))
     return { intent: 'read', tool: 'get_financial_position', fields: {} }
-  if (/(وضع|رصيد|حاله) الخزنه|الخزنه|كاش/.test(s)) return { intent: 'read', tool: 'get_cash_position', fields: {} }
+  // R67: «بعت ٢ تونه تونك كاش» is a CASH SALE, not a cashbox question — a
+  // write verb in the sentence disqualifies the cashbox read.
+  if (/(وضع|رصيد|حاله) الخزنه|الخزنه|كاش/.test(s) && !/(^| )(بعت|بيع|اشتريت|اشتري|جبت|سجل|سجلت|حصلت|قبضت|استلمت|صرفت|سددت|دفع)( |$)/.test(s))
+    return { intent: 'read', tool: 'get_cash_position', fields: {} }
   // ---- R36: the weekly ledger questions, answered deterministically -------
   // They must sit BEFORE the generic «مخزون/ناقص» rule: «المخزون ده مكلّفني
   // كام؟» is a VALUE question, not a shortfall list. Patterns use literal
@@ -3520,6 +3523,69 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       const replyText = deterministicReadReply(cards)
       await streamDeterministic(replyText, emit, 500)
       return { replyText, card: null, cards, thinking: steps, modelLabel, actions: null }
+    }
+  }
+
+  // ---- R67: typed approval/rejection — «اعملها» / «اعتمد» / «سجلها» against
+  // the pending draft of THIS conversation, and «الغيها» / «اقفلها» to kill it.
+  // Conservative by design: only explicit action verbs (never bare «تمام»/
+  // «ايوه» — those acknowledge ANYTHING), only a pending op of this
+  // conversation, and R3 drafts keep the typed-reason button flow. The domain
+  // layer owns CAS/risk/reason enforcement (same canonical path as the
+  // confirm API), so a repeated word is a no-op, not a double execution.
+  {
+    const CONFIRM_RE = /^(?:اعملها|اعمل|اعملها يا ريس|اعملها يا وكيل|اعتمد|اعتمدتها|اعتمدها|سجلها|سجلها فورا|سجل|كمل|كملي|كمّلها|كمّل)\s*[!.،,؟?\s]*$/
+    const REJECT_RE = /^(?:الغيها|اقفلها|اقفل|اقفها|منعها|ملهاش|ملها|مش عايزها|مش عايزه)\s*[!.،,؟?\s]*$/
+    if (CONFIRM_RE.test(norm) || REJECT_RE.test(norm)) {
+      const pendingOp = await db.operation.findFirst({
+        where: { businessId: business.id, conversationId: ctx.conversationId, status: 'AWAITING_APPROVAL' },
+        orderBy: { createdAt: 'desc' },
+      })
+      if (pendingOp) {
+        const approve = CONFIRM_RE.test(norm)
+        if (approve && pendingOp.risk === 'R3') {
+          const replyText = `العملية ${pendingOp.ref} حساسة (R3) — السبب كتابة مش كلمة: اكتبه في الكارت واعتمد بالزر. مش هاعتمد حاجة حساسة من غير سبب موثّق.`
+          done(IDX.understand, 'اعتماد كتابة على عملية حساسة — مرفوض بدون سبب')
+          done(IDX.reply)
+          await streamDeterministic(replyText, emit, 400)
+          return { replyText, card: null, cards: null, thinking: steps, modelLabel, actions: null }
+        }
+        let replyText: string
+        let rows: { label: string; value: string }[]
+        let title: string
+        if (approve) {
+          const { op: updated, outcome } = await executeOperation(pendingOp.id, user.id)
+          title = outcome.ok ? `تم — موثّق ومتحقق (${updated.ref})` : `فشلت بأمان (${updated.ref})`
+          rows = [
+            { label: 'العملية', value: updated.summary },
+            { label: 'الحالة', value: updated.status },
+            ...outcome.checks.map((c) => ({ label: c.label, value: `المتوقع ${c.expected} → الفعلي ${c.actual}` })),
+            ...(outcome.failReason ? [{ label: 'سبب الفشل', value: outcome.failReason }] : []),
+          ]
+          replyText = outcome.ok
+            ? `تم — موثّق ومتحقق ✅ ${updated.ref} — ${updated.summary}`
+            : `معلش — العملية فشلت بأمان من غير أي أثر ❌ ${updated.ref}: ${outcome.failReason ?? 'راجع الكارت'}`
+        } else {
+          const updated = await rejectOperation(pendingOp.id, user.id, 'رفض من المحادثة', 'reject')
+          title = `اتلغت (${updated.ref})`
+          rows = [
+            { label: 'العملية', value: updated.summary },
+            { label: 'الحالة', value: updated.status },
+          ]
+          replyText = `تم — اتلغت المسودة ${updated.ref} من غير أي أثر 🗑️`
+        }
+        done(IDX.understand, approve ? 'اعتماد كتابة لمسودة مستنية' : 'إلغاء كتابة لمسودة مستنية')
+        done(IDX.reply)
+        await streamDeterministic(replyText, emit, 400)
+        return {
+          replyText,
+          card: null,
+          cards: [{ kind: 'kv' as const, title, rows }],
+          thinking: steps,
+          modelLabel,
+          actions: null,
+        }
+      }
     }
   }
 

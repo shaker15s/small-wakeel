@@ -4,7 +4,9 @@ export const tokenHash = (value: string) => createHash('sha256').update(value).d
 export const newToken = () => randomBytes(32).toString('base64url')
 export const csrfFor = (token: string) => createHmac('sha256', token).update('wakil-csrf-v1').digest('base64url')
 export class SaasError extends Error {
-  constructor(message: string, readonly status = 400, readonly code = 'invalid_request') { super(message); this.name = 'SaasError' }
+  status = 400
+  code = 'invalid_request'
+  constructor(message: string, status?: number, code?: string) { super(message); this.status = status ?? 400; this.code = code ?? 'invalid_request'; this.name = 'SaasError' }
 }
 let hashing = 0
 async function derive(password: string, salt: string): Promise<Buffer> {

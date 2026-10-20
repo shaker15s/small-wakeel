@@ -327,6 +327,9 @@ export const CASES: EvalCase[] = [
   { text: 'عميل جديد: صيدلية النرجس عليه ٥٠٠', vertical: 'pharmacy', expect: 'إضافة عميل برصيد مدين', check: (r) => r.card?.kind === 'draft' || noCard(r) },
 
   // =======================================================================
+  // R67 — typed approve: «اعملها» executes the pending draft of the conversation
+  { text: 'بعت ٢ تونه تونك كاش', vertical: 'supermarket', followUp: 'اعملها', expect: 'اعتماد كتابة للمسودة المستنية بتنفذ العملية', check: (r) => String(JSON.stringify(r)).includes('تم — موثّق ومتحقق') || String(JSON.stringify(r.cards)).includes('تم') },
+
   // R66 — anaphoric balance question resolves the pronoun from context
   { text: 'بعت ٢ تونة لأم حسن على الحساب', vertical: 'supermarket', followUp: 'كام بقي عليها كده؟', expect: 'ضمير «عليها» بعد بيع على حساب لأم حسن → ملف أم حسن مش ملخص عام', check: (r) => String(JSON.stringify(r.cards)).includes('أم حسن') },
 

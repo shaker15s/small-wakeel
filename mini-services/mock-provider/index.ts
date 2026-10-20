@@ -606,18 +606,58 @@ function search(req: Request) {
   return json({ query: q, results: results.slice(0, num), provider: "wakil-mock-search" });
 }
 
-Bun.serve({
-  port: PORT,
-  async fetch(req) {
-    const { pathname } = new URL(req.url);
-    if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
-    if (pathname === "/health") return json({ ok: true, models: MODELS, search: true });
-    if (pathname === "/search" && req.method === "GET") return search(req);
-    if (pathname === "/v1/models" && req.method === "GET")
-      return json({ object: "list", data: MODELS.map((id) => ({ id, object: "model", created: 1735689600, owned_by: "wakil" })) });
-    if (pathname === "/v1/chat/completions" && req.method === "POST") return chat(req);
-    return json({ error: { message: `Unknown route: ${req.method} ${pathname}` } }, 404);
-  },
-});
+async function dispatch(req: Request): Promise<Response> {
+  const { pathname } = new URL(req.url);
+  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+  if (pathname === "/health") return json({ ok: true, models: MODELS, search: true });
+  if (pathname === "/search" && req.method === "GET") return search(req);
+  if (pathname === "/v1/models" && req.method === "GET")
+    return json({ object: "list", data: MODELS.map((id) => ({ id, object: "model", created: 1735689600, owned_by: "wakil" })) });
+  if (pathname === "/v1/chat/completions" && req.method === "POST") return chat(req);
+  return json({ error: { message: `Unknown route: ${req.method} ${pathname}` } }, 404);
+}
+
+const hasBun = typeof (globalThis as Record<string, unknown>).Bun !== "undefined";
+if (hasBun) {
+  (globalThis as Record<string, unknown>).Bun.serve({ port: PORT, fetch: dispatch as (req: Request) => Response | Promise<Response> });
+} else {
+  // Plain-node fallback (sandbox without the bun binary): bridge node:http to
+  // the same WHATWG dispatch, streaming the SSE body chunk by chunk.
+  const { createServer } = await import("node:http");
+  const server = createServer(async (nodeReq, nodeRes) => {
+    try {
+      const chunks: Uint8Array[] = [];
+      for await (const c of nodeReq) chunks.push(c as Uint8Array);
+      const init: RequestInit & { duplex?: "half" } = {
+        method: nodeReq.method ?? "GET",
+        headers: new Headers(nodeReq.headers as Record<string, string>),
+      };
+      if (nodeReq.method === "POST" || nodeReq.method === "PUT") {
+        init.body = new Uint8Array(Buffer.concat(chunks as Buffer[])) as unknown as BodyInit;
+        init.duplex = "half"; // node's undici requires it for request bodies
+      }
+      const res = await dispatch(new Request(`http://127.0.0.1${nodeReq.url ?? "/"}`, init));
+      nodeRes.statusCode = res.status;
+      res.headers.forEach((v, k) => nodeRes.setHeader(k, v));
+      if (res.body) {
+        const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          nodeRes.write(Buffer.from(value));
+        }
+      } else {
+        nodeRes.end(await res.text());
+      }
+      nodeRes.end();
+    } catch (e) {
+      if (!nodeRes.headersSent) nodeRes.statusCode = 500;
+      nodeRes.end(String(e));
+    }
+  });
+  server.listen(PORT, () => {
+    console.log("mock-provider (node fallback): listening on port " + PORT);
+  });
+}
 
 console.log("mock-provider: OpenAI-compatible mock LLM + /search listening on port " + PORT);

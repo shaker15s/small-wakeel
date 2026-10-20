@@ -117,7 +117,11 @@ export async function createDraft(params: {
 // A savepoint lets a verified rollback record FAILED_SAFE atomically; if storage
 // cannot roll back or record failure, the entire transaction (claim too) aborts.
 class FailedVerification extends Error {
-  constructor(readonly outcome: ExecOutcome) { super(outcome.failReason ?? 'فشل التحقق') }
+  readonly outcome: ExecOutcome
+  constructor(outcome: ExecOutcome) {
+    super(outcome.failReason ?? 'فشل التحقق')
+    this.outcome = outcome
+  }
 }
 
 export async function executeOperation(opId: string, decidedBy: string, reason?: string): Promise<{ op: Operation; outcome: ExecOutcome }> {
