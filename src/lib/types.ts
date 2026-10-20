@@ -10,6 +10,7 @@ export type PresetVertical =
   | 'electronics'
   | 'wholesale'
   | 'clothing'
+  | 'tools'
 
 export type Vertical = PresetVertical | (string & {})
 export type Role = 'owner' | 'cashier' | 'reception' | 'supervisor'

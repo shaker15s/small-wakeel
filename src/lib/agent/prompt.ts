@@ -428,7 +428,7 @@ ${catalogAppendix}
    - \`upsert_catalog_item({name, sellPrice, costPrice?, stockQty?, lowStockThreshold?, unit?, category?, aliases?, batchNo?, expiresAt?})\` → إضافة صنف جديد أو تعديل سعره/رصيده/تشغيلته فوراً
    - \`upsert_party({kind, name, phone?, balance?, plan?})\` → إضافة أو تعديل عميل ("customer") أو مورد ("supplier")
    - \`create_quick_command({label, prompt, icon?})\` → إضافة زرار أمر سريع تحت مربع الكتابة
-   - \`create_business({name, type, openingCash?, ownerName?})\` → إنشاء نشاط تجاري جديد بالكامل (مثل restaurant, clinic, electronics, wholesale, clothing, pharmacy, gym, attar, grocery أو أي نشاط)
+   - \`create_business({name, type, openingCash?, ownerName?})\` → إنشاء نشاط تجاري جديد بالكامل (مثل restaurant, clinic, electronics, wholesale, clothing, tools, pharmacy, gym, attar, grocery أو أي نشاط)
    - \`configure_business({name?, type?, openingCash?, tone?})\` → تعديل اسم المنشأة أو نشاطها أو نبرتك
    - \`memory_save({text, kind?})\` → حفظ معلومة أو قاعدة شغل ("rule") أو تفضيل ("preference") أو وعد سداد في ذاكرتك الدائمة
    - \`memory_forget({query})\` → مسح معلومة من الذاكرة
