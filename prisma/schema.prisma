@@ -34,6 +34,7 @@ model Business {
   cashEntries    CashEntry[]
   auditEvents    AuditEvent[]
   agentEvents    AgentEvent[]
+  profile        BusinessProfile?
   conversations  Conversation[]
   scheduledTasks ScheduledTask[]
   memories       AgentMemory[]
@@ -179,6 +180,23 @@ model AuditEvent {
 // the rows carry traceId/tenant/sequence so a request is reconstructable
 // end to end. payload is REDACTED JSON (never raw conversation/secrets);
 // sensitive blobs are referenced (operationRef) + hashed, not duplicated.
+// R75 / PR-007 (final plan v2 §7.1): the onboarding state machine, one row
+// per business. `answers` is JSON of the owner's OWN answers (source=owner,
+// answeredAt, skipped) — financial facts only exist when the owner stated
+// them; a skipped financial question stays unknown (null), never 0.
+// `consents` is JSON of per-feature grants (file/photo import) recorded at
+// the onboarding interview, honored by the import routes.
+model BusinessProfile {
+  id                  String   @id @default(cuid())
+  businessId          String   @unique
+  business            Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  stage               String   @default("not_started") // not_started | interviewing | proposed | confirmed
+  answers             String   @default("{}") // JSON { key: { value, source, answeredAt, skipped, corrected? } }
+  consents            String   @default("{}") // JSON { key: { granted, at } }
+  openingCashStatedAt DateTime? // set only when the owner stated an opening cash
+  updatedAt           DateTime @default(now()) @updatedAt
+}
+
 model AgentEvent {
   id             String   @id @default(cuid())
   businessId     String // tenant — every query is tenant-scoped
