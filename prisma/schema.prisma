@@ -30,6 +30,7 @@ model Business {
   companionEnrollments CompanionEnrollment[]
   companionDevices CompanionDevice[]
   companionJobs CompanionJob[]
+  reconcileReports ReconcileReport[]
   users          User[]
   items          Item[]
   customers      Customer[]
@@ -761,4 +762,24 @@ model CompanionJob {
 
   @@index([deviceId, status])
   @@index([businessId])
+}
+
+// PR-012 — reconciliation report: the dry-run the owner sees BEFORE any
+// write, and the read-back evidence AFTER. contentHash binds the apply to
+// exactly the previewed report (no swapping the file between preview and
+// approval).
+model ReconcileReport {
+  id          String    @id @default(cuid())
+  businessId  String
+  business    Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  fileName    String?
+  contentHash String
+  payload     String // JSON verdicts
+  status      String    @default("DRAFT") // DRAFT | APPLIED | EXPIRED
+  createdAt   DateTime  @default(now())
+  appliedAt   DateTime?
+  readback    String? // JSON per-row read-back evidence
+  errorReason String?
+
+  @@index([businessId, status])
 }
