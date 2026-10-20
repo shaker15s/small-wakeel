@@ -33,6 +33,7 @@ model Business {
   operations     Operation[]
   cashEntries    CashEntry[]
   auditEvents    AuditEvent[]
+  agentEvents    AgentEvent[]
   conversations  Conversation[]
   scheduledTasks ScheduledTask[]
   memories       AgentMemory[]
@@ -171,6 +172,30 @@ model AuditEvent {
 
   @@index([businessId, createdAt])
   @@index([ref])
+}
+
+// R73 / PR-005 (final plan v2 §20.6): append-only agent trace ledger.
+// Every row is an APPEND — the module exposes no update/delete path, and
+// the rows carry traceId/tenant/sequence so a request is reconstructable
+// end to end. payload is REDACTED JSON (never raw conversation/secrets);
+// sensitive blobs are referenced (operationRef) + hashed, not duplicated.
+model AgentEvent {
+  id             String   @id @default(cuid())
+  businessId     String // tenant — every query is tenant-scoped
+  business       Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  traceId        String // one per turn
+  conversationId String?
+  sequence       Int // per-trace ordering
+  type           String // turn.started | tool.proposed | tool.refused | ...
+  actor          String // user | model | tool | scheduler | system
+  payload        String // redacted JSON — raw secrets never land here
+  operationRef   String? // WKL-#### when it applies
+  payloadHash    String? // hash of the full (unredacted) payload when trimmed
+  createdAt      DateTime @default(now())
+
+  @@index([traceId, sequence])
+  @@index([businessId, createdAt])
+  @@index([operationRef])
 }
 
 model Conversation {

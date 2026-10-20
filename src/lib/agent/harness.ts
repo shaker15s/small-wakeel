@@ -79,6 +79,7 @@ import {
 } from './pending-request'
 import { parseSinceClause } from './since'
 import { createDraft, executeOperation, rejectOperation } from '@/lib/domain/executors'
+import { startTraceSafe, safeLogAgentEvent } from '@/lib/domain/agent-events'
 import { auditDraft } from '@/lib/domain/audit'
 import { getCatalog } from './catalog'
 import type { AuditFindingDTO } from '@/lib/types'
@@ -3258,6 +3259,8 @@ interface TurnMeta {
   notesJotted: number
   /** Turn start (ms epoch) — the baseline for per-pass timing. */
   startedAt: number
+  /** R73 / PR-005: the append-only trace id for this turn (null = tracing off). */
+  traceId: string | null
 }
 
 /**
@@ -3309,7 +3312,9 @@ async function runMeasuredTurn(ctx: TurnContext, emit: TurnEmit): Promise<TurnRe
   const t0 = Date.now()
   let ttftMs: number | null = null
   let sawFirstToken = false
-  const meta: TurnMeta = { kind: 'chat', fallback: false, notesJotted: 0, startedAt: t0 }
+  const meta: TurnMeta = { kind: 'chat', fallback: false, notesJotted: 0, startedAt: t0, traceId: null }
+  // R73 / PR-005: open the append-only trace for this turn (never breaks a turn).
+  meta.traceId = await startTraceSafe({ businessId: ctx.business.id, conversationId: ctx.conversationId ?? null })
   llmHealth.retried = false
   llmHealth.fellBack = false
   llmHealth.servedBy = null
@@ -3332,6 +3337,16 @@ async function runMeasuredTurn(ctx: TurnContext, emit: TurnEmit): Promise<TurnRe
       tokens: 0,
       fallback: true,
     })
+    // PR-005: the engine exploding is a traceable fact, not a silent death.
+    if (meta.traceId) {
+      void safeLogAgentEvent({
+        businessId: ctx.business.id,
+        traceId: meta.traceId,
+        type: 'provider.error',
+        actor: 'system',
+        payload: { error: String(err).slice(0, 200), latencyMs: Date.now() - t0 },
+      })
+    }
     throw err
   }
   void trackTurnUsage(ctx.business.id, ctx.user.id, meta.kind, ctx.text, {
@@ -3347,6 +3362,15 @@ async function runMeasuredTurn(ctx: TurnContext, emit: TurnEmit): Promise<TurnRe
   // If the fallback ladder had to swap models mid-turn, the label the UI shows
   // must name the model that ACTUALLY answered — never claim a dead one.
   if (llmHealth.servedBy) result.modelLabel = llmHealth.servedBy
+  if (meta.traceId) {
+    void safeLogAgentEvent({
+      businessId: ctx.business.id,
+      traceId: meta.traceId,
+      type: 'turn.ended',
+      actor: 'system',
+      payload: { replyChars: result.replyText.length, latencyMs: Date.now() - t0, fallback: meta.fallback },
+    })
+  }
   return result
 }
 
@@ -3615,6 +3639,17 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         let title: string
         if (approve) {
           const { op: updated, outcome } = await executeOperation(pendingOp.id, user.id)
+          // PR-005: the DECISION is a trace fact (who approved, what, outcome).
+          if (meta.traceId) {
+            void safeLogAgentEvent({
+              businessId: business.id,
+              traceId: meta.traceId,
+              type: 'operation.decided',
+              actor: 'user',
+              operationRef: updated.ref,
+              payload: { ref: updated.ref, outcome: outcome.ok ? 'succeeded' : 'failed_safe', status: updated.status },
+            })
+          }
           title = outcome.ok ? `تم — موثّق ومتحقق (${updated.ref})` : `فشلت بأمان (${updated.ref})`
           rows = [
             { label: 'العملية', value: updated.summary },
@@ -3627,6 +3662,16 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             : `معلش — العملية فشلت بأمان من غير أي أثر ❌ ${updated.ref}: ${outcome.failReason ?? 'راجع الكارت'}`
         } else {
           const updated = await rejectOperation(pendingOp.id, user.id, 'رفض من المحادثة', 'reject')
+          if (meta.traceId) {
+            void safeLogAgentEvent({
+              businessId: business.id,
+              traceId: meta.traceId,
+              type: 'operation.decided',
+              actor: 'user',
+              operationRef: updated.ref,
+              payload: { ref: updated.ref, outcome: 'cancelled', status: updated.status },
+            })
+          }
           title = `اتلغت (${updated.ref})`
           rows = [
             { label: 'العملية', value: updated.summary },
@@ -4200,6 +4245,19 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         executedResults.set(sig, result)
         if (result.ok === false && brainFailures.length === 0) brainFailures.push(GENERIC_TOOL_FAIL)
         resultsForModel.push(result)
+        // PR-005: every tool outcome is an append to the turn trace — the
+        // refused-vs-executed line is visible in the ledger, not only in chat.
+        if (meta.traceId) {
+          const ref = typeof result.ref === 'string' ? result.ref : null
+          void safeLogAgentEvent({
+            businessId: business.id,
+            traceId: meta.traceId,
+            type: result.ok === false ? 'tool.failed' : ref ? 'draft.created' : 'tool.executed',
+            actor: 'tool',
+            operationRef: ref,
+            payload: { tool: call.tool, ...(ref ? { ref } : {}), ...(result.error ? { error: String(result.error).slice(0, 140) } : {}) },
+          })
+        }
       }
       executedAnyTool = true
       // ---- R72 / PR-004 (plan §20.3): the CENTRAL tool contract gate ----
@@ -4219,7 +4277,20 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         syncSteps()
         emit({ event: 'step', label: l, state: 'done' })
         brainFailures.push(`عقد الأداة منع ${call.tool}: ${why}. الحقول المسموحة في كتالوج الأداة فقط — الصلاحيات والموافقات والبيانات التعريفية بيتحقّق فيها الخادم.`)
-        report({ tool: call.tool, ok: false, error: `عقد الأداة: ${why}` })
+        const refusedResult = { tool: call.tool, ok: false, error: `عقد الأداة: ${why}` } as Record<string, unknown>
+        executedResults.set(sig, refusedResult)
+        resultsForModel.push(refusedResult)
+        // PR-005: a refusal is its OWN trace fact (actor=model), distinct from
+        // a tool that ran and failed.
+        if (meta.traceId) {
+          void safeLogAgentEvent({
+            businessId: business.id,
+            traceId: meta.traceId,
+            type: 'tool.refused',
+            actor: 'model',
+            payload: { tool: call.tool, reason: contract.reason, smuggled: contract.smuggled ?? null },
+          })
+        }
         return
       }
       const { label, icon } = brainStepLabel(call)
