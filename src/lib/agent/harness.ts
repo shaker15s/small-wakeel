@@ -91,6 +91,7 @@ import { factsFromCards, verifyReply, type VerifyFact } from './verify'
 import { buildAdvisoryPrompt, buildAgentSystemPrompt, buildReplyPrompt, buildSystemPrompt, roleTitle, TONE_AR } from './prompt'
 import { harnessesPromptBlock } from './cli-anything/harness-installer'
 import { brainToolSchemas } from './tool-schemas'
+import { verifyToolContract } from './tool-contract'
 import { READ_TOOLS, runReadTool, TYPE_AR, isQuestionWord, opMoney, type ReadTool } from './tools'
 import { startOfCairoDay } from '@/app/api/_lib/dates'
 import {
@@ -4201,6 +4202,26 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         resultsForModel.push(result)
       }
       executedAnyTool = true
+      // ---- R72 / PR-004 (plan §20.3): the CENTRAL tool contract gate ----
+      // Server-side, before ANY dispatch: an unregistered tool name or a
+      // smuggled authority field (approved/risk/tenant ids/outcome flags) in
+      // the model's input is REFUSED — never stripped, never downgraded.
+      const contract = verifyToolContract(call.tool, call.args)
+      if (!contract.ok) {
+        const why = contract.reason === 'unregistered'
+          ? 'أداة غير مسجلة في الكتالوج — مرفوضة'
+          : contract.reason === 'args-not-object'
+            ? 'مدخلات الأداة مش كائن صالح — مرفوضة'
+            : `خصائص سلطة ممنوعة من مدخلات النموذج (${contract.smuggled?.join('، ')}) — مرفوضة`
+        const { label: l, icon } = brainStepLabel(call)
+        const step: ThinkingStep = { label: l, detail: `عقد الأداة: ${why}`, state: 'done', icon, ms: 0 }
+        toolSteps.push(step)
+        syncSteps()
+        emit({ event: 'step', label: l, state: 'done' })
+        brainFailures.push(`عقد الأداة منع ${call.tool}: ${why}. الحقول المسموحة في كتالوج الأداة فقط — الصلاحيات والموافقات والبيانات التعريفية بيتحقّق فيها الخادم.`)
+        report({ tool: call.tool, ok: false, error: `عقد الأداة: ${why}` })
+        return
+      }
       const { label, icon } = brainStepLabel(call)
       const argBits = Object.values(call.args)
         .filter((x) => x !== undefined && x !== null && String(x) !== '')
