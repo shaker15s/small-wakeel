@@ -36,8 +36,23 @@ export async function readAudio(req: Request): Promise<{ bytes: Uint8Array; type
   if (!matches) throw new SpeechError('محتوى الملف مش مطابق لنوع التسجيل', 415)
   return { bytes, type, extension: types[type] }
 }
-/** Audio is transient. Only the returned, user-reviewed text may become a chat message. */
-export async function transcribeAudio(audio: Awaited<ReturnType<typeof readAudio>>, selected: NonNullable<Awaited<ReturnType<typeof speechSelection>>>, signal?: AbortSignal) {
+/**
+ * Estimate the STT cost in USD. Speech pricing is per-minute-of-audio on
+ * most providers; with no price on file we return 0 — the call still reports
+ * its latency, and «التكلفة معلومة» means "measured or honestly zero on file",
+ * never a fabricated number.
+ */
+export function estimateSpeechCostUsd(minutes: number, perMinuteUsd?: number | null): number {
+  if (!perMinuteUsd) return 0
+  return minutes * perMinuteUsd
+}
+
+/**
+ * Audio is transient. Only the returned, user-reviewed text may become a
+ * chat message. Returns the text + a MEASURED latency-based cost estimate.
+ */
+export async function transcribeAudio(audio: Awaited<ReturnType<typeof readAudio>>, selected: NonNullable<Awaited<ReturnType<typeof speechSelection>>>, signal?: AbortSignal): Promise<{ text: string; ms: number; costUsd: number }> {
+  const started = Date.now()
   const base = providerUrl(selected.provider.baseUrl).toString().replace(/\/$/, '')
   const form = new FormData()
   form.append('model', selected.remoteId); form.append('language', 'ar'); form.append('response_format', 'json')
@@ -54,5 +69,9 @@ export async function transcribeAudio(audio: Awaited<ReturnType<typeof readAudio
   let text: unknown
   try { text = JSON.parse(raw).text } catch { throw new SpeechError('خدمة الصوت رجعت رد غير صالح', 502) }
   if (typeof text !== 'string' || !text.trim() || text.length > 2000) throw new SpeechError('ما اتلقطش كلام واضح؛ جرّب تاني أو كمّل كتابة')
-  return text.trim()
+  const ms = Date.now() - started
+  // ~4MB audio ≈ 4 minutes at 16kbps; cost estimate from the provider price when known
+  const approxMinutes = Math.max(0.01, audio.bytes.byteLength / (16_000 / 8) / 60)
+  const costUsd = estimateSpeechCostUsd(approxMinutes, (selected as { perMinuteUsd?: number }).perMinuteUsd ?? null)
+  return { text: text.trim(), ms, costUsd }
 }

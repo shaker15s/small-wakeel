@@ -606,6 +606,41 @@ function search(req: Request) {
   return json({ query: q, results: results.slice(0, num), provider: "wakil-mock-search" });
 }
 
+/**
+ * /v1/audio/transcriptions — deterministic Arabic STT mock.
+ * The transcription is a function of the BYTES (same audio → same text), so
+ * tests can assert the exact phrase. Silent/empty payloads return empty text
+ * — the honest «ما اتلقطش كلام واضح» path the client must handle.
+ */
+async function transcribe(req: Request): Promise<Response> {
+  try {
+    const ct = req.headers.get("content-type") ?? "";
+    if (!ct.includes("multipart/form-data")) return json({ error: { message: "expected multipart form" } }, 400);
+    const form = await req.formData();
+    const file = form.get("file");
+    const bytes = file instanceof Blob ? new Uint8Array(await file.arrayBuffer()) : null;
+    if (!bytes || bytes.byteLength < 100) return json({ text: "" });
+    // silence check: skip the container header (first 64 bytes — RIFF/ftyp/ID3
+    // regions are always non-zero) and inspect the data payload. A valid
+    // header with an all-silent payload has nothing to transcribe → "".
+    let nonZero = 0;
+    for (let i = 64; i < bytes.byteLength; i += 16) if (bytes[i] !== 0) nonZero++;
+    if (nonZero === 0) return json({ text: "" });
+    // deterministic phrase from the content (data region only)
+    const hash = [...bytes.slice(64, 2112)].reduce((s, c) => (s + c) >>> 0, 0);
+    const phrases = [
+      "السلام عليكم",
+      "ابغى اعرف رصيد الخزنة دلوقتي",
+      "سجل بيع ١٠ شاي العروسة ب ١٥٠ جنيه",
+      "فين النواقص في المخزون؟",
+      "ملخص مبيعات النهارده",
+    ];
+    return json({ text: phrases[hash % phrases.length], model: "wakil-mock-speech" });
+  } catch (e) {
+    return json({ error: { message: e instanceof Error ? e.message : "bad request" } }, 400);
+  }
+}
+
 async function dispatch(req: Request): Promise<Response> {
   const { pathname } = new URL(req.url);
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
@@ -614,6 +649,7 @@ async function dispatch(req: Request): Promise<Response> {
   if (pathname === "/v1/models" && req.method === "GET")
     return json({ object: "list", data: MODELS.map((id) => ({ id, object: "model", created: 1735689600, owned_by: "wakil" })) });
   if (pathname === "/v1/chat/completions" && req.method === "POST") return chat(req);
+  if (pathname === "/v1/audio/transcriptions" && req.method === "POST") return transcribe(req);
   return json({ error: { message: `Unknown route: ${req.method} ${pathname}` } }, 404);
 }
 
