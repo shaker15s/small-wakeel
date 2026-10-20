@@ -68,7 +68,7 @@ describe('vector search benchmark — fixed corpus, top-1 quality', () => {
   // proximity). The combined `score` intentionally adds a rule baseline boost
   // so standing shop laws are never missed — that is a separate, deliberate
   // ranking decision measured in its own test below.
-  const bestSim = (hits: { similarity: number }[]) =>
+  const bestSim = (hits: Array<{ similarity: number; doc: { id: string } }>) =>
     hits.reduce((a, b) => (b.similarity > a.similarity ? b : a))
 
   test('«كام في الخزنة» — the cash memory is retrieved with the top similarity', async () => {
