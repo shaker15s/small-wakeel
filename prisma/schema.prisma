@@ -126,6 +126,11 @@ model Operation {
   result         String? // JSON — verification + outcome
   idempotencyKey String    @unique
   conversationId String?
+  // R71 / PR-003 — approval binding (§20.4): the approved bytes are the
+  // executed bytes. payloadHash = sha256 of the canonical payload at draft
+  // time; expiresAt bounds how long an approval holds. Null on pre-R71 rows.
+  payloadHash String?
+  expiresAt DateTime?
   reversalOfRef  String?
   reversedByRef  String?
   reason         String?

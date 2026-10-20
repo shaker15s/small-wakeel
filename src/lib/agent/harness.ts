@@ -60,6 +60,7 @@ import type {
 } from '@/lib/types'
 import type { VerticalDef } from '@/lib/verticals'
 import { egp, qty as fmtQty, arDate } from '@/lib/format'
+import { canonicalPayloadHash } from '@/lib/domain/payload-hash'
 import { arUnit, getVertical } from '@/lib/verticals'
 import { wordBoundedAt, convertToBaseUnit, matchEntity, normalizeAr, parseQuantity, toWesternDigits, unitToCode } from './arabic'
 import {
@@ -3276,11 +3277,14 @@ interface TurnMeta {
  */
 const opSeqs = new WeakMap<TurnContext, Map<string, number>>()
 
-function turnIdem(ctx: TurnContext, type: string, summary: string): string {
+function turnIdem(ctx: TurnContext, type: string, summary: string, payload: Record<string, unknown>): string {
   const base = `${ctx.business.id}:${ctx.user.id}`
   if (!ctx.turnId) return `${base}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
   let h = 0
-  const key = `${type}|${summary}`
+  // R71 / PR-003: the key identifies (type, summary, PAYLOAD). A corrected
+  // draft (same words, different money) gets a fresh key → a fresh draft,
+  // while an identical retry lands on the same key and replays idempotently.
+  const key = `${type}|${summary}|${canonicalPayloadHash(payload).slice(0, 16)}`
   for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) | 0
   // Two IDENTICAL ops in one turn must both be drafted («بعت ٢ لبن» مرتين) —
   // the n-th occurrence gets an `-n` suffix, and a retry replays 1,2,… in the
@@ -4375,7 +4379,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             replyParts.push(`طلب ناقص بيانات: ${resolved.failMessage ?? resolved.missing ?? ''}`)
             return
           }
-          const idem = turnIdem(ctx, resolved.opType, resolved.summary)
+          const idem = turnIdem(ctx, resolved.opType, resolved.summary, resolved.payload)
           const reflection = await reflectOnDraft({
             businessId: business.id,
             userId: user.id,
@@ -5190,7 +5194,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           replyParts.push(`طلب رقم ${AR_ORDINALS[i]} ناقص بيانات: ${resolved.failMessage ?? resolved.missing ?? ''}`)
           continue
         }
-        const idem = turnIdem(ctx, resolved.opType, resolved.summary)
+        const idem = turnIdem(ctx, resolved.opType, resolved.summary, resolved.payload)
         const reflection = await reflectOnDraft({
           businessId: business.id,
           userId: user.id,
@@ -5351,7 +5355,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       } else {
         done(IDX.verify, `حسبت الإجمالي من السعر الحقيقي: ${resolved.summary}`)
         emit({ event: 'step', label: `بجهّز مسودة ${TYPE_AR[resolved.opType]}`, state: 'active' })
-        const idem = turnIdem(ctx, resolved.opType, resolved.summary)
+        const idem = turnIdem(ctx, resolved.opType, resolved.summary, resolved.payload)
         // «تأمل» — self-critique BEFORE the draft exists, so the card carries
         // the doubt (and a dangerous draft can be escalated to R3).
         const reflection = await reflectOnDraft({

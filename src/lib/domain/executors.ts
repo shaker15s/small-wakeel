@@ -17,6 +17,12 @@ import { AuthorizationError, requireBusinessUser } from '@/lib/security/permissi
 import { validateOperationPayload } from './operation-validation'
 import { OperationConflictError, OperationValidationError } from './errors'
 import { prepareAccountingVerification } from './operation-verification'
+import { canonicalPayloadHash } from './payload-hash'
+
+// R71 / PR-003 — how long an approval holds. A draft older than this is
+// CANCELLED on approval attempt; the owner redrafts (a stale «اعملها» is not
+// an approval). Named + exported so tests and policy share one constant.
+export const DRAFT_TTL_MS = 20 * 60 * 1000
 
 export interface DraftFields {
   [key: string]: unknown
@@ -75,10 +81,20 @@ export async function createDraft(params: {
     if (!canDraft(user.role, params.type)) throw new AuthorizationError()
     if (params.type === 'debt_promise') await assertPromiseRole(tx, params.businessId, user.role, params.payload)
     if (params.type === 'cashbook') assertCashbookRole(user.role, params.payload.kind)
+    // R71 / PR-003 (§20.5): the key is bound to THIS payload. Reusing a key
+    // with a different payload is a collision, not a replay — refuse it.
+    // `supersedesRef` is draft-link metadata (added below for cashbook
+    // corrections), not a financial fact — it is excluded from the binding.
+    const hashable: Record<string, unknown> = { ...params.payload }
+    delete hashable.supersedesRef
+    const requestHash = canonicalPayloadHash(hashable)
     const existing = await tx.operation.findUnique({ where: { idempotencyKey: params.idempotencyKey } })
     if (existing) {
       if (existing.businessId !== params.businessId || existing.userId !== params.userId || existing.type !== params.type) {
         throw new AuthorizationError()
+      }
+      if (existing.payloadHash != null && existing.payloadHash !== requestHash) {
+        throw new OperationValidationError('مفتاح الاعتماد ده اتستخدم بالفعل لمسودة مختلفة — العملية اللي قدامك هي اللي مسجلة')
       }
       return existing
     }
@@ -96,11 +112,18 @@ export async function createDraft(params: {
     await validateOperationPayload(tx, params.businessId, params.type, params.payload)
     const risk = effectiveRisk(params.type, params.payload, params.risk)
     const ref = await nextRef(params.businessId, tx)
+    // R71 / PR-003: bind the draft to a canonical payload hash NOW, and bound
+    // its approval window. The hash is recomputed at approval from the stored
+    // payload; a mismatch means the draft changed after it was recorded.
+    // `supersedesRef` (draft-link metadata) is excluded, same as at request time.
+    const boundHash = canonicalPayloadHash({ ...params.payload, supersedesRef: undefined })
     const op = await tx.operation.create({ data: {
       ref, businessId: params.businessId, type: params.type, status: 'AWAITING_APPROVAL',
       source: 'chat', userId: params.userId, risk, summary: params.summary,
       payload: JSON.stringify(params.payload), idempotencyKey: params.idempotencyKey,
       conversationId: params.conversationId ?? null,
+      payloadHash: boundHash,
+      expiresAt: new Date(Date.now() + DRAFT_TTL_MS),
     } })
     if (replaced) {
       const canceled = await tx.operation.updateMany({ where: { id: replaced.id, status: 'AWAITING_APPROVAL' }, data: { status: 'CANCELLED', reason: `استُبدلت بمسودة ${ref} بناءً على تصحيح المستخدم`, decidedAt: new Date() } })
@@ -137,6 +160,30 @@ export async function executeOperation(opId: string, decidedBy: string, reason?:
       if (op.type === 'debt_promise') await assertPromiseRole(tx, op.businessId, user.role, payload)
       if (op.type === 'cashbook') assertCashbookRole(user.role, payload.kind)
       if (op.status !== 'AWAITING_APPROVAL') throw new OperationConflictError()
+      // R71 / PR-003 (§20.4): the approval is bound to the RECORDED payload
+      // and bounded in time. A tampered or expired draft ends in a RECORDED
+      // terminal state (status + failReason + audit) — never a silent no-op,
+      // never a financial effect.
+      const hashable: Record<string, unknown> = { ...payload }
+      delete hashable.supersedesRef
+      const tampered = op.payloadHash != null && canonicalPayloadHash(hashable) !== op.payloadHash
+      const expired = op.expiresAt != null && op.expiresAt.getTime() < Date.now()
+      if (tampered || expired) {
+        const failReason = tampered
+          ? 'مسودة معدلة بعد تسجيلها — الاعتماد مرفوض (اللي في السجل مش هو اللي اتسجل بـ payloadHash)'
+          : 'انتهت صلاحية الاعتماد (أكتر من ٢٠ دقيقة من التسجيل) — اعمل المسودة من جديد واعتمدها'
+        const updated = await tx.operation.update({ where: { id: opId }, data: {
+          status: tampered ? 'FAILED_SAFE' : 'CANCELLED',
+          failReason,
+          reason: tampered ? 'payload hash mismatch' : 'expired',
+          decidedAt: new Date(), executedAt: new Date(),
+        } })
+        await audit(op.businessId, decidedBy, tampered ? 'operation.tamper_rejected' : 'operation.expired_rejected', op.ref, { failReason }, tx)
+        const outcome: ExecOutcome = { ok: false, checks: [], effects: [], failReason }
+        const terminal = { op: updated, outcome }
+        prepared = terminal
+        return terminal
+      }
       const decisionReason = reason?.trim() || op.reason?.trim() || (typeof payload.reason === 'string' ? payload.reason.trim() : '')
       if (risk === 'R3' && !decisionReason) throw new OperationValidationError('العمليات الحساسة (R3) محتاجة سبب إلزامي')
       const claimed = await tx.operation.updateMany({

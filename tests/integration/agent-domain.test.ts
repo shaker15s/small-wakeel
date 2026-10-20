@@ -38,6 +38,15 @@ describe('integration.executors', () => {
 
     const before = { stock: item.stockQty, balance: customer.balance }
     const idempotencyKey = `test-sale-${Date.now()}`
+    const salePayload = {
+      itemId: item.id,
+      qty: 2,
+      unit: item.unit,
+      unitPrice: item.sellPrice,
+      total: item.sellPrice * 2,
+      paid: item.sellPrice, // 1 unit paid, 1 unit on credit
+      customerId: customer.id,
+    }
 
     const draft = await executors.createDraft({
       businessId: business.id,
@@ -46,20 +55,14 @@ describe('integration.executors', () => {
       summary: 'عملية اختبار',
       risk: 'R2',
       idempotencyKey,
-      payload: {
-        itemId: item.id,
-        qty: 2,
-        unit: item.unit,
-        unitPrice: item.sellPrice,
-        total: item.sellPrice * 2,
-        paid: item.sellPrice, // 1 unit paid, 1 unit on credit
-        customerId: customer.id,
-      },
+      payload: salePayload,
     })
     expect(draft.ref).toMatch(/^WKL-\d+$/)
     expect(draft.status).toBe('AWAITING_APPROVAL')
 
-    // Idempotency: the same key must return the SAME operation, not a new one.
+    // Idempotency: the same key + SAME payload must return the SAME operation,
+    // not a new one. (R71/PR-003 §20.5: a key reused with a DIFFERENT payload
+    // is a collision and is refused — see tests/integration/approval-binding.)
     const again = await executors.createDraft({
       businessId: business.id,
       userId: user.id,
@@ -67,7 +70,7 @@ describe('integration.executors', () => {
       summary: 'عملية اختبار',
       risk: 'R2',
       idempotencyKey,
-      payload: { itemId: item.id, qty: 2, total: item.sellPrice * 2, paid: item.sellPrice },
+      payload: salePayload,
     })
     expect(again.id).toBe(draft.id)
 
