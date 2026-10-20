@@ -10,6 +10,7 @@
     "lint": "eslint .",
     "db:push": "prisma db push --accept-data-loss",
     "db:generate": "bash scripts/prisma-generate.sh",
+    "model:acceptance": "node scripts/model-acceptance.mjs",
     "db:migrate": "bun scripts/migrate.ts",
     "db:reset": "prisma migrate reset",
     "db:sync": "bun scripts/db-sync.ts",
