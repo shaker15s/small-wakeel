@@ -2,7 +2,7 @@
 /**
  * وكيل — `pilot:gate` (PR-015 / plan v2 §13 «بوابة GO للإطلاق العام»).
  *
- * Evaluates the plan's 8 GO-gate items on THIS SHA with REAL evidence:
+ * Evaluates release gates on THIS SHA with REAL evidence:
  * focused test batteries are executed (not asserted from memory), the model
  * acceptance report is consumed, and documentation/infrastructure presence
  * is checked. Honesty rules:
@@ -123,7 +123,6 @@ const items = []
 }
 
 // 2. The following sector test covers registry contracts only. Full workflows are a separate gate.
-// 2. the 10 sectors pass their acceptance tests
 {
   const results = await runBattery(['tests/unit/sector-contracts.test.ts'])
   const allOk = results.every((r) => r.ok)
@@ -203,7 +202,7 @@ const items = []
   const workflowContent = existsSync(join(root, workflowPath)) ? readFileSync(join(root, workflowPath), 'utf8') : ''
   const workflowConfigured = workflowContent.includes('bash scripts/ci.sh')
     && workflowContent.includes('actions/upload-artifact')
-    && workflowContent.includes('.ci-results')
+    && workflowContent.includes('ci-results')
   const hostedRunMatches = process.env.GITHUB_ACTIONS === 'true'
     && process.env.GITHUB_WORKFLOW === 'WAKIL CI'
     && process.env.GITHUB_SHA === sha

@@ -34,24 +34,24 @@ jobs:
           bun-version: '1.3.11'
       - name: Prepare validation artifact directory
         shell: bash
-        run: mkdir -p .ci-results
+        run: mkdir -p ci-results
       - name: Run full local gate (typecheck, lint, tests, crash recovery, evals, build, HTTP and browser smoke)
         shell: bash
         run: |
           set -o pipefail
-          bash scripts/ci.sh 2>&1 | tee .ci-results/ci.log
+          bash scripts/ci.sh 2>&1 | tee ci-results/ci.log
       - name: Run explicit launch-evidence gate
         if: success()
         shell: bash
         run: |
           set -o pipefail
-          node scripts/pilot-gate.mjs --report .ci-results/pilot-gate.json 2>&1 | tee .ci-results/pilot-gate.log
-          node -e "const fs=require('node:fs'); fs.writeFileSync('.ci-results/run-metadata.json', JSON.stringify({sha:process.env.GITHUB_SHA,runId:process.env.GITHUB_RUN_ID,workflow:process.env.GITHUB_WORKFLOW,repository:process.env.GITHUB_REPOSITORY,recordedAt:new Date().toISOString()},null,2))"
+          node scripts/pilot-gate.mjs --report ci-results/pilot-gate.json 2>&1 | tee ci-results/pilot-gate.log
+          node -e "const fs=require('node:fs'); fs.writeFileSync('ci-results/run-metadata.json', JSON.stringify({sha:process.env.GITHUB_SHA,runId:process.env.GITHUB_RUN_ID,workflow:process.env.GITHUB_WORKFLOW,repository:process.env.GITHUB_REPOSITORY,recordedAt:new Date().toISOString()},null,2))"
       - name: Upload logs and machine-readable gate results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: wakil-validation-${{ github.sha }}-${{ github.run_id }}
-          path: .ci-results/
+          path: ci-results/
           if-no-files-found: warn
           retention-days: 30

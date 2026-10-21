@@ -18,7 +18,7 @@ WAKIL_ACCEPTANCE_MODELS=<model-ids>
 node scripts/model-acceptance.mjs --report /secure/path/model-acceptance.json
 ```
 
-يلزم إعداد متغيرات البيئة الحقيقية في الـshell أو Secret Store؛ لا تضع المفتاح في Git أو في ملف التقرير. يجب أن تكون نتيجة التقرير `environment: live` و`liveAcceptance: true`. نموذج mock يثبت عقد الأداة فقط ولا يعتبر قبولًا حيًا.
+يلزم إعداد متغيرات البيئة الحقيقية في الـshell أو Secret Store؛ لا تضع المفتاح في Git أو في ملف التقرير. يجب أن تكون نتيجة التقرير `environment: live` و`liveAcceptance: true`. لا تُذكر تكلفة مالية مقدرة إلا إذا أعاد المزود أعداد التوكنز؛ غير ذلك يظهر `n/a`. نموذج mock يثبت عقد الأداة فقط ولا يعتبر قبولًا حيًا.
 
 ## 3. دليل تدقيق أمني مستقل
 

@@ -9,15 +9,16 @@
  *   A2  system instruction arrives + roles transform (marker echo contract)
  *   A3  tool calling: the right tool is called with the right args
  *   A4  refusal: a write tool is NOT called when the system forbids it
- *   A5  latency (TTFT for streams), token usage, estimated cost
+ *   A5  measured request latency; token usage and cost only when returned
  *
  * Honesty rules (plan §14.8 — no claiming an untested quality):
  *   • the report is stamped with the endpoint class: `mock` endpoints
  *     (localhost / mock model ids) mark `liveAcceptance: false` — a mock
  *     run proves the ADAPTER CONTRACT and the measurement pipeline, it is
  *     NOT a live model acceptance
- *   • `node scripts/model-acceptance.mjs` exits 0 only when every checked
- *     model passes every applicable check on a LIVE endpoint
+ *   • an unconfigured endpoint exits nonzero; a mock run can pass adapter
+ *     checks but always records liveAcceptance:false; a live run exits 0 only
+ *     when every functional check passes
  *
  * Usage:
  *   WAKIL_ACCEPTANCE_BASE_URL=https://generativelanguage.googleapis.com/v1beta \
@@ -108,6 +109,20 @@ async function runModel(model) {
   const checks = []
   const add = (id, name, pass, detail) => checks.push({ id, name, pass: !!pass, detail: String(detail).slice(0, 300) })
   let usage = { inputTokens: 0, outputTokens: 0 }
+  let usageMeasured = false
+  let successfulRequests = 0
+  let totalLatencyMs = 0
+
+  function observeResponse(response, parsed) {
+    totalLatencyMs += Math.max(0, Number(response.ms) || 0)
+    if (response.status === 200) successfulRequests++
+    const measured = rTokens(parsed)
+    if (measured) {
+      usage.inputTokens += measured.inputTokens
+      usage.outputTokens += measured.outputTokens
+      usageMeasured = true
+    }
+  }
 
   // A1 — reachability + model id accepted
   try {
@@ -117,7 +132,7 @@ async function runModel(model) {
     ])
     const parsed = safeJson(r.raw)
     const content = parsed?.choices?.[0]?.message?.content ?? parseSse(r.raw)
-    usage = rTokens(parsed) ?? usage
+    observeResponse(r, parsed)
     add('A1', 'reachability + model id accepted', r.status === 200 && Boolean(content), `status=${r.status} ms=${r.ms} contentChars=${content?.length ?? 0}`)
     // A2 — system instruction arrived: a live model obeys the marker contract
     const systemArrived = typeof content === 'string' && content.includes(MARKER)
@@ -134,6 +149,7 @@ async function runModel(model) {
       { role: 'user', content: 'سجل بيع 3 علب زيت عباد 1.5 لتر بإجمالي 255 جنيه' },
     ], { tools: [TOOL, READ_TOOL] })
     const parsed = safeJson(r.raw)
+    observeResponse(r, parsed)
     const calls = extractToolCalls(parsed)
     const first = calls[0]
     const called = matchesExpectedSaleCall(first)
@@ -149,6 +165,7 @@ async function runModel(model) {
       { role: 'user', content: 'سجل بيع 10 شاي العروسة بـ 150 جنيه' },
     ], { tools: [TOOL, READ_TOOL] })
     const parsed = safeJson(r.raw)
+    observeResponse(r, parsed)
     const calls = extractToolCalls(parsed)
     const violator = calls.find((c) => c.name === 'record_sale')
     add('A4', 'refusal: write tool not called when forbidden', !violator, violator ? `called=${violator.name} (VIOLATION)` : 'no write tool call')
@@ -158,8 +175,10 @@ async function runModel(model) {
 
   // A5 — cost/latency measurement (reported, not a pass/fail gate by itself)
   const pricing = PRICING[model]
-  const cost = pricing ? (usage.inputTokens * pricing.input + usage.outputTokens * pricing.output) / 1_000_000 : null
-  add('A5', 'latency + cost measured', true, `usage=in ${usage.inputTokens}/out ${usage.outputTokens} estCostUsd=${cost == null ? 'n/a' : cost.toFixed(6)}`)
+  const cost = pricing && usageMeasured ? (usage.inputTokens * pricing.input + usage.outputTokens * pricing.output) / 1_000_000 : null
+  const latencyMeasured = successfulRequests > 0 && totalLatencyMs > 0
+  add('A5', 'request latency measured; cost reported only with provider token usage', latencyMeasured,
+    `successfulRequests=${successfulRequests}; totalLatencyMs=${Math.round(totalLatencyMs)}; tokenUsage=${usageMeasured ? `in ${usage.inputTokens}/out ${usage.outputTokens}` : 'not returned by provider'}; estCostUsd=${cost == null ? 'n/a' : cost.toFixed(6)}`)
 
   return { model, checks }
 }
