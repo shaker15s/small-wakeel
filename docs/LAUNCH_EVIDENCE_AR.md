@@ -6,7 +6,20 @@
 
 Workflow: `.github/workflows/ci.yml`. كل تشغيل يحفظ `ci.log` و`pilot-gate.json` وبيانات SHA/Run ID في Artifact اسمه `wakil-validation-<sha>-<run-id>`.
 
-بعد تشغيل GitHub Actions، تحقّق أن الـrun على SHA المقصود انتهى `success` وأن الـArtifact لنفس رقم التشغيل موجود. نجاح CI لا يعني أن حالة إطلاق SaaS أصبحت GO.
+بعد تشغيل GitHub Actions، تحقّق أن الـrun على SHA المقصود انتهى `success` وأن الـArtifact لنفس رقم التشغيل موجود. لا يمكن للـrun أن يثبت نجاحه النهائي من داخله؛ لذلك مرّر الدليل بعد انتهاء التشغيل عبر `WAKIL_HOSTED_CI_EVIDENCE` في ملف JSON خارجي:
+```json
+{
+  "targetSha": "<exact SHA tested>",
+  "workflow": "WAKIL CI",
+  "conclusion": "success",
+  "runId": "<GitHub Actions run ID as a string>",
+  "runUrl": "https://github.com/<owner>/<repo>/actions/runs/<run-id>",
+  "artifactName": "wakil-validation-<exact-sha>-<run-id>",
+  "artifactSha256": "<64 hex chars of downloaded artifact archive>",
+  "completedAt": "<ISO-8601 timestamp>"
+}
+```
+نزّل الـArtifact واحسب بصمته الفعلية، ولا تستخدم القيم التمثيلية أعلاه. يجب أن يطابق التقرير SHA وRun ID نفسهما. نجاح CI لا يعني أن حالة إطلاق SaaS أصبحت GO.
 
 ## 2. قبول الموديل الحي
 

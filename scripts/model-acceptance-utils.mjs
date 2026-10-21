@@ -77,5 +77,5 @@ export function allAcceptanceChecksPass(results) {
     && results.length > 0
     && results.every((model) => Array.isArray(model.checks)
       && model.checks.length > 0
-      && model.checks.every((check) => check.id === 'A5' || check.pass === true));
+      && model.checks.every((check) => check.pass === true));
 }

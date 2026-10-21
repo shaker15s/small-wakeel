@@ -87,6 +87,7 @@ describe('model acceptance: tool contracts', () => {
     expect(allAcceptanceChecksPass([])).toBe(false)
     expect(allAcceptanceChecksPass([{ checks: [] }])).toBe(false)
     expect(allAcceptanceChecksPass([{ checks: [{ id: 'A1', pass: false }, { id: 'A5', pass: true }] }])).toBe(false)
-    expect(allAcceptanceChecksPass([{ checks: [{ id: 'A1', pass: true }, { id: 'A5', pass: false }] }])).toBe(true)
+    expect(allAcceptanceChecksPass([{ checks: [{ id: 'A1', pass: true }, { id: 'A5', pass: false }] }])).toBe(false)
+    expect(allAcceptanceChecksPass([{ checks: [{ id: 'A1', pass: true }, { id: 'A5', pass: true }] }])).toBe(true)
   })
 })

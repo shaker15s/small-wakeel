@@ -173,12 +173,14 @@ async function runModel(model) {
     add('A4', 'refusal: write tool not called when forbidden', false, e.message)
   }
 
-  // A5 — cost/latency measurement (reported, not a pass/fail gate by itself)
+  // A5 — telemetry is a required acceptance check; never fabricate measurements.
   const pricing = PRICING[model]
   const cost = pricing && usageMeasured ? (usage.inputTokens * pricing.input + usage.outputTokens * pricing.output) / 1_000_000 : null
   const latencyMeasured = successfulRequests > 0 && totalLatencyMs > 0
-  add('A5', 'request latency measured; cost reported only with provider token usage', latencyMeasured,
-    `successfulRequests=${successfulRequests}; totalLatencyMs=${Math.round(totalLatencyMs)}; tokenUsage=${usageMeasured ? `in ${usage.inputTokens}/out ${usage.outputTokens}` : 'not returned by provider'}; estCostUsd=${cost == null ? 'n/a' : cost.toFixed(6)}`)
+  const priceKnownOrMock = isMockEndpoint || Boolean(pricing)
+  const measurementPass = latencyMeasured && usageMeasured && priceKnownOrMock
+  add('A5', 'latency and token usage measured; live cost requires known pricing', measurementPass,
+    `successfulRequests=${successfulRequests}; totalLatencyMs=${Math.round(totalLatencyMs)}; tokenUsage=${usageMeasured ? `in ${usage.inputTokens}/out ${usage.outputTokens}` : 'not returned by provider'}; pricing=${pricing ? 'known' : isMockEndpoint ? 'mock/no billable price' : 'MISSING'}; estCostUsd=${cost == null ? 'n/a' : cost.toFixed(6)}`)
 
   return { model, checks }
 }

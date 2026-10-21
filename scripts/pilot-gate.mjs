@@ -196,29 +196,42 @@ const items = []
   })
 }
 
-// 6. Hosted CI on the exact SHA, with a persistent artifact for the same run.
+// 6. Hosted CI needs independent evidence of a COMPLETED successful run; a running job cannot certify itself.
 {
   const workflowPath = '.github/workflows/ci.yml'
   const workflowContent = existsSync(join(root, workflowPath)) ? readFileSync(join(root, workflowPath), 'utf8') : ''
   const workflowConfigured = workflowContent.includes('bash scripts/ci.sh')
     && workflowContent.includes('actions/upload-artifact')
     && workflowContent.includes('ci-results')
-  const hostedRunMatches = process.env.GITHUB_ACTIONS === 'true'
-    && process.env.GITHUB_WORKFLOW === 'WAKIL CI'
-    && process.env.GITHUB_SHA === sha
-    && Boolean(process.env.GITHUB_RUN_ID)
+  const proof = readExternalEvidence('WAKIL_HOSTED_CI_EVIDENCE')
+  const e = proof.value
+  let runUrlValid = false
+  try {
+    const u = new URL(e?.runUrl ?? '')
+    runUrlValid = u.protocol === 'https:' && u.hostname === 'github.com'
+      && /^\/[^/]+\/[^/]+\/actions\/runs\/\d+\/?$/.test(u.pathname)
+  } catch { /* malformed URL stays invalid */ }
+  const proofValid = Boolean(e
+    && e.targetSha === sha
+    && e.workflow === 'WAKIL CI'
+    && e.conclusion === 'success'
+    && typeof e.runId === 'string' && /^\d+$/.test(e.runId)
+    && validTimestamp(e.completedAt)
+    && typeof e.artifactName === 'string' && e.artifactName.includes(sha)
+    && validEvidenceHash(e.artifactSha256)
+    && runUrlValid)
+  const ok = workflowConfigured && proofValid
   items.push({
     id: '6_hosted_ci_exact_sha',
-    requirement: 'CI مستضاف نفّذ الاختبارات على SHA مطابق وحفظ artifacts مرتبطة بنفس التشغيل',
-    status: workflowConfigured && hostedRunMatches ? 'met' : 'not_met',
-    evidence: [
-      `workflow configured: ${workflowConfigured}`,
-      `GITHUB_ACTIONS: ${process.env.GITHUB_ACTIONS ?? 'unset'}`,
-      `GITHUB_WORKFLOW: ${process.env.GITHUB_WORKFLOW ?? 'unset'}`,
-      `GITHUB_SHA matches checked-out HEAD: ${Boolean(process.env.GITHUB_SHA && process.env.GITHUB_SHA === sha)}`,
-      `GITHUB_RUN_ID: ${process.env.GITHUB_RUN_ID ?? 'unset'}`,
-      'After completion, verify the Actions run conclusion and retrieve its matching artifact; a running step alone is not final proof.',
-    ],
+    requirement: 'CI مستضاف اكتمل بنجاح على SHA مطابق وحُفظ Artifact مطابق مع دليل مستقل',
+    status: ok ? 'met' : 'not_met',
+    evidence: ok
+      ? [`completed successful CI evidence for SHA ${sha}`, `run: ${e.runUrl}`, `artifact: ${e.artifactName}`, `artifact SHA-256: ${e.artifactSha256}`]
+      : [
+          `workflow configured: ${workflowConfigured}`,
+          proof.error ?? 'completed-run evidence missing or invalid',
+          'The running CI job never marks itself as a completed successful run. Supply evidence only after GitHub Actions finishes and the artifact is verified.',
+        ],
   })
 }
 
