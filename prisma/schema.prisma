@@ -52,6 +52,7 @@ model Business {
   invitations Invitation[]
   settings       AgentSettings?
   tools          CustomTool[] @relation("BusinessTools")
+  pilotBaselines PilotBaseline[]
 }
 
 model User {
@@ -680,6 +681,25 @@ model CashbookDialogue {
 // whose supplier/total arrive after the quantity). One active request per
 // conversation; expires like CashbookDialogue (20 min) so a stale «سجله كصنف
 // جديد» never hijacks next week's question.
+// R84 / PR-015 (plan v2 §13 pilot): the OWNER-REPORTED baseline for one
+// agreed workflow — «سجل خط أساس» for the before/after value comparison.
+// Values are human-measured (source: owner_reported) and are NEVER confused
+// with ledger-measured post-use numbers; nulls stay null (no zero-as-unknown).
+model PilotBaseline {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  workflow   String // agreed workflow name, e.g. «إقفال الكاش ونهاية اليوم»
+  tasksCount Int? // how many times the workflow ran in the baseline window
+  minutes    Float? // actual minutes per task, the old way
+  errors     Int? // owner-counted mistakes/rework in the baseline window
+  note       String?
+  recordedBy String // the userId who measured it
+  createdAt  DateTime @default(now())
+
+  @@index([businessId, createdAt])
+}
+
 model PendingRequest {
   id             String   @id @default(cuid())
   businessId     String

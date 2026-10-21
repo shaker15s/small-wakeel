@@ -11,6 +11,7 @@
     "db:push": "prisma db push --accept-data-loss",
     "db:generate": "bash scripts/prisma-generate.sh",
     "model:acceptance": "node scripts/model-acceptance.mjs",
+    "pilot:gate": "node scripts/pilot-gate.mjs",
     "db:migrate": "bun scripts/migrate.ts",
     "db:reset": "prisma migrate reset",
     "db:sync": "bun scripts/db-sync.ts",
@@ -33,7 +34,7 @@
     "mail:deliver": "bun scripts/mail-worker.ts",
     "recovery:quarantine": "bun scripts/restore-quarantine.ts",
     "smoke:crash": "bun scripts/financial-crash-smoke.ts",
-    "model:acceptance": "bun scripts/live-model-acceptance.ts",
+    "model:acceptance:legacy": "bun scripts/live-model-acceptance.ts",
     "voice:acceptance": "bun scripts/live-voice-acceptance.ts"
   },
   "dependencies": {
