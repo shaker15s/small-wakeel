@@ -196,7 +196,7 @@ function detect(text: string): { kind: "write" | "read" | "chat" | "schedule"; o
   // «بـ٤٠» is the PRICE, never the quantity: a fixture that sent 40 as qty billed
   // «بيع ٤٠ كيلو» for «بعت علبة … بـ٤٠» (live R29). A number glued to a unit word
   // is the quantity; a «بـN / بسعر N» clause is the money.
-  const priceClause = text.match(/(?:بـ|بسعر|بمبلغ|بـ)\s*([\d٠-٩][\d٠-٩.,]*)/);
+  const priceClause = text.match(/(?:بـ|بسعر|بمبلغ|بإجمالي|بالإجمالي|إجمالي|الاجمالي|الإجمالي|المجموع)\s*([\d٠-٩][\d٠-٩.,]*)/);
   const unitNum = text.match(/([\d٠-٩][\d٠-٩.,]*)\s*(?:كيلو|كيلوجرام|جرام|جم|لتر|علبه|علبة|علب|كيس|اكياس|شريط|قرص|اقراص|قطعه|قطعة|كرتونه|كرتونة|باكيت|برطمان|طبق|زجاجه|زجاجة)/);
   const price = priceClause ? toNum(priceClause[1]) : undefined;
   const qty = unitNum ? toNum(unitNum[1]) : price != null ? 1 : numbers[0];

@@ -23,6 +23,7 @@
 import { readFileSync } from 'node:fs'
 import { createClient } from '@libsql/client'
 import { getDMMF } from '@prisma/internals'
+import { hasMatchingIndexName, parseIndexDirectives } from './lib/db-index-names'
 
 interface DmmfField {
   name: string
@@ -64,27 +65,6 @@ const SQL_TYPE: Record<string, string> = {
 
 function quote(id: string): string {
   return `"${id.replace(/"/g, '""')}"`
-}
-
-/** `@@index([a, b])` / `@@unique([a, b])` lines are read straight from the
- *  schema text: the DMMF this Prisma version exposes does not carry them. */
-function parseIndexDirectives(schema: string): Record<string, { name: string; kind: 'index' | 'unique'; fields: string[]; raw: string }[]> {
-  const out: Record<string, { name: string; kind: 'index' | 'unique'; fields: string[]; raw: string }[]> = {}
-  const modelRe = /model\s+(\w+)\s*\{([^}]*)\}/g
-  let m: RegExpExecArray | null
-  while ((m = modelRe.exec(schema))) {
-    const [, model, body] = m
-    for (const line of body.split('\n')) {
-      const trimmed = line.trim()
-      const match = /^@@(index|unique)\(\[([^\]]+)\](?:,\s*(?:map:\s*"([^"]+)")?[^)]*)?\)/.exec(trimmed)
-      if (!match) continue
-      const [, kind, fieldsRaw, mapName] = match
-      const fields = fieldsRaw.split(',').map((f) => f.trim().replace(/\(.*\)$/, ''))
-      const name = mapName || `${model}_${fields.join('_')}_${kind}`
-      ;(out[model] ??= []).push({ name, kind: kind as 'index' | 'unique', fields, raw: trimmed })
-    }
-  }
-  return out
 }
 
 function createTableSql(model: DmmfModel, indexes: { name: string; fields: string[] }[], uniqueIndexes: { fields: string[] }[]): string {
@@ -177,7 +157,7 @@ async function main() {
   const existingIndexes = new Set(indexRes.rows.map((r) => String(r.name)))
   for (const model of models) {
     for (const idx of indexDirectives[model.name] ?? []) {
-      if (existingIndexes.has(idx.name)) continue
+      if (hasMatchingIndexName(idx, existingIndexes)) continue
       statements.push(createIndexSql(model.name, idx))
       report.push(`+ index   ${idx.name} (${idx.fields.join(', ')})`)
     }

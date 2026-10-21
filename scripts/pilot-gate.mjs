@@ -2,7 +2,7 @@
 /**
  * وكيل — `pilot:gate` (PR-015 / plan v2 §13 «بوابة GO للإطلاق العام»).
  *
- * Evaluates the plan's 8 GO-gate items on THIS SHA with REAL evidence:
+ * Evaluates release gates on THIS SHA with REAL evidence:
  * focused test batteries are executed (not asserted from memory), the model
  * acceptance report is consumed, and documentation/infrastructure presence
  * is checked. Honesty rules:
@@ -16,9 +16,9 @@
  *     output.
  *
  * Usage:
- *   node scripts/pilot-gate.mjs [--report out.json]
- * Exit: 0 when the report was produced (the gate ran); the GO/NO-GO outcome
- * lives in the report's `overall` field.
+ *   node scripts/pilot-gate.mjs [--report out.json] [--strict]
+ * Exit: 0 when the report was produced by default; `--strict` exits nonzero
+ * unless every launch gate has evidence. A NO-GO report is never a GO decision.
  */
 import { spawn } from 'node:child_process'
 import { existsSync, writeFileSync, readFileSync, readdirSync, mkdtempSync, rmSync } from 'node:fs'
@@ -79,10 +79,28 @@ function fileEvidence(...paths) {
   return { found, missing }
 }
 
+function readExternalEvidence(envName) {
+  const evidencePath = process.env[envName]
+  if (!evidencePath) return { path: null, value: null, error: `${envName} is not set` }
+  try {
+    return { path: evidencePath, value: JSON.parse(readFileSync(evidencePath, 'utf8')), error: null }
+  } catch (error) {
+    return { path: evidencePath, value: null, error: `cannot read valid JSON: ${String(error).slice(0, 180)}` }
+  }
+}
+
+function validEvidenceHash(value) {
+  return typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value)
+}
+
+function validTimestamp(value) {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value))
+}
+
 // --- the 8 gate items (plan §13) -------------------------------------------
 const items = []
 
-// 1. P0–P8 closed with PERSISTENT (committed) evidence
+// 1. Historical reports are records, not proof that the present SHA passed every launch gate.
 {
   const ev = fileEvidence(
     'docs/LAUNCH_VERIFICATION_2026-10-17.md',
@@ -91,27 +109,31 @@ const items = []
   const docs = ev.found
   const committed = git('ls-files', 'docs')?.split('\n').filter(Boolean).length ?? 0
   items.push({
-    id: '1_p0_p8_evidence',
-    requirement: 'P0–P8 مغلقة بأدلة دائمة (committed verification artifacts on this SHA)',
+    id: '1_historical_verification_records',
+    requirement: 'تقارير التحقق التاريخية محفوظة؛ وجودها وحده لا يثبت إغلاق كل بوابة على SHA الحالي',
     status: docs.length >= 2 ? 'met' : 'not_evidenced',
     evidence: [
       `committed docs files: ${committed}`,
-      ...docs.map((d) => `present: ${d}`),
+      ...docs.map((d) => `historical record present: ${d}`),
       ...ev.missing.map((d) => `MISSING: ${d}`),
-      'per-stage evidence is recorded in these verification docs + each PR commit (R70–R84 gates)',
+      `current candidate SHA: ${sha}`,
+      'Historical reports are records, not substitutes for current-run tests or external audit/load evidence.',
     ],
   })
 }
 
-// 2. the 10 sectors pass their acceptance tests
+// 2. The following sector test covers registry contracts only. Full workflows are a separate gate.
 {
   const results = await runBattery(['tests/unit/sector-contracts.test.ts'])
   const allOk = results.every((r) => r.ok)
   items.push({
     id: '2_sectors_acceptance',
-    requirement: 'القطاعات العشرة اجتازت اختبارات القبول الخاصة بها',
+    requirement: 'تعريفات القطاعات وعقود الأدوات متسقة (لا يثبت هذا وحده عمل دورة مالية كاملة في كل قطاع)',
     status: allOk ? 'met' : 'not_met',
-    evidence: results.map((r) => `${r.ok ? 'PASS' : 'FAIL'} ${r.file}${r.ok ? '' : ' — ' + r.tail}`),
+    evidence: [
+      ...results.map((r) => `${r.ok ? 'PASS' : 'FAIL'} ${r.file}${r.ok ? '' : ' — ' + r.tail}`),
+      'Scope limitation: registry/schema consistency only; per-sector end-to-end workflow evidence is required below.',
+    ],
   })
 }
 
@@ -127,7 +149,7 @@ const items = []
     const rep = JSON.parse(readFileSync(reportPath, 'utf8'))
     live = rep.liveAcceptance === true
     env = rep.environment ?? 'unknown'
-    allPass = rep.models?.every((m) => m.passed === true) ?? false
+    allPass = Array.isArray(rep.results) && rep.results.length > 0 && rep.results.every((m) => Array.isArray(m.checks) && m.checks.length > 0 && m.checks.every((c) => c.id === 'A5' || c.pass === true))
   } catch { /* no report */ }
   items.push({
     id: '3_model_acceptance_live',
@@ -174,62 +196,146 @@ const items = []
   })
 }
 
-// 6. hosted CI + artifacts tied to SHA + backup/restore/secret-rotation drills
+// 6. Hosted CI needs independent evidence of a COMPLETED successful run; a running job cannot certify itself.
 {
-  const workflows = existsSync(join(root, '.github/workflows')) ? readdirSync(join(root, '.github/workflows')) : []
-  const staged = existsSync(join(root, 'docs/ci/github-actions.yml'))
-  const backupDrill = existsSync(join(root, 'scripts/backup-drill.ts'))
-  const rotate = existsSync(join(root, 'scripts/rotate-provider-secrets.ts'))
+  const workflowPath = '.github/workflows/ci.yml'
+  const workflowContent = existsSync(join(root, workflowPath)) ? readFileSync(join(root, workflowPath), 'utf8') : ''
+  const workflowConfigured = workflowContent.includes('bash scripts/ci.sh')
+    && workflowContent.includes('actions/upload-artifact')
+    && workflowContent.includes('ci-results')
+  const proof = readExternalEvidence('WAKIL_HOSTED_CI_EVIDENCE')
+  const e = proof.value
+  let runUrlValid = false
+  try {
+    const u = new URL(e?.runUrl ?? '')
+    runUrlValid = u.protocol === 'https:' && u.hostname === 'github.com'
+      && /^\/[^/]+\/[^/]+\/actions\/runs\/\d+\/?$/.test(u.pathname)
+  } catch { /* malformed URL stays invalid */ }
+  const proofValid = Boolean(e
+    && e.targetSha === sha
+    && e.workflow === 'WAKIL CI'
+    && e.conclusion === 'success'
+    && typeof e.runId === 'string' && /^\d+$/.test(e.runId)
+    && validTimestamp(e.completedAt)
+    && typeof e.artifactName === 'string' && e.artifactName.includes(sha)
+    && validEvidenceHash(e.artifactSha256)
+    && runUrlValid)
+  const ok = workflowConfigured && proofValid
   items.push({
-    id: '6_ci_hosted',
-    requirement: 'CI مستضاف + artifacts مرتبطة بـ SHA + نسخ/استعادة/تدوير أسرار ناجحة على بيئة مشابهة للإنتاج',
-    status: workflows.length > 0 ? 'met' : 'not_met',
-    evidence: [
-      `.github/workflows: ${workflows.length > 0 ? workflows.join(', ') : 'ABSENT — the workflow exists only staged at docs/ci/github-actions.yml (PR-002 blocked on hosted CI)'}`,
-      `workflow staged in docs: ${staged}`,
-      `backup-drill script: ${backupDrill ? 'present' : 'MISSING'}`,
-      `rotate-provider-secrets script: ${rotate ? 'present' : 'MISSING'}`,
-      'hosted runs on THIS SHA: not verifiable from this environment',
-    ],
+    id: '6_hosted_ci_exact_sha',
+    requirement: 'CI مستضاف اكتمل بنجاح على SHA مطابق وحُفظ Artifact مطابق مع دليل مستقل',
+    status: ok ? 'met' : 'not_met',
+    evidence: ok
+      ? [`completed successful CI evidence for SHA ${sha}`, `run: ${e.runUrl}`, `artifact: ${e.artifactName}`, `artifact SHA-256: ${e.artifactSha256}`]
+      : [
+          `workflow configured: ${workflowConfigured}`,
+          proof.error ?? 'completed-run evidence missing or invalid',
+          'The running CI job never marks itself as a completed successful run. Supply evidence only after GitHub Actions finishes and the artifact is verified.',
+        ],
   })
 }
 
-// 7. independent security audit + documented privacy/terms/support/operations/monitoring
+// 7. Production-like restore and secret rotation require external evidence, not just local scripts.
+{
+  const proof = readExternalEvidence('WAKIL_RECOVERY_EVIDENCE')
+  const e = proof.value
+  const valid = Boolean(e
+    && e.targetSha === sha
+    && e.environment === 'production-like'
+    && e.result === 'pass'
+    && e.backupRestore?.passed === true
+    && e.secretRotation?.passed === true
+    && validTimestamp(e.measuredAt)
+    && validEvidenceHash(e.reportSha256))
+  items.push({
+    id: '7_production_like_recovery',
+    requirement: 'إثبات مستقل لاستعادة نسخة كاملة وتدوير الأسرار على بيئة شبيهة بالإنتاج لنفس SHA',
+    status: valid ? 'met' : 'not_met',
+    evidence: valid
+      ? [`recovery/rotation evidence bound to SHA ${sha}`, `evidence file: ${proof.path}`]
+      : [proof.error ?? 'evidence does not match current SHA, environment, result, and required subchecks',
+          'Synthetic local backup drills alone do not satisfy production-like recovery acceptance.'],
+  })
+}
+
+// 8. Independent security audit plus legally reviewed privacy and terms.
 {
   const ev = fileEvidence('docs/SECURITY.md', 'docs/OPERATIONS.md', 'docs/RUNTIMES.md')
   const privacy = existsSync(join(root, 'docs/PRIVACY.md')) || existsSync(join(root, 'PRIVACY.md'))
   const terms = existsSync(join(root, 'docs/TERMS.md')) || existsSync(join(root, 'TERMS.md'))
-  const audit = execSync('git log --oneline -200', { cwd: root, encoding: 'utf8' }).toLowerCase().includes('independent audit')
+  const proof = readExternalEvidence('WAKIL_SECURITY_AUDIT_EVIDENCE')
+  const e = proof.value
+  const audit = Boolean(e
+    && e.targetSha === sha
+    && e.independent === true
+    && e.result === 'pass'
+    && typeof e.auditor === 'string' && e.auditor.trim().length >= 3
+    && validTimestamp(e.completedAt)
+    && validEvidenceHash(e.reportSha256))
   const missing = []
   if (!privacy) missing.push('privacy policy (PRIVACY.md)')
   if (!terms) missing.push('terms of service (TERMS.md)')
-  if (!audit) missing.push('independent security audit (no committed audit artifact)')
+  if (!audit) missing.push(`independent audit evidence missing/invalid: ${proof.error ?? 'not bound to current SHA or invalid schema'}`)
   items.push({
-    id: '7_security_audit_docs',
-    requirement: 'تدقيق أمني مستقل + خصوصية وشروط ودعم وتشغيل ومراقبة موثقة',
+    id: '8_security_audit_and_policies',
+    requirement: 'تدقيق أمني مستقل موثق + سياسة خصوصية وشروط خدمة منشورة',
     status: missing.length === 0 ? 'met' : 'not_met',
     evidence: [
       ...ev.found.map((d) => `present: ${d}`),
       ...missing.map((m) => `MISSING: ${m}`),
+      ...(audit ? [`independent audit report hash: ${e.reportSha256}`] : []),
     ],
   })
 }
 
-// 8. unit cost + capacity known, usage limits, rollback, incident plan
+// 9. Unit-cost data, usage controls, rollback guidance, and measured capacity.
 {
   const registry = existsSync(join(root, 'src/lib/agent/model-registry.ts'))
   const ratelimit = existsSync(join(root, 'src/lib/security/rateLimit.ts'))
   const rollbackDocs = execSync('git grep -l -i "rollback" -- docs/ | head -5', { cwd: root, encoding: 'utf8' }).trim().split('\n').filter(Boolean)
-  const capacity = existsSync(join(root, 'docs/CAPACITY.md'))
+  const proof = readExternalEvidence('WAKIL_CAPACITY_EVIDENCE')
+  const e = proof.value
+  const capacity = Boolean(e
+    && e.targetSha === sha
+    && e.environment === 'production-like'
+    && e.result === 'pass'
+    && Number.isFinite(e.totalRequests) && e.totalRequests >= 1000
+    && Number.isFinite(e.concurrency) && e.concurrency >= 10
+    && Number.isFinite(e.p95Ms) && e.p95Ms > 0
+    && Number.isFinite(e.p99Ms) && e.p99Ms >= e.p95Ms
+    && Number.isFinite(e.errorRatePct) && e.errorRatePct >= 0 && e.errorRatePct <= 1
+    && validTimestamp(e.measuredAt)
+    && validEvidenceHash(e.reportSha256))
+  const ok = registry && ratelimit && rollbackDocs.length > 0 && capacity
   items.push({
-    id: '8_cost_capacity_rollback',
-    requirement: 'تكلفة الوحدة وسعة التشغيل معروفتان + حدود استخدام + تراجع (rollback) + خطة حوادث',
-    status: registry && ratelimit && capacity && rollbackDocs.length > 0 ? 'met' : 'not_met',
+    id: '9_capacity_and_operability',
+    requirement: 'تكلفة الموديل وحدود الاستخدام وتراجع موثق وقياس ضغط على بيئة شبيهة بالإنتاج',
+    status: ok ? 'met' : 'not_met',
     evidence: [
-      `model-registry pricing data: ${registry ? 'present' : 'MISSING'}`,
-      `usage limits (rateLimit): ${ratelimit ? 'present' : 'MISSING'}`,
-      `rollback documented in: ${rollbackDocs.length > 0 ? rollbackDocs.join(', ') : 'nowhere'}`,
-      `capacity/load evidence (docs/CAPACITY.md): ${capacity ? 'present' : 'MISSING — capacity is NOT measured yet; a load test on a prod-like env is required'}`,
+      `model registry with pricing: ${registry ? 'present' : 'MISSING'}`,
+      `rate limits: ${ratelimit ? 'present' : 'MISSING'}`,
+      `rollback documents: ${rollbackDocs.length > 0 ? rollbackDocs.join(', ') : 'MISSING'}`,
+      capacity ? `load evidence accepted for SHA ${sha}; requests=${e.totalRequests}, concurrency=${e.concurrency}, p95=${e.p95Ms}ms, p99=${e.p99Ms}ms, errors=${e.errorRatePct}%`
+        : `capacity evidence missing/invalid: ${proof.error ?? 'must match current SHA and measured production-like schema'}`,
+    ],
+  })
+}
+
+// 10. Advertised sector support needs end-to-end acceptance, not a registry contract alone.
+{
+  const testPath = 'tests/integration/sector-end-to-end.test.ts'
+  const exists = existsSync(join(root, testPath))
+  const result = exists ? await runBattery([testPath]) : []
+  const passed = exists && result.length > 0 && result.every((r) => r.ok)
+  items.push({
+    id: '10_sector_end_to_end',
+    requirement: 'مسار كتابة مالي معتمد واحد على الأقل لكل قطاع معلن اجتاز E2E (لا يعني ذلك اكتمال كل الخصائص المتخصصة)',
+    status: passed ? 'met' : 'not_met',
+    evidence: [
+      ...(exists
+        ? result.map((r) => `${r.ok ? 'PASS' : 'FAIL'} ${r.file}${r.ok ? '' : ' — ' + r.tail}`)
+        : [`MISSING: ${testPath}; sector contracts are not an end-to-end test.`]),
+      'Scope limitation: canonical sale path for stock sectors and one membership path for gym; sector-specific expiry, grams, attendance, and other specialized flows require separate acceptance cases.',
     ],
   })
 }
@@ -256,4 +362,5 @@ if (reportIdx > 0) writeFileSync(process.argv[reportIdx + 1], JSON.stringify(rep
 console.log(JSON.stringify(report, null, 2))
 try { rmSync(tmp, { recursive: true, force: true }) } catch { /* best effort */ }
 // the gate RAN successfully; its verdict is in the report
-process.exit(0)
+if (process.argv.includes('--strict') && overall !== 'GO_CANDIDATE') process.exitCode = 1
+else process.exit(0)
