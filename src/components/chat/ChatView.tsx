@@ -552,6 +552,28 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
     [userId, business.id, toast, queryClient],
   )
 
+  const reject = useCallback(
+    async (card: ActionCardDTO) => {
+      if (!card.opId) return
+      setBusyOpId(card.opId)
+      try {
+        const res = await api.confirmOperation(card.opId, 'reject', userId)
+        setTurns((prev) =>
+          prev.map((t) => (t.card?.opId === card.opId ? { ...t, card: { ...t.card!, status: 'CANCELLED' } } : t)),
+        )
+        toast({ title: 'اتلغت المسودة', description: `${res.operation.ref} اتلغت بلا أي أثر` })
+        void queryClient.invalidateQueries({ queryKey: ['cashbook', business.id] })
+        void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.overview(business.id, userId) })
+          void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.morningBrief(business.id, userId) })
+      } catch (err) {
+        toast({ title: 'مشكلة', description: err instanceof Error ? err.message : 'جرّب تاني', variant: 'destructive' })
+      } finally {
+        setBusyOpId(null)
+      }
+    },
+    [userId, business.id, toast, queryClient],
+  )
+
   // R60: keyboard quick-approve — the owner's hands are often on the keyboard,
   // not the mouse. e.code (not e.key) so it works on Arabic keyboard layouts.
   useEffect(() => {
@@ -574,28 +596,6 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [keyboardTargetId, turns])
-
-  const reject = useCallback(
-    async (card: ActionCardDTO) => {
-      if (!card.opId) return
-      setBusyOpId(card.opId)
-      try {
-        const res = await api.confirmOperation(card.opId, 'reject', userId)
-        setTurns((prev) =>
-          prev.map((t) => (t.card?.opId === card.opId ? { ...t, card: { ...t.card!, status: 'CANCELLED' } } : t)),
-        )
-        toast({ title: 'اتلغت المسودة', description: `${res.operation.ref} اتلغت بلا أي أثر` })
-        void queryClient.invalidateQueries({ queryKey: ['cashbook', business.id] })
-        void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.overview(business.id, userId) })
-          void queryClient.invalidateQueries({ queryKey: QUERY_KEYS.morningBrief(business.id, userId) })
-      } catch (err) {
-        toast({ title: 'مشكلة', description: err instanceof Error ? err.message : 'جرّب تاني', variant: 'destructive' })
-      } finally {
-        setBusyOpId(null)
-      }
-    },
-    [userId, business.id, toast, queryClient],
-  )
 
   // ---- derived ----
   const lastTurn = turns.length > 0 ? turns[turns.length - 1] : null
