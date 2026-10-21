@@ -5,4 +5,5 @@ export function buildChatCompletionsUrl(base: string): string;
 export function classifyEndpoint(base: string, models?: string[]): 'unconfigured' | 'mock' | 'live';
 export function extractToolCalls(parsed: unknown): AcceptanceToolCall[];
 export function matchesExpectedSaleCall(call: AcceptanceToolCall | undefined): boolean;
+export function matchesExpectedSaleCalls(calls: AcceptanceToolCall[]): boolean;
 export function allAcceptanceChecksPass(results: AcceptanceModelResult[]): boolean;

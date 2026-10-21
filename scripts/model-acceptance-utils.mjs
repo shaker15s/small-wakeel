@@ -60,8 +60,16 @@ export function matchesExpectedSaleCall(call) {
   return call?.name === 'record_sale'
     && typeof args?.item === 'string'
     && args.item.includes('زيت عباد')
-    && Number(args.qty) === 3
-    && Number(args.amount) === 255;
+    && typeof args.qty === 'number'
+    && Number.isSafeInteger(args.qty)
+    && args.qty === 3
+    && typeof args.amount === 'number'
+    && Number.isSafeInteger(args.amount)
+    && args.amount === 255;
+}
+
+export function matchesExpectedSaleCalls(calls) {
+  return Array.isArray(calls) && calls.length === 1 && matchesExpectedSaleCall(calls[0]);
 }
 
 export function allAcceptanceChecksPass(results) {

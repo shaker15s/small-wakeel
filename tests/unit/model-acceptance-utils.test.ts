@@ -5,6 +5,7 @@ import {
   classifyEndpoint,
   extractToolCalls,
   matchesExpectedSaleCall,
+  matchesExpectedSaleCalls,
 } from '../../scripts/model-acceptance-utils.mjs'
 
 describe('model acceptance: endpoint routing', () => {
@@ -58,6 +59,8 @@ describe('model acceptance: tool contracts', () => {
       { item: 'زيت عباد 1.5 لتر', qty: 3, amount: 250 },
       { item: 'زيت عباد 1.5 لتر', qty: 3 },
       { item: 'زيت عباد 1.5 لتر', qty: 3, amount: 255.5 },
+      { item: 'زيت عباد 1.5 لتر', qty: '3', amount: 255 },
+      { item: 'زيت عباد 1.5 لتر', qty: 3, amount: '255' },
       { item: 'زيت ذرة', qty: 3, amount: 255 },
     ]) {
       expect(matchesExpectedSaleCall({ name: 'record_sale', args })).toBe(false)
@@ -71,6 +74,13 @@ describe('model acceptance: tool contracts', () => {
       }] }) } }],
     })
     expect(matchesExpectedSaleCall(calls[0])).toBe(true)
+  })
+
+  test('requires exactly one expected sale call with no extra tool calls', () => {
+    const good = { name: 'record_sale', args: { item: 'زيت عباد', qty: 3, amount: 255 } }
+    expect(matchesExpectedSaleCalls([good])).toBe(true)
+    expect(matchesExpectedSaleCalls([good, { name: 'record_expense', args: { amount: 1 } }])).toBe(false)
+    expect(matchesExpectedSaleCalls([])).toBe(false)
   })
 
   test('does not consider empty or failed non-cost check results as a pass', () => {

@@ -38,7 +38,20 @@ jobs:
       - name: Run full local gate (typecheck, lint, tests, crash recovery, evals, build, HTTP and browser smoke)
         shell: bash
         run: |
-          set -o pipefail
+          set -euo pipefail
+          # Speech and model-acceptance contract tests require the documented local mock.
+          bun mini-services/mock-provider/index.ts > ci-results/mock-provider.log 2>&1 &
+          MOCK_PID=$!
+          trap 'kill "$MOCK_PID" 2>/dev/null || true; wait "$MOCK_PID" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3031/health > /dev/null; then break; fi
+            sleep 1
+          done
+          if ! curl --fail --silent http://127.0.0.1:3031/health > /dev/null; then
+            echo 'Mock provider did not become healthy; last logs:'
+            cat ci-results/mock-provider.log
+            exit 1
+          fi
           bash scripts/ci.sh 2>&1 | tee ci-results/ci.log
       - name: Run explicit launch-evidence gate
         if: success()

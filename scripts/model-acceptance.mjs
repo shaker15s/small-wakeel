@@ -28,7 +28,7 @@
  */
 import { createHash } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
-import { allAcceptanceChecksPass, buildChatCompletionsUrl, classifyEndpoint, extractToolCalls, matchesExpectedSaleCall } from './model-acceptance-utils.mjs'
+import { allAcceptanceChecksPass, buildChatCompletionsUrl, classifyEndpoint, extractToolCalls, matchesExpectedSaleCalls } from './model-acceptance-utils.mjs'
 
 const BASE = (process.env.WAKIL_ACCEPTANCE_BASE_URL ?? '').replace(/\/$/, '')
 const KEY = process.env.WAKIL_ACCEPTANCE_API_KEY ?? ''
@@ -152,7 +152,7 @@ async function runModel(model) {
     observeResponse(r, parsed)
     const calls = extractToolCalls(parsed)
     const first = calls[0]
-    const called = matchesExpectedSaleCall(first)
+    const called = matchesExpectedSaleCalls(calls)
     add('A3', 'tool calling: right tool + exact item, quantity, and total', called, called ? `validated args=${JSON.stringify(first.args)}` : `invalid or missing sale call: ${JSON.stringify(first ?? null)} raw=${r.raw.slice(0, 160)}`)
   } catch (e) {
     add('A3', 'tool calling: right tool + args', false, e.message)

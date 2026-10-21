@@ -316,11 +316,14 @@ const items = []
   const passed = exists && result.length > 0 && result.every((r) => r.ok)
   items.push({
     id: '10_sector_end_to_end',
-    requirement: 'سيناريوهات مالية متكاملة لكل قطاع معلن اجتازت الاختبارات على SHA الحالي',
+    requirement: 'مسار كتابة مالي معتمد واحد على الأقل لكل قطاع معلن اجتاز E2E (لا يعني ذلك اكتمال كل الخصائص المتخصصة)',
     status: passed ? 'met' : 'not_met',
-    evidence: exists
-      ? result.map((r) => `${r.ok ? 'PASS' : 'FAIL'} ${r.file}${r.ok ? '' : ' — ' + r.tail}`)
-      : [`MISSING: ${testPath}; sector contracts are not an end-to-end test.`],
+    evidence: [
+      ...(exists
+        ? result.map((r) => `${r.ok ? 'PASS' : 'FAIL'} ${r.file}${r.ok ? '' : ' — ' + r.tail}`)
+        : [`MISSING: ${testPath}; sector contracts are not an end-to-end test.`]),
+      'Scope limitation: canonical sale path for stock sectors and one membership path for gym; sector-specific expiry, grams, attendance, and other specialized flows require separate acceptance cases.',
+    ],
   })
 }
 

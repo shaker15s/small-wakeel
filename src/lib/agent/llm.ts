@@ -512,6 +512,11 @@ export async function* streamChat(
   yield* withStreamBudget(REPLY_STREAM_TIMEOUT_MS, (budget) => streamWithBudget(model, messages, budget))
 }
 async function* streamWithBudget(model: ModelInfo, messages: LLMMessage[], budget: ModelBudget): AsyncGenerator<StreamChunk> {
+  // streamExternal used to bypass WAKIL_OFFLINE and attempt network calls.
+  // Keep offline evals deterministic and prevent accidental external data egress.
+  if (process.env.WAKIL_OFFLINE === '1') {
+    throw new Error('offline mode (WAKIL_OFFLINE=1) — using deterministic fallback')
+  }
   let emittedContent = false
   if (model.source === 'external') {
     try {
@@ -599,6 +604,11 @@ export async function completeChat(model: ModelInfo, messages: LLMMessage[], opt
   return content
 }
 async function completeWithBudget(model: ModelInfo, messages: LLMMessage[], budget: ModelBudget, opts?: CompleteChatOptions): Promise<string> {
+  // Offline mode is a strict network boundary, not merely a preferred fallback.
+  // Reject before the external-provider ladder can query a configured endpoint.
+  if (process.env.WAKIL_OFFLINE === '1') {
+    throw new Error('offline mode (WAKIL_OFFLINE=1) — using deterministic fallback')
+  }
   if (model.source === 'external') {
     try {
       return await withBreaker(breakerKeyFor(model), () =>
