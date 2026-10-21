@@ -50,10 +50,11 @@ export interface PrefetchedEntitiesResult {
     matchedVia: 'canonical' | 'alias' | 'lexicon'
     spokenAlias?: string
     unit: string
-    sellPricePiastres: number
-    costPricePiastres: number
-    stockQty: number
-    lowStockThreshold: number
+    // R70 / PR-001: null = غير مسجل (unknown, never a fake 0)
+    sellPricePiastres: number | null
+    costPricePiastres: number | null
+    stockQty: number | null
+    lowStockThreshold: number | null
     batchNo?: string | null
     expiresAt?: string | null
   }[]
@@ -182,10 +183,13 @@ export function speculativePrefetchEntities(params: {
     }
   }
 
+  // R70 / PR-001: the model must SEE the unknowns — a null stock/price is
+  // rendered as `null (not recorded)` so the agent asks instead of assuming.
+  const numOrUnknown = (v: number | null, fmt: (n: number) => string) => (v == null ? 'null (not recorded)' : fmt(v))
   const lines: string[] = []
   for (const it of matchedItems.slice(0, 6)) {
     lines.push(
-      `  • Item "${it.name}" (id: ${it.id}, stock: ${fmtQty(it.stockQty, arUnit(it.unit))}, sell_price: ${egp(it.sellPricePiastres)}, cost_price: ${egp(it.costPricePiastres)}${
+      `  • Item "${it.name}" (id: ${it.id}, stock: ${numOrUnknown(it.stockQty, (n) => fmtQty(n, arUnit(it.unit)))}, sell_price: ${numOrUnknown(it.sellPricePiastres, egp)}, cost_price: ${numOrUnknown(it.costPricePiastres, egp)}${
         it.matchedVia === 'lexicon' ? `, matched_lexicon_alias: "${it.spokenAlias}"` : ''
       }${it.expiresAt ? `, expires: ${it.expiresAt}` : ''})`,
     )

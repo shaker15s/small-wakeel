@@ -68,6 +68,17 @@ export async function POST(req: Request) {
     const gate = await guard(req, { businessId, userId, permission: 'catalog.manage' })
     if (!gate.ok) return gate.res
 
+    // R75 / PR-007: file import is a CONSENT-gated feature. The owner grants
+    // it in the onboarding interview; no grant on file = a clear 403, and the
+    // consent the owner gave is re-checked on EVERY import, not once.
+    const { hasConsent } = await import('@/lib/domain/onboarding-profile')
+    if (!(await hasConsent(businessId, 'importFromFiles'))) {
+      return NextResponse.json(
+        { error: 'استيراد الملفات محتاج موافقتك — ارجع لإعداد النشاط ووافق على «استيراد ملفات»، أو أضف الأصناف من الشات' },
+        { status: 403 },
+      )
+    }
+
     const business = await db.business.findUnique({ where: { id: businessId } })
     if (!business) return notFound('النشاط التجاري غير موجود')
 

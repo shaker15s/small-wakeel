@@ -38,6 +38,31 @@ import { getGeminiClient } from './llm'
 
 
 const SUPPORTED_PLUGIN_MODULES = new Set(['inventory_audit', 'sales_analytics', 'margin_audit', 'receivables_aging', 'supplier_payables', 'expiry_shield'])
+
+// R78 / PR-009 (final plan v2 §8.3): the plugin MANIFEST permission model.
+// Permissions are NEVER read from a plugin spec — they are COMPUTED by the
+// server from the pipeline modules (the only code plugins may reference).
+// A spec that declares extra permissions is lying; the grant is the
+// server-computed set, locked at install time and re-checked at execution.
+export const MODULE_PERMISSIONS: Record<string, string> = {
+  inventory_audit: 'read:inventory',
+  expiry_shield: 'read:inventory',
+  sales_analytics: 'read:sales',
+  margin_audit: 'read:financial',
+  receivables_aging: 'read:financial',
+  supplier_payables: 'read:financial',
+}
+
+/** The effective permission grant of a pipeline — server-computed, sorted. */
+export function effectivePluginPermissions(pipeline: PluginStepSpec[]): string[] {
+  return [...new Set(pipeline.map((s) => MODULE_PERMISSIONS[s.module]).filter(Boolean))].sort()
+}
+
+/** True iff every supported module is read-only (the plugin boundary). */
+export function allPluginModulesReadOnly(): boolean {
+  return [...SUPPORTED_PLUGIN_MODULES].every((m) => (MODULE_PERMISSIONS[m] ?? '').startsWith('read:'))
+}
+
 function validatePluginPipeline(pipeline: PluginStepSpec[]): void {
   if (!Array.isArray(pipeline) || !pipeline.length || pipeline.length > 6 || pipeline.some((step) => !SUPPORTED_PLUGIN_MODULES.has(step.module))) throw new Error('unsupported_capability: الإضافة لازم تكون من وحدات التحليل المتاحة؛ مفيش كود حر أو استعلام وهمي')
   for (const step of pipeline) {
@@ -215,6 +240,11 @@ interface StoredPluginConfig {
   pipeline?: PluginStepSpec[]
   proactiveRules?: PluginProactiveRule[]
   quickPrompt?: string
+  /** R78 / PR-009: the SERVER-COMPUTED grant, locked at install time.
+   *  Execution refuses a pipeline that needs anything beyond this set. */
+  grantedPermissions?: string[]
+  /** R78 / PR-009: upgrade history (max 3) for one-step rollback. */
+  previousVersions?: { version: string; config: string; at: string }[]
 }
 
 function parsePluginConfig(raw: string, fallbackName: string): StoredPluginConfig {
@@ -272,6 +302,9 @@ export async function getBusinessPlugins(businessId: string): Promise<AgentPlugi
       proactiveRules: Array.isArray(cfg.proactiveRules) ? cfg.proactiveRules : [],
       quickPrompt: cfg.quickPrompt || `شغّل بلاجن ${row.name}`,
     }
+    // R78 / PR-009: the grant is always recomputed server-side from the
+    // stored pipeline — a tampered/lying `grantedPermissions` field is noise.
+    dto.permissions = effectivePluginPermissions(dto.pipeline)
     installedBySlug.set(slug, dto)
     if (!STARTER_PLUGIN_CATALOG.some((s) => s.slug === slug)) {
       customInstalled.push(dto)
@@ -514,6 +547,12 @@ export class PluginRegistry {
     }
     throw new Error('الأداة المطلوبة غير موجودة')
   }
+}
+
+// R78 / PR-009: every starter's grant is COMPUTED from its pipeline, never
+// hand-declared — one source of truth for the whole catalog.
+for (const s of STARTER_PLUGIN_CATALOG) {
+  s.permissions = effectivePluginPermissions(s.pipeline)
 }
 
 export const pluginRegistry = new PluginRegistry(STARTER_PLUGIN_CATALOG)
@@ -851,6 +890,21 @@ export async function installOrUpdatePlugin(params: {
       return cfg.slug === spec.slug || normalizeAr(r.name) === normalizeAr(spec.name)
     })
 
+    // R78 / PR-009: the grant is SERVER-COMPUTED from the pipeline. Any
+    // `permissions` array the spec carries is ignored on purpose — a plugin
+    // can never grant itself permissions.
+    const granted = effectivePluginPermissions(spec.pipeline)
+
+    // R78 / PR-009: one-step rollback — an upgrade archives the previous
+    // config (max 3 generations), so the owner can step back after a bad
+    // version instead of rebuilding from nothing.
+    const previousVersions = existing
+      ? [
+          ...(parsePluginConfig(existing.config, existing.name).previousVersions ?? []),
+          { version: parsePluginConfig(existing.config, existing.name).version ?? '0.0.0', config: existing.config, at: new Date().toISOString() },
+        ].slice(-3)
+      : []
+
     const configJson = JSON.stringify({
       slug: spec.slug,
       description: spec.description,
@@ -863,6 +917,8 @@ export async function installOrUpdatePlugin(params: {
       pipeline: spec.pipeline,
       proactiveRules: spec.proactiveRules,
       quickPrompt: spec.quickPrompt,
+      grantedPermissions: granted,
+      previousVersions,
     } satisfies StoredPluginConfig)
 
     const row = existing
@@ -903,7 +959,9 @@ export async function installOrUpdatePlugin(params: {
         })
     }
 
-    await tx.auditEvent.create({ data: { businessId, actor: userId, action: 'plugin.installed', detail: JSON.stringify({ slug: spec.slug, modules: spec.pipeline.map((p) => p.module) }) } })
+    const priorVersion = existing ? parsePluginConfig(existing.config, existing.name).version : null
+    const action = priorVersion && priorVersion !== spec.version ? 'plugin.upgraded' : 'plugin.installed'
+    await tx.auditEvent.create({ data: { businessId, actor: userId, action, detail: JSON.stringify({ slug: spec.slug, modules: spec.pipeline.map((p) => p.module), from: priorVersion ?? undefined, to: spec.version, granted }) } })
     return {
       ...spec,
       id: row.id,
@@ -911,6 +969,7 @@ export async function installOrUpdatePlugin(params: {
       installed: true,
       usageCount: row.usageCount,
       lastUsedAt: row.lastUsedAt ? row.lastUsedAt.toISOString() : null,
+      permissions: granted,
     }
   })
   pluginRegistry.register(businessId, new BasePlugin(spec))
@@ -938,6 +997,31 @@ export async function deletePlugin(pluginId: string, businessId: string, userId:
   await db.customTool.delete({ where: { id: pluginId, businessId } })
   await db.quickCommand.deleteMany({ where: { businessId: row.businessId, label: row.name } }).catch(() => {})
   return true
+}
+
+/** R78 / PR-009: step back to the previous installed version (max 3 deep).
+ *  Restores the previous pipeline AND re-locks the grant for it. */
+export async function rollbackPlugin(pluginId: string, businessId: string, userId: string): Promise<AgentPluginDTO | null> {
+  await requirePermission(businessId, userId, 'tools.manage')
+  const row = await db.customTool.findFirst({ where: { id: pluginId, businessId } })
+  if (!row || row.kind !== 'plugin') return null
+  const cfg = parsePluginConfig(row.config, row.name)
+  const history = cfg.previousVersions ?? []
+  const prev = history[history.length - 1]
+  if (!prev) return null
+  const prevCfg = parsePluginConfig(prev.config, row.name)
+  if (!Array.isArray(prevCfg.pipeline) || prevCfg.pipeline.length === 0) return null
+  validatePluginPipeline(prevCfg.pipeline)
+  const restored: StoredPluginConfig = {
+    ...prevCfg,
+    grantedPermissions: effectivePluginPermissions(prevCfg.pipeline),
+    previousVersions: history.slice(0, -1),
+  }
+  await db.customTool.update({ where: { id: row.id, businessId }, data: { config: JSON.stringify(restored) } })
+  await db.auditEvent.create({ data: { businessId, actor: userId, action: 'plugin.rolled_back', detail: JSON.stringify({ slug: cfg.slug, from: cfg.version, to: prevCfg.version }) } })
+  if (cfg.slug) pluginRegistry.unregister(businessId, cfg.slug)
+  const all = await getBusinessPlugins(row.businessId)
+  return all.find((p) => p.id === pluginId) ?? null
 }
 
 // ---------------------------------------------------------------------------
@@ -998,6 +1082,23 @@ export async function executePlugin(params: {
   }
   validatePluginPipeline(plugin.pipeline)
 
+  // R78 / PR-009: the grant was LOCKED at install time. If the stored
+  // pipeline now needs permissions beyond that grant, the config was
+  // out-of-band modified — refuse (a plugin never grants itself at runtime).
+  if (plugin.installed && !plugin.id.startsWith('catalog:')) {
+    const row = await db.customTool.findFirst({ where: { id: plugin.id, businessId }, select: { config: true } })
+    if (row) {
+      const storedCfg = parsePluginConfig(row.config, '')
+      const storedGrant = Array.isArray(storedCfg.grantedPermissions) && storedCfg.grantedPermissions.length > 0
+        ? storedCfg.grantedPermissions
+        : effectivePluginPermissions(storedCfg.pipeline ?? plugin.pipeline) // legacy rows: first check self-locks
+      const needed = effectivePluginPermissions(plugin.pipeline)
+      if (!needed.every((p) => storedGrant.includes(p))) {
+        throw new Error('plugin_scope_violation: صلاحيات الإضافة تغيّرت عن الإذن المثبّت — ثبّتها تاني من الإعدادات')
+      }
+    }
+  }
+
   // Increment usage count if persisted in CustomTool
   if (plugin.installed && !plugin.id.startsWith('catalog:')) {
     void db.customTool
@@ -1054,19 +1155,28 @@ async function runPluginStep(
         }
       }
 
-      const totalStockCost = items.reduce((s, i) => s + Math.round(i.stockQty * i.costPrice), 0)
-      const totalStockRetail = items.reduce((s, i) => s + Math.round(i.stockQty * i.sellPrice), 0)
-      const lowItems = items.filter((i) => i.stockQty <= i.lowStockThreshold)
-      const deadItems = items.filter((i) => i.stockQty > i.lowStockThreshold && (soldMap.get(i.id) ?? 0) === 0)
-      const deadCapital = deadItems.reduce((s, i) => s + Math.round(i.stockQty * i.costPrice), 0)
+      // R70 / PR-001: totals cover KNOWN values; unpriced/uncounted items are
+      // counted, never valued at a fake 0.
+      let totalStockCost = 0
+      let totalStockRetail = 0
+      let unknownValueItems = 0
+      for (const i of items) {
+        if (i.stockQty == 0) continue
+        if (i.stockQty == null || i.costPrice == null) unknownValueItems += 1
+        else totalStockCost += Math.round((i.stockQty as number) * (i.costPrice as number))
+        if (i.stockQty != null && i.sellPrice != null) totalStockRetail += Math.round((i.stockQty as number) * (i.sellPrice as number))
+      }
+      const lowItems = items.filter((i) => i.stockQty != null && i.lowStockThreshold != null && i.stockQty <= i.lowStockThreshold)
+      const deadItems = items.filter((i) => i.stockQty != null && i.lowStockThreshold != null && i.stockQty > i.lowStockThreshold && (soldMap.get(i.id) ?? 0) === 0)
+      const deadCapital = deadItems.reduce((s, i) => s + Math.round((i.stockQty as number) * (i.costPrice ?? 0)), 0)
 
       // ABC classification by stock value + sales velocity
       const enriched = items
         .map((it) => {
-          const stockVal = Math.round(it.stockQty * it.costPrice)
+          const stockVal = it.stockQty != null && it.costPrice != null ? Math.round((it.stockQty as number) * (it.costPrice as number)) : null
           const sold30 = soldMap.get(it.id) ?? 0
-          const rev30 = Math.round(sold30 * it.sellPrice)
-          const score = rev30 * 2 + stockVal
+          const rev30 = it.sellPrice != null ? Math.round(sold30 * (it.sellPrice as number)) : null
+          const score = (rev30 ?? 0) * 2 + (stockVal ?? 0)
           return { it, stockVal, sold30, rev30, score }
         })
         .sort((a, b) => b.score - a.score)
@@ -1076,7 +1186,7 @@ async function runPluginStep(
           kind: 'kv',
           title: `${plugin.name} — ملخص صحة المخزون وتصنيف ABC`,
           rows: [
-            { label: 'إجمالي قيمة المخزون بالتكلفة', value: egp(totalStockCost) },
+            { label: 'إجمالي قيمة المخزون بالتكلفة', value: unknownValueItems > 0 ? `${egp(totalStockCost)} (+ ${unknownValueItems} صنف غير مسجل)` : egp(totalStockCost) },
             { label: 'القيمة البيعية المتوقعة للمخزون', value: egp(totalStockRetail), tone: 'good' },
             { label: 'الأصناف تحت حد الأمان (نواقص)', value: `${fmtQty(lowItems.length)} من ${fmtQty(items.length)}`, tone: lowItems.length > 0 ? 'bad' : 'good' },
             { label: 'رأس المال المجمد في أصناف راكدة', value: deadCapital > 0 ? `${egp(deadCapital)} (${fmtQty(deadItems.length)} صنف)` : 'لا يوجد ركود', tone: deadCapital > 0 ? 'neutral' : 'good' },
@@ -1095,14 +1205,14 @@ async function runPluginStep(
           ],
           rows: enriched.slice(0, step.params?.limit ?? 10).map((row, idx) => {
             const abc = idx < Math.ceil(enriched.length * 0.25) ? 'فئة A (حيوي)' : idx < Math.ceil(enriched.length * 0.65) ? 'فئة B (متوسط)' : 'فئة C'
-            const isLow = row.it.stockQty <= row.it.lowStockThreshold
-            const isDead = row.sold30 === 0 && row.it.stockQty > row.it.lowStockThreshold
+            const isLow = row.it.stockQty != null && row.it.lowStockThreshold != null && row.it.stockQty <= row.it.lowStockThreshold
+            const isDead = row.sold30 === 0 && row.it.stockQty != null && row.it.lowStockThreshold != null && row.it.stockQty > row.it.lowStockThreshold
             return {
               name: row.it.name,
               class: abc,
-              stock: fmtQty(row.it.stockQty, arUnit(row.it.unit)),
+              stock: row.it.stockQty == null ? 'غير مسجل' : fmtQty(row.it.stockQty, arUnit(row.it.unit)),
               sold30: fmtQty(row.sold30, arUnit(row.it.unit)),
-              stockVal: egp(row.stockVal),
+              stockVal: row.stockVal == null ? 'غير مسجل' : egp(row.stockVal),
               status: isLow ? 'اطلب فوراً' : isDead ? 'روّج بعرض خاص' : 'رصيد مثالي',
             }
           }),
@@ -1156,7 +1266,8 @@ async function runPluginStep(
       let rev7d = 0
       let rev30d = 0
       let profit30d = 0
-      const itemStats = new Map<string, { name: string; unit: string; qty: number; rev: number; profit: number }>()
+      let profitUnknownLines = 0
+      const itemStats = new Map<string, { name: string; unit: string; qty: number; rev: number; profit: number; unknownProfit: number }>()
 
       for (const op of ops30) {
         try {
@@ -1175,15 +1286,19 @@ async function runPluginStep(
             const it = itemMap.get(id)
             const q = Number(l.qty ?? 0)
             const lineRev = Number(l.total ?? (q * Number(l.unitPrice ?? it?.sellPrice ?? 0)))
-            const lineCost = it ? Math.round(q * it.costPrice) : 0
-            const lineProfit = lineRev - lineCost
-            profit30d += lineProfit
+            // R70 / PR-001: an unrecorded cost means an UNKNOWN line profit —
+            // counted, never assumed 0.
+            const lineCost = it && it.costPrice != null ? Math.round(q * it.costPrice) : null
+            const lineProfit = lineCost != null ? lineRev - lineCost : null
+            if (lineProfit != null) profit30d += lineProfit
+            else if (it) profitUnknownLines += 1
 
             if (it && q > 0) {
-              const prev = itemStats.get(id) ?? { name: it.name, unit: it.unit, qty: 0, rev: 0, profit: 0 }
+              const prev = itemStats.get(id) ?? { name: it.name, unit: it.unit, qty: 0, rev: 0, profit: 0, unknownProfit: 0 }
               prev.qty += q
               prev.rev += lineRev
-              prev.profit += lineProfit
+              prev.profit += lineProfit ?? 0
+              if (lineProfit == null) prev.unknownProfit += 1
               itemStats.set(id, prev)
             }
           }
@@ -1203,7 +1318,7 @@ async function runPluginStep(
             { label: 'مبيعات اليوم', value: egp(revToday), tone: 'good' },
             { label: 'مبيعات آخر ٧ أيام', value: egp(rev7d) },
             { label: 'إجمالي مبيعات ٣٠ يوم', value: egp(rev30d), tone: 'good' },
-            { label: 'مجمل الربح المحقق (٣٠ يوم)', value: egp(profit30d), tone: profit30d > 0 ? 'good' : 'neutral' },
+            { label: 'مجمل الربح المحقق (٣٠ يوم)', value: profitUnknownLines > 0 ? `${egp(profit30d)} (أقصى تقدير — ${profitUnknownLines} بنود غير مسجل تكلفتها)` : egp(profit30d), tone: profit30d > 0 ? 'good' : 'neutral' },
             { label: 'عدد الفواتير المنفذة', value: `${fmtQty(ops30.length)} عملية بيع` },
           ],
         },
@@ -1221,7 +1336,7 @@ async function runPluginStep(
             name: r.name,
             qty: fmtQty(r.qty, arUnit(r.unit)),
             rev: egp(r.rev),
-            profit: egp(r.profit),
+            profit: r.unknownProfit > 0 ? `${egp(r.profit)} (جزء غير مسجل)` : egp(r.profit),
             velocity: r.qty >= 10 ? 'سريع جداً (Star)' : r.qty >= 4 ? 'نشط' : 'هادئ',
           })),
         },
@@ -1233,7 +1348,7 @@ async function runPluginStep(
           category: 'opportunity',
           level: 'info',
           title: `«${topStar.name}» يتصدر المبيعات بـ ${egp(topStar.rev)}`,
-          detail: `بلاجن «${plugin.name}» يوصي بتأمين مخزون إضافي من «${topStar.name}» لأنه يحقق أعلى مساهمة ربحية (${egp(topStar.profit)}).`,
+          detail: `بلاجن «${plugin.name}» يوصي بتأمين مخزون إضافي من «${topStar.name}» لأنه يحقق أعلى مساهمة ربحية (${topStar.unknownProfit > 0 ? `${egp(topStar.profit)} (جزء غير مسجل)` : egp(topStar.profit)}).`,
           metricValue: egp(topStar.rev),
           sourcePlugin: plugin.name,
           actionLabel: 'فحص رصيد الصنف',
@@ -1247,13 +1362,15 @@ async function runPluginStep(
     case 'margin_audit': {
       const items = await db.item.findMany({ where: { businessId }, orderBy: { name: 'asc' } })
       const minMargin = step.params?.minMarginPct ?? 20
-
+      // R70 / PR-001: margin needs BOTH prices recorded; unpriced items are
+      // reported as unpriced, not audited at a fake 0.
+      const unpricedCount = items.filter((it) => it.sellPrice == null || it.costPrice == null).length
       const rows = items
-        .filter((it) => it.sellPrice > 0)
+        .filter((it) => it.sellPrice != null && it.costPrice != null && it.sellPrice > 0)
         .map((it) => {
-          const spread = it.sellPrice - it.costPrice
-          const marginPct = Math.round((spread / it.sellPrice) * 100)
-          const targetSell = it.costPrice > 0 ? Math.ceil(it.costPrice / (1 - 0.25) / 50) * 50 : it.sellPrice
+          const spread = (it.sellPrice as number) - (it.costPrice as number)
+          const marginPct = Math.round((spread / (it.sellPrice as number)) * 100)
+          const targetSell = (it.costPrice as number) > 0 ? Math.ceil((it.costPrice as number) / (1 - 0.25) / 50) * 50 : (it.sellPrice as number)
           return {
             it,
             spread,
@@ -1278,12 +1395,15 @@ async function runPluginStep(
         ],
         rows: rows.slice(0, step.params?.limit ?? 10).map((r) => ({
           name: r.it.name,
-          cost: egp(r.it.costPrice),
-          sell: egp(r.it.sellPrice),
+          cost: egp(r.it.costPrice as number),
+          sell: egp(r.it.sellPrice as number),
           margin: `${r.marginPct}%`,
-          suggested: r.isLowMargin && r.targetSell > r.it.sellPrice ? egp(r.targetSell) : 'تسعير ممتاز',
+          suggested: r.isLowMargin && r.targetSell > (r.it.sellPrice as number) ? egp(r.targetSell) : 'تسعير ممتاز',
         })),
-        footer: [{ label: 'أصناف تحت الهامش المستهدف', value: `${fmtQty(lowMarginCount)} صنف` }],
+        footer: [
+          { label: 'أصناف تحت الهامش المستهدف', value: `${fmtQty(lowMarginCount)} صنف` },
+          ...(unpricedCount > 0 ? [{ label: 'أصناف غير مسجل أسعارها', value: `${fmtQty(unpricedCount)} صنف (غير قابلة للفحص)` }] : []),
+        ],
       })
 
       if (lowMarginCount > 0) {
@@ -1396,7 +1516,10 @@ async function runPluginStep(
         const days = Math.ceil((it.expiresAt.getTime() - Date.now()) / 86400000)
         return days <= windowDays
       })
-      const atRiskCost = expiring.reduce((s, it) => s + Math.round(it.stockQty * it.costPrice), 0)
+      // R70 / PR-001: the at-risk value needs a recorded qty AND cost.
+      const atRiskKnown = expiring.filter((it) => it.stockQty != null && it.costPrice != null)
+      const atRiskCost = atRiskKnown.reduce((s, it) => s + Math.round((it.stockQty as number) * (it.costPrice as number)), 0)
+      const atRiskUnknown = expiring.length - atRiskKnown.length
 
       cards.push({
         kind: 'table',
@@ -1412,10 +1535,10 @@ async function runPluginStep(
           name: it.name,
           batch: it.batchNo ?? '—',
           expiry: it.expiresAt ? arDate(it.expiresAt) : '—',
-          stock: fmtQty(it.stockQty, arUnit(it.unit)),
-          riskValue: egp(Math.round(it.stockQty * it.costPrice)),
+          stock: it.stockQty == null ? 'غير مسجل' : fmtQty(it.stockQty, arUnit(it.unit)),
+          riskValue: it.stockQty == null || it.costPrice == null ? 'غير مسجل' : egp(Math.round((it.stockQty as number) * (it.costPrice as number))),
         })),
-        footer: [{ label: 'إجمالي القيمة المعرضة لانتهاء الصلاحية', value: egp(atRiskCost) }],
+        footer: [{ label: 'إجمالي القيمة المعرضة لانتهاء الصلاحية', value: atRiskUnknown > 0 ? `${egp(atRiskCost)} (+ ${atRiskUnknown} صنف غير مسجل)` : egp(atRiskCost) }],
       })
       break
     }

@@ -49,7 +49,16 @@ export async function validateOperationPayload(
         const item = await tx.item.findFirst({ where: { id: l.itemId, businessId } })
         if (!item) throw new OperationValidationError('الصنف غير موجود في النشاط الحالي')
         const qty = integer(l.qty, 'qty', 1)
-        const unitPrice = integer(l.unitPrice ?? (type === 'sale' ? item.sellPrice : item.costPrice), 'unitPrice', 1)
+        // R70 / PR-001: an unknown price is NULL, not 0 and not an invention.
+        // A line with no explicit price must not run on a fabricated one —
+        // tell the owner exactly what is missing instead.
+        const fallback = type === 'sale' ? item.sellPrice : item.costPrice
+        if (l.unitPrice == null && fallback == null) {
+          throw new OperationValidationError(type === 'sale'
+            ? `سعر بيع «${item.name}» غير مسجل في الكتالوج — قوللي السعر الأول`
+            : `تكلفة «${item.name}» غير مسجلة — قوللي سعر الشراء الأول`)
+        }
+        const unitPrice = integer(l.unitPrice ?? fallback, 'unitPrice', 1)
         const lineTotal = integer(qty * unitPrice, 'line.total', 1)
         if (l.total != null && integer(l.total, 'line.total', 1) !== lineTotal) throw new OperationValidationError('إجمالي البند لا يطابق الكمية والسعر')
         l.unitPrice = unitPrice

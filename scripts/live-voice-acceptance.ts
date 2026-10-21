@@ -21,7 +21,7 @@ try {
   const audio = await readAudio(new Request('http://localhost/parse-only', { method: 'POST', headers: { 'content-type': type }, body: readFileSync(path) }))
   requested = true
   const start = performance.now()
-  const transcript = await transcribeAudio(audio, selected)
+  const { text: transcript } = await transcribeAudio(audio, selected)
   const canonical = (s: string) => normalizeAr(toWesternDigits(s)).replace(/[،,.!؟?]/g, '').replace(/\s+/g, ' ').trim()
   report.durationMs = Math.round(performance.now() - start)
   report.transcriptHash = createHash('sha256').update(transcript).digest('hex')

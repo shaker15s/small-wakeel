@@ -60,6 +60,7 @@ import type {
 } from '@/lib/types'
 import type { VerticalDef } from '@/lib/verticals'
 import { egp, qty as fmtQty, arDate } from '@/lib/format'
+import { canonicalPayloadHash } from '@/lib/domain/payload-hash'
 import { arUnit, getVertical } from '@/lib/verticals'
 import { wordBoundedAt, convertToBaseUnit, matchEntity, normalizeAr, parseQuantity, toWesternDigits, unitToCode } from './arabic'
 import {
@@ -78,6 +79,7 @@ import {
 } from './pending-request'
 import { parseSinceClause } from './since'
 import { createDraft, executeOperation, rejectOperation } from '@/lib/domain/executors'
+import { startTraceSafe, safeLogAgentEvent } from '@/lib/domain/agent-events'
 import { auditDraft } from '@/lib/domain/audit'
 import { getCatalog } from './catalog'
 import type { AuditFindingDTO } from '@/lib/types'
@@ -90,6 +92,8 @@ import { factsFromCards, verifyReply, type VerifyFact } from './verify'
 import { buildAdvisoryPrompt, buildAgentSystemPrompt, buildReplyPrompt, buildSystemPrompt, roleTitle, TONE_AR } from './prompt'
 import { harnessesPromptBlock } from './cli-anything/harness-installer'
 import { brainToolSchemas } from './tool-schemas'
+import { verifyToolContract } from './tool-contract'
+import { localVectorDB } from './vector-memory'
 import { READ_TOOLS, runReadTool, TYPE_AR, isQuestionWord, opMoney, type ReadTool } from './tools'
 import { startOfCairoDay } from '@/app/api/_lib/dates'
 import {
@@ -1726,7 +1730,13 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
           // record what actually happened. «تأمل وكيل» already flags it as an
           // oversell finding (and escalates to R3 when there is nothing on the
           // shelf at all), so the doubt reaches the human instead of the bin.
+          // R70 / PR-001: an UNRECORDED price is a blocker — the line is held
+          // and the owner is asked, never priced at 0.
           const unitPrice = type === 'sale' ? item.sellPrice : item.costPrice
+          if (unitPrice == null) {
+            issues.push(type === 'sale' ? `سعر «${item.name}» غير مسجل — قوللي السعر الأول` : `تكلفة «${item.name}» غير مسجلة — قوللي سعر الشراء الأول`)
+            continue
+          }
           lines.push({ item, qty: qtyN, unitPrice, total: Math.round(qtyN * unitPrice) })
         }
         if (lines.length === 0) {
@@ -1815,7 +1825,13 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
           ...(creditField ? [creditField] : []),
           ...issues.map((i) => ({ label: '⚠ مش ضمن المسودة', value: i })),
         ], [
-          ...lines.map((l) => ({ label: `مخزون ${l.item.name}`, value: `${fmtQty(l.item.stockQty, arUnit(l.item.unit))} ← ${fmtQty(l.item.stockQty + (type === 'sale' ? -l.qty : l.qty), arUnit(l.item.unit))}`, tone: 'neutral' as const })),
+          ...lines.map((l) => ({
+            label: `مخزون ${l.item.name}`,
+            value: l.item.stockQty == null
+              ? `غير مسجل (${type === 'sale' ? `−${fmtQty(l.qty, arUnit(l.item.unit))}` : `+${fmtQty(l.qty, arUnit(l.item.unit))}`}) — محتاج جرد`
+              : `${fmtQty(l.item.stockQty, arUnit(l.item.unit))} ← ${fmtQty(l.item.stockQty + (type === 'sale' ? -l.qty : l.qty), arUnit(l.item.unit))}`,
+            tone: 'neutral' as const,
+          })),
           { label: 'الخزنة', value: egp(type === 'sale' ? paid : -paid), tone: type === 'sale' ? 'good' as const : 'bad' as const },
         ], dangerNote ?? RISK_META[risk].hint)
         // R51: the cash basket keeps the R49 promise too — «سجله» next
@@ -1955,12 +1971,20 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
             return { ok: false, opType: type, payload: {}, summary: '', card: null as never, failMessage: `«${item.name}» بيتاع بـ${arUnit(item.unit)} مش بالوزن — قولي الكمية بالوحدة بتاعته وأنا أحسبها لك` }
           }
           const amountEgp = reverseAmountEgp
+          // R70 / PR-001: the per-gram math needs a RECORDED price — an
+          // unknown price is a question, not a 0.
+          if (item.sellPrice == null) {
+            return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'السعر', failMessage: `سعر «${item.name}» غير مسجل — قوللي سعر ${item.unit === 'kg' ? 'الكيلو' : 'الجرام'} الأول وأنا أحسب الوزن` }
+          }
           const perGram = item.unit === 'gram' ? item.sellPrice : Math.round(item.sellPrice / 1000) // kg → per gram
           const amountPiastres = Math.round(amountEgp * 100)
           if (perGram > 0 && amountPiastres > 0) {
             const grams = Math.round(amountPiastres / perGram)
             if (grams < 1) {
               return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'المبلغ', failMessage: `${egp(amountPiastres)} أقل من سعر الجرام (${egp(perGram)}) — الزبون ده عايز ياخد حاجة تانية؟` }
+            }
+            if (item.stockQty == null) {
+              return { ok: false, opType: type, payload: {}, summary: '', card: null as never, failMessage: `مخزون «${item.name}» غير مسجل — ${egp(amountPiastres)} يعني ${fmtQty(grams, 'جرام')}، سجّل الجرد الأول عشان نتأكد إن في كمية` }
             }
             if (grams > item.stockQty) {
               return { ok: false, opType: type, payload: {}, summary: '', card: null as never, failMessage: `المتاح من ${item.name} ${fmtQty(item.stockQty, arUnit(item.unit))} بس — ${egp(amountPiastres)} يعني ${fmtQty(grams, 'جرام')}` }
@@ -2066,7 +2090,7 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
       // by recording reality instead of by refusing the sale.
       // Total from REAL price
       const unitPrice = type === 'sale' ? item.sellPrice : item.costPrice
-      let total = Math.round(qtyN * unitPrice)
+      let total = unitPrice != null ? Math.round(qtyN * unitPrice) : 0
       // R17 «العقل الحقيقي»: the user HIMSELF stated what he sold it for
       // («بعت آجل لمحمود كرتونة لبن بـ٩٠») — the brain extracts it as
       // fields.amount (EGP). His stated price wins over the catalog default
@@ -2096,6 +2120,11 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
           total = perUnit && qtyN > 0 ? Math.round(statedPiastres * qtyN) : statedPiastres
           priceOverride = true
         }
+      }
+      // R70 / PR-001: no catalog price AND no price stated by the owner →
+      // the draft can't be priced. Ask — never draft at 0.
+      if (unitPrice == null && !priceOverride) {
+        return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'السعر', failMessage: type === 'sale' ? `سعر «${item.name}» غير مسجل — قوللي السعر الأول` : `تكلفة «${item.name}» غير مسجلة — قوللي سعر الشراء الأول` }
       }
       // Paid (آجل = 0, explicit clause wins, default = full cash)
       const paid = resolvePaid(norm, f, total)
@@ -2220,7 +2249,7 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
       const card = fieldsToCard(ref, type, risk, summary, [
         { label: 'الصنف', value: item.name },
         { label: 'الكمية', value: fmtQty(qtyN, arUnit(item.unit)) },
-        { label: `سعر ${type === 'sale' ? 'البيع' : 'الشرا'} (للوحدة)`, value: egp(priceOverride && qtyN > 0 ? Math.round(total / qtyN) : unitPrice), ...(priceOverride ? { hint: 'السعر اللي قلته — بيتقدم على الكتالوج' } : {}) },
+        { label: `سعر ${type === 'sale' ? 'البيع' : 'الشرا'} (للوحدة)`, value: egp(priceOverride && qtyN > 0 ? Math.round(total / qtyN) : (unitPrice as number)), ...(priceOverride ? { hint: 'السعر اللي قلته — بيتقدم على الكتالوج' } : {}) },
         { label: 'الإجمالي', value: egp(total) },
         { label: 'مدفوع', value: egp(paid) },
         ...(total - paid > 0 ? [{ label: 'باقي (آجل)', value: egp(total - paid) }] : []),
@@ -2234,7 +2263,13 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
           : []),
         ...(creditField ? [creditField] : []),
       ], [
-        { label: `مخزون ${item.name}`, value: `${fmtQty(item.stockQty, arUnit(item.unit))} ← ${fmtQty(item.stockQty + (type === 'sale' ? -qtyN : qtyN), arUnit(item.unit))}`, tone: 'neutral' },
+        {
+          label: `مخزون ${item.name}`,
+          value: item.stockQty == null
+            ? `غير مسجل (${type === 'sale' ? `−${fmtQty(qtyN, arUnit(item.unit))}` : `+${fmtQty(qtyN, arUnit(item.unit))}`}) — محتاج جرد`
+            : `${fmtQty(item.stockQty, arUnit(item.unit))} ← ${fmtQty(item.stockQty + (type === 'sale' ? -qtyN : qtyN), arUnit(item.unit))}`,
+          tone: 'neutral',
+        },
         { label: 'الخزنة', value: egp(type === 'sale' ? paid : -paid), tone: type === 'sale' ? 'good' : 'bad' },
         ...(type === 'purchase' && total - paid > 0 && (supplier || supplierIsNew)
           ? [{ label: 'المستحق للمورد', value: egp(total - paid), tone: 'bad' as const }]
@@ -2454,19 +2489,34 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
       const rawItemName = String(f.itemName ?? '')
       const item = matchEntity(rawItemName || text, items)?.entity ?? null
       if (!item) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'الصنف', failMessage: 'تسوية مخزون لأنهي صنف؟' }
+      // R70 / PR-001: an UNRECORDED stock can't be delta-adjusted (unknown ±
+      // qty = unknown). But the owner's number IS a stocktake — it becomes an
+      // ABSOLUTE count that finally records the shelf.
+      const unrecorded = item.stockQty == null
       let delta = (f.delta as number | undefined) ?? null
-      if (delta == null && typeof f.qty === 'number') delta = f.qty - item.stockQty
-      if (delta == null) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'الكمية الجديدة/الفرق', failMessage: `المخزون الحالي ${fmtQty(item.stockQty, arUnit(item.unit))} — عايزه يبقى قد إيه؟` }
-      const reason = String(f.reason ?? '') || 'تسوية جرد'
-      const payload = { itemId: item.id, itemName: item.name, delta, reason, unit: item.unit }
+      let absolute = false
+      if (delta == null && typeof f.qty === 'number') {
+        if (unrecorded) { absolute = true; delta = f.qty }
+        else delta = f.qty - (item.stockQty as number)
+      }
+      if (delta == null) return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'الكمية الجديدة/الفرق', failMessage: `المخزون الحالي ${item.stockQty == null ? 'غير مسجل' : fmtQty(item.stockQty, arUnit(item.unit))} — عايزه يبقى قد إيه؟` }
+      if (unrecorded && !absolute) {
+        // a pure delta on an unknown base can't be verified — make it a count
+        absolute = true
+      }
+      const reason = String(f.reason ?? '') || (absolute ? 'جرد — تسجيل الكمية' : 'تسوية جرد')
+      const newQty = absolute ? Math.round(delta) : (item.stockQty as number) + Math.round(delta)
+      const payload: Record<string, unknown> = { itemId: item.id, itemName: item.name, delta, reason, unit: item.unit }
+      if (absolute) payload.absolute = true
       const risk = computeRisk(type)
-      const summary = `تسوية مخزون ${item.name}: ${fmtQty(item.stockQty, arUnit(item.unit))} ← ${fmtQty(item.stockQty + delta, arUnit(item.unit))}`
+      const fromTxt = item.stockQty == null ? 'غير مسجل' : fmtQty(item.stockQty, arUnit(item.unit))
+      const summary = `تسوية مخزون ${item.name}: ${fromTxt} ← ${fmtQty(newQty, arUnit(item.unit))}`
       const card = fieldsToCard('', type, risk, summary, [
         { label: 'الصنف', value: item.name },
-        { label: 'الحالي', value: fmtQty(item.stockQty, arUnit(item.unit)) },
-        { label: 'الجديد', value: fmtQty(item.stockQty + delta, arUnit(item.unit)) },
+        { label: 'الحالي', value: fromTxt },
+        { label: 'الجديد', value: fmtQty(newQty, arUnit(item.unit)), ...(absolute ? { hint: 'جرد — الكمية تتسجل من الصفر' } : {}) },
         { label: 'السبب', value: reason },
-      ], [{ label: `مخزون ${item.name}`, value: `${fmtQty(item.stockQty, arUnit(item.unit))} ← ${fmtQty(item.stockQty + delta, arUnit(item.unit))}`, tone: delta >= 0 ? 'good' : 'bad' }], 'تسوية المخزون عملية حساسة (R3) — محتاجة سبب واعتماد')
+      ], [{ label: `مخزون ${item.name}`, value: `${fromTxt} ← ${fmtQty(newQty, arUnit(item.unit))}`, tone: newQty >= 0 ? 'good' : 'bad' }], 'تسوية المخزون عملية حساسة (R3) — محتاجة سبب واعتماد')
       return { ok: true, opType: type, payload, summary, card }
     }
 
@@ -2483,26 +2533,35 @@ async function resolveWrite(ctx: ResolveCtx, intent: ExtractedIntent, emit: Turn
           : typeof f.price === 'number' && f.price > 0
             ? f.price
             : parsed?.pounds ?? null
+      const curPriceTxt = item.sellPrice == null ? 'غير مسجل' : egp(item.sellPrice)
       if (pounds == null || !(pounds > 0)) {
-        return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'السعر الجديد', failMessage: `سعر ${item.name} دلوقتي ${egp(item.sellPrice)} — يبقى كام؟` }
+        return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'السعر الجديد', failMessage: `سعر ${item.name} دلوقتي ${curPriceTxt} — يبقى كام؟` }
       }
       const mode = String(f.priceMode ?? parsed?.mode ?? 'absolute')
       const sign = Number(f.priceSign ?? parsed?.sign ?? 1) < 0 ? -1 : 1
-      const newPrice = mode === 'delta' ? item.sellPrice + sign * Math.round(pounds * 100) : Math.round(pounds * 100)
-      if (newPrice <= 0) {
-        return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'السعر الجديد', failMessage: `الحساب ده هيخلي سعر ${item.name} بالسالب — السعر دلوقتي ${egp(item.sellPrice)}` }
+      // R70 / PR-001: a RELATIVE change (+٥ / −١٠) needs a recorded current
+      // price to be computed against. An unrecorded price takes an ABSOLUTE
+      // value — the owner's number becomes the first recorded price.
+      if (mode === 'delta' && item.sellPrice == null) {
+        return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'السعر الجديد', failMessage: `سعر ${item.name} غير مسجل — قوللي السعر كام (مش فرق) وأنا أسجله` }
       }
-      const delta = newPrice - item.sellPrice
-      const pct = item.sellPrice > 0 ? Math.round((delta / item.sellPrice) * 1000) / 10 : null
+      const newPrice = mode === 'delta' ? (item.sellPrice as number) + sign * Math.round(pounds * 100) : Math.round(pounds * 100)
+      if (newPrice <= 0) {
+        return { ok: false, opType: type, payload: {}, summary: '', card: null as never, missing: 'السعر الجديد', failMessage: `الحساب ده هيخلي سعر ${item.name} بالسالب — السعر دلوقتي ${curPriceTxt}` }
+      }
+      const delta = newPrice - (item.sellPrice ?? 0)
+      const pct = item.sellPrice != null && item.sellPrice > 0 ? Math.round((delta / item.sellPrice) * 1000) / 10 : null
       const payload = { itemId: item.id, itemName: item.name, newPrice, field: 'sellPrice' }
       const risk = computeRisk(type)
-      const summary = `سعر ${item.name}: ${egp(item.sellPrice)} ← ${egp(newPrice)}`
+      const summary = `سعر ${item.name}: ${curPriceTxt} ← ${egp(newPrice)}`
       const card = fieldsToCard('', type, risk, summary, [
         { label: 'الصنف', value: item.name },
-        { label: 'السعر الحالي', value: egp(item.sellPrice) },
+        { label: 'السعر الحالي', value: curPriceTxt },
         { label: 'السعر الجديد', value: egp(newPrice) },
         ...(pct != null ? [{ label: 'التغيير', value: `${delta >= 0 ? '+' : ''}${egp(delta)}${pct !== 0 ? ` (${pct >= 0 ? '+' : ''}${pct}%)` : ''}` }] : []),
-      ], [{ label: 'هامش الصنف', value: `${egp(newPrice - item.costPrice)} للوحدة بعد التغيير`, tone: newPrice - item.costPrice >= 0 ? 'good' : 'bad' }], RISK_META[risk].hint)
+      ], item.costPrice != null
+        ? [{ label: 'هامش الصنف', value: `${egp(newPrice - item.costPrice)} للوحدة بعد التغيير`, tone: newPrice - item.costPrice >= 0 ? 'good' : 'bad' }]
+        : [], RISK_META[risk].hint)
       return { ok: true, opType: type, payload, summary, card }
     }
 
@@ -3201,6 +3260,8 @@ interface TurnMeta {
   notesJotted: number
   /** Turn start (ms epoch) — the baseline for per-pass timing. */
   startedAt: number
+  /** R73 / PR-005: the append-only trace id for this turn (null = tracing off). */
+  traceId: string | null
 }
 
 /**
@@ -3221,11 +3282,14 @@ interface TurnMeta {
  */
 const opSeqs = new WeakMap<TurnContext, Map<string, number>>()
 
-function turnIdem(ctx: TurnContext, type: string, summary: string): string {
+function turnIdem(ctx: TurnContext, type: string, summary: string, payload: Record<string, unknown>): string {
   const base = `${ctx.business.id}:${ctx.user.id}`
   if (!ctx.turnId) return `${base}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
   let h = 0
-  const key = `${type}|${summary}`
+  // R71 / PR-003: the key identifies (type, summary, PAYLOAD). A corrected
+  // draft (same words, different money) gets a fresh key → a fresh draft,
+  // while an identical retry lands on the same key and replays idempotently.
+  const key = `${type}|${summary}|${canonicalPayloadHash(payload).slice(0, 16)}`
   for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) | 0
   // Two IDENTICAL ops in one turn must both be drafted («بعت ٢ لبن» مرتين) —
   // the n-th occurrence gets an `-n` suffix, and a retry replays 1,2,… in the
@@ -3249,7 +3313,9 @@ async function runMeasuredTurn(ctx: TurnContext, emit: TurnEmit): Promise<TurnRe
   const t0 = Date.now()
   let ttftMs: number | null = null
   let sawFirstToken = false
-  const meta: TurnMeta = { kind: 'chat', fallback: false, notesJotted: 0, startedAt: t0 }
+  const meta: TurnMeta = { kind: 'chat', fallback: false, notesJotted: 0, startedAt: t0, traceId: null }
+  // R73 / PR-005: open the append-only trace for this turn (never breaks a turn).
+  meta.traceId = await startTraceSafe({ businessId: ctx.business.id, conversationId: ctx.conversationId ?? null })
   llmHealth.retried = false
   llmHealth.fellBack = false
   llmHealth.servedBy = null
@@ -3272,6 +3338,16 @@ async function runMeasuredTurn(ctx: TurnContext, emit: TurnEmit): Promise<TurnRe
       tokens: 0,
       fallback: true,
     })
+    // PR-005: the engine exploding is a traceable fact, not a silent death.
+    if (meta.traceId) {
+      void safeLogAgentEvent({
+        businessId: ctx.business.id,
+        traceId: meta.traceId,
+        type: 'provider.error',
+        actor: 'system',
+        payload: { error: String(err).slice(0, 200), latencyMs: Date.now() - t0 },
+      })
+    }
     throw err
   }
   void trackTurnUsage(ctx.business.id, ctx.user.id, meta.kind, ctx.text, {
@@ -3287,6 +3363,15 @@ async function runMeasuredTurn(ctx: TurnContext, emit: TurnEmit): Promise<TurnRe
   // If the fallback ladder had to swap models mid-turn, the label the UI shows
   // must name the model that ACTUALLY answered — never claim a dead one.
   if (llmHealth.servedBy) result.modelLabel = llmHealth.servedBy
+  if (meta.traceId) {
+    void safeLogAgentEvent({
+      businessId: ctx.business.id,
+      traceId: meta.traceId,
+      type: 'turn.ended',
+      actor: 'system',
+      payload: { replyChars: result.replyText.length, latencyMs: Date.now() - t0, fallback: meta.fallback },
+    })
+  }
   return result
 }
 
@@ -3555,6 +3640,17 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         let title: string
         if (approve) {
           const { op: updated, outcome } = await executeOperation(pendingOp.id, user.id)
+          // PR-005: the DECISION is a trace fact (who approved, what, outcome).
+          if (meta.traceId) {
+            void safeLogAgentEvent({
+              businessId: business.id,
+              traceId: meta.traceId,
+              type: 'operation.decided',
+              actor: 'user',
+              operationRef: updated.ref,
+              payload: { ref: updated.ref, outcome: outcome.ok ? 'succeeded' : 'failed_safe', status: updated.status },
+            })
+          }
           title = outcome.ok ? `تم — موثّق ومتحقق (${updated.ref})` : `فشلت بأمان (${updated.ref})`
           rows = [
             { label: 'العملية', value: updated.summary },
@@ -3567,6 +3663,16 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             : `معلش — العملية فشلت بأمان من غير أي أثر ❌ ${updated.ref}: ${outcome.failReason ?? 'راجع الكارت'}`
         } else {
           const updated = await rejectOperation(pendingOp.id, user.id, 'رفض من المحادثة', 'reject')
+          if (meta.traceId) {
+            void safeLogAgentEvent({
+              businessId: business.id,
+              traceId: meta.traceId,
+              type: 'operation.decided',
+              actor: 'user',
+              operationRef: updated.ref,
+              payload: { ref: updated.ref, outcome: 'cancelled', status: updated.status },
+            })
+          }
           title = `اتلغت (${updated.ref})`
           rows = [
             { label: 'العملية', value: updated.summary },
@@ -3638,7 +3744,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     ])
     const ySales = salesYesterday.reduce((s2, o) => s2 + opMoney(o.payload), 0)
     const cash = business.openingCash + cashEntries.reduce((s2, e) => s2 + (e.direction === 'in' ? e.amount : -e.amount), 0)
-    const lowStock = items.filter((i) => i.stockQty <= i.lowStockThreshold).length
+    const lowStock = items.filter((i) => i.stockQty != null && i.lowStockThreshold != null && i.stockQty <= i.lowStockThreshold).length
     replyText += ' وشلتلك نظرة النهارده تحت 👇'
     done(IDX.reply)
     await streamDeterministic(replyText, emit, 600)
@@ -3669,7 +3775,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
 
   // ---- PASS 0a: Identity question → instant, deterministic, zero LLM ----
   if (isIdentityQuestion(norm)) {
-    const lowStockCount = items.filter((i) => i.stockQty <= i.lowStockThreshold).length
+    const lowStockCount = items.filter((i) => i.stockQty != null && i.lowStockThreshold != null && i.stockQty <= i.lowStockThreshold).length
     const receivablesTotal = customers.reduce((s, c) => s + Math.max(0, c.balance), 0)
     done(IDX.understand, 'سؤال عن هويتي — بجاوب من سجلك من غير موديل')
     done(IDX.search, 'جبت بياناتي من سجلك الحقيقي')
@@ -3776,6 +3882,9 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     let replyText: string
     if (target) {
       await db.agentMemory.update({ where: { id: target.id }, data: { active: false, updatedAt: new Date() } })
+      // PR-008: forget removes the memory AND its index — a soft-deleted row
+      // must stop being retrieved on the very next turn, not after a rebuild.
+      localVectorDB.removeDocument(business.id, target.id)
       done(IDX.verify, 'اتمسحت فعليًا (متفعّلة لأ)')
       emit({ event: 'step', label: 'بامسح من ذاكرتي', state: 'done' })
       replyText = `اتمسحت من ذاكرة وكيل ✅ — الكلام ده: «${target.text.slice(0, 100)}».\nلو احتجته تاني في يوم من الأيام قولي «احفظ» وأرجعه لك.`
@@ -4140,8 +4249,54 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         executedResults.set(sig, result)
         if (result.ok === false && brainFailures.length === 0) brainFailures.push(GENERIC_TOOL_FAIL)
         resultsForModel.push(result)
+        // PR-005: every tool outcome is an append to the turn trace — the
+        // refused-vs-executed line is visible in the ledger, not only in chat.
+        if (meta.traceId) {
+          const ref = typeof result.ref === 'string' ? result.ref : null
+          void safeLogAgentEvent({
+            businessId: business.id,
+            traceId: meta.traceId,
+            type: result.ok === false ? 'tool.failed' : ref ? 'draft.created' : 'tool.executed',
+            actor: 'tool',
+            operationRef: ref,
+            payload: { tool: call.tool, ...(ref ? { ref } : {}), ...(result.error ? { error: String(result.error).slice(0, 140) } : {}) },
+          })
+        }
       }
       executedAnyTool = true
+      // ---- R72 / PR-004 (plan §20.3): the CENTRAL tool contract gate ----
+      // Server-side, before ANY dispatch: an unregistered tool name or a
+      // smuggled authority field (approved/risk/tenant ids/outcome flags) in
+      // the model's input is REFUSED — never stripped, never downgraded.
+      const contract = verifyToolContract(call.tool, call.args)
+      if (!contract.ok) {
+        const why = contract.reason === 'unregistered'
+          ? 'أداة غير مسجلة في الكتالوج — مرفوضة'
+          : contract.reason === 'args-not-object'
+            ? 'مدخلات الأداة مش كائن صالح — مرفوضة'
+            : `خصائص سلطة ممنوعة من مدخلات النموذج (${contract.smuggled?.join('، ')}) — مرفوضة`
+        const { label: l, icon } = brainStepLabel(call)
+        const step: ThinkingStep = { label: l, detail: `عقد الأداة: ${why}`, state: 'done', icon, ms: 0 }
+        toolSteps.push(step)
+        syncSteps()
+        emit({ event: 'step', label: l, state: 'done' })
+        brainFailures.push(`عقد الأداة منع ${call.tool}: ${why}. الحقول المسموحة في كتالوج الأداة فقط — الصلاحيات والموافقات والبيانات التعريفية بيتحقّق فيها الخادم.`)
+        const refusedResult = { tool: call.tool, ok: false, error: `عقد الأداة: ${why}` } as Record<string, unknown>
+        executedResults.set(sig, refusedResult)
+        resultsForModel.push(refusedResult)
+        // PR-005: a refusal is its OWN trace fact (actor=model), distinct from
+        // a tool that ran and failed.
+        if (meta.traceId) {
+          void safeLogAgentEvent({
+            businessId: business.id,
+            traceId: meta.traceId,
+            type: 'tool.refused',
+            actor: 'model',
+            payload: { tool: call.tool, reason: contract.reason, smuggled: contract.smuggled ?? null },
+          })
+        }
+        return
+      }
       const { label, icon } = brainStepLabel(call)
       const argBits = Object.values(call.args)
         .filter((x) => x !== undefined && x !== null && String(x) !== '')
@@ -4320,7 +4475,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             replyParts.push(`طلب ناقص بيانات: ${resolved.failMessage ?? resolved.missing ?? ''}`)
             return
           }
-          const idem = turnIdem(ctx, resolved.opType, resolved.summary)
+          const idem = turnIdem(ctx, resolved.opType, resolved.summary, resolved.payload)
           const reflection = await reflectOnDraft({
             businessId: business.id,
             userId: user.id,
@@ -4487,6 +4642,9 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           const target = findMemoryByReference(q, memories)
           if (target) {
             await db.agentMemory.update({ where: { id: target.id }, data: { active: false, updatedAt: new Date() } })
+            // PR-008: forget removes the memory AND its index (same contract
+            // as the deterministic path) — no retrieval of a forgotten row.
+            localVectorDB.removeDocument(business.id, target.id)
             step.detail = target.text.slice(0, 60)
             report({ tool: 'memory_forget', ok: true, forgotten: target.text.slice(0, 80) })
             replyParts.push(`اتمسحت من ذاكرتي ✅ — «${target.text.slice(0, 100)}»`)
@@ -5135,7 +5293,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           replyParts.push(`طلب رقم ${AR_ORDINALS[i]} ناقص بيانات: ${resolved.failMessage ?? resolved.missing ?? ''}`)
           continue
         }
-        const idem = turnIdem(ctx, resolved.opType, resolved.summary)
+        const idem = turnIdem(ctx, resolved.opType, resolved.summary, resolved.payload)
         const reflection = await reflectOnDraft({
           businessId: business.id,
           userId: user.id,
@@ -5296,7 +5454,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       } else {
         done(IDX.verify, `حسبت الإجمالي من السعر الحقيقي: ${resolved.summary}`)
         emit({ event: 'step', label: `بجهّز مسودة ${TYPE_AR[resolved.opType]}`, state: 'active' })
-        const idem = turnIdem(ctx, resolved.opType, resolved.summary)
+        const idem = turnIdem(ctx, resolved.opType, resolved.summary, resolved.payload)
         // «تأمل» — self-critique BEFORE the draft exists, so the card carries
         // the doubt (and a dangerous draft can be escalated to R3).
         const reflection = await reflectOnDraft({

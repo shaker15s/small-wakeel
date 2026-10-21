@@ -13,6 +13,7 @@ import { ACCENTS, DEFAULT_WORKSPACE, WORKSPACE_GOALS, type WorkspacePreferences 
 import type { BusinessLite } from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import { AgentAvatar } from '@/components/chat/AgentAvatar'
+import { OnboardingProfileStep } from '@/components/app/OnboardingProfileStep'
 
 // Tiny inline glyphs — this screen intentionally imports no icon library
 // (ui-hygiene contract: the onboarding file renders exactly what it inlines).
@@ -72,9 +73,10 @@ export function Onboarding({ businesses, onFinish, onPick, initial, onDefer }: {
     setStep(to)
   }
   const stepTitles = [
-    { eyebrow: 'خطوة ١ من ٣ • التعارف', title: 'معرفك — أنا «وكيل»' },
-    { eyebrow: 'خطوة ٢ من ٣ • الشكل العملي', title: 'أول محادثة هتبقى كده' },
-    { eyebrow: 'خطوة ٣ من ٣ • إعداد حقيقي محفوظ لحسابك', title: 'وكيل على مقاس شغلك' },
+    { eyebrow: 'خطوة ١ من ٤ • التعارف', title: 'معرفك — أنا «وكيل»' },
+    { eyebrow: 'خطوة ٢ من ٤ • الشكل العملي', title: 'أول محادثة هتبقى كده' },
+    { eyebrow: 'خطوة ٣ من ٤ • ملف النشاط', title: 'سؤال واحد في كل مرة — وكل إجابة بتتحفظ' },
+    { eyebrow: 'خطوة ٤ من ٤ • إعداد حقيقي محفوظ لحسابك', title: 'وكيل على مقاس شغلك' },
   ]
   const t = stepTitles[step]
   return <main dir="rtl" className="flex min-h-dvh items-center justify-center bg-background px-4 py-10">
@@ -186,6 +188,22 @@ export function Onboarding({ businesses, onFinish, onPick, initial, onDefer }: {
             transition={SPRING}
             className="space-y-5"
           >
+            {/* R75 / PR-007: the stateful profile interview — one question
+                at a time, persisted answers are never re-asked, financial
+                facts stay unknown until the owner states them. */}
+            <OnboardingProfileStep business={business} userId={user.id} onDone={() => go(3)} />
+          </motion.div>
+        )}
+
+        {step === 3 && (
+          <motion.div
+            key="s3"
+            initial={reduced ? { opacity: 0 } : { opacity: 0, y: 14 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={reduced ? { opacity: 0 } : { opacity: 0, y: -10 }}
+            transition={SPRING}
+            className="space-y-5"
+          >
             <fieldset className="space-y-3"><legend className="font-semibold">إيه أهم حاجة نبدأ بيها؟ <span className="text-xs font-normal text-muted-foreground">لحد ٤ أولويات، وممكن تسيبها فاضية</span></legend><div className="grid grid-cols-1 gap-2 sm:grid-cols-2">{Object.entries(WORKSPACE_GOALS).filter(([key]) => key !== 'members' || business.type === 'gym').map(([key, goal]) => {
               const value = key as keyof typeof WORKSPACE_GOALS
               return <label key={key} className="flex cursor-pointer items-center gap-3 rounded-xl border p-3 text-sm transition-colors hover:bg-accent/50"><input type="checkbox" checked={draft.goals.includes(value)} disabled={busy || (!draft.goals.includes(value) && draft.goals.length >= 4)} onChange={(e) => setDraft({ ...draft, goals: e.target.checked ? [...draft.goals, value] : draft.goals.filter((g) => g !== value) })} />{goal.label}</label>
@@ -207,12 +225,12 @@ export function Onboarding({ businesses, onFinish, onPick, initial, onDefer }: {
         {step > 0 && !busy && (
           <Button variant="ghost" onClick={() => go(step - 1)}>رجوع</Button>
         )}
-        {step < 2 ? (
+        {step < 3 ? (
           <>
             <Button className="flex-1" onClick={() => go(step + 1)}>
-              {step === 0 ? 'شوفه شغال' : 'تمام، زبطني'}
+              {step === 0 ? 'شوفه شغال' : step === 1 ? 'زبطني على شغلك' : 'تمام، زبطني'}
             </Button>
-            <Button variant="ghost" onClick={() => go(2)}>تخطى التعريف</Button>
+            <Button variant="ghost" onClick={() => go(3)}>تخطى التعريف</Button>
           </>
         ) : (
           <>

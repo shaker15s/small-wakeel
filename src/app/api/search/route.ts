@@ -103,13 +103,18 @@ export async function GET(req: Request) {
         score([it.category], needle) * 0.5,
       )
       if (s <= 0) continue
+      // R70 / PR-001: unknown stock/price render «غير مسجل» — and an
+      // uncounted item is never painted red as «out of stock».
+      const stockTxt = it.stockQty == null ? 'غير مسجل' : `${it.stockQty} ${it.unit}`
+      const priceTxt = it.sellPrice == null ? 'غير مسجل' : egp(it.sellPrice)
+      const underThreshold = it.stockQty != null && it.lowStockThreshold != null && it.stockQty <= it.lowStockThreshold
       hits.push({
         kind: 'item',
         id: it.id,
         title: it.name,
-        subtitle: `مخزون ${it.stockQty} ${it.unit} · بيع ${egp(it.sellPrice)}${it.stockQty <= it.lowStockThreshold ? ' · تحت الحد' : ''}`,
+        subtitle: `مخزون ${stockTxt} · بيع ${priceTxt}${underThreshold ? ' · تحت الحد' : ''}`,
         ref: it.barcode ?? undefined,
-        tone: it.stockQty <= 0 ? 'bad' : it.stockQty <= it.lowStockThreshold ? 'warn' : 'good',
+        tone: it.stockQty == 0 ? 'bad' : underThreshold ? 'warn' : 'good',
         _score: s,
       })
     }

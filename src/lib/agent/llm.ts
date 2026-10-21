@@ -87,14 +87,14 @@ export const BUILTIN_MODELS: ModelInfo[] = [
   { key: 'builtin-air', label: 'خفيف سريع', tier: 'air', source: 'builtin', remoteModel: 'gemini-3.1-flash-lite-preview' },
 ]
 
+// PR-013: the fallback ladders live in the MODEL REGISTRY (data, reviewed),
+// not hard-coded here. For the current registry state the output is
+// byte-identical to the old hard-coded lists (asserted by
+// tests/unit/model-registry.test.ts); a plan candidate only prepends its
+// ladder after it passes the eval (promoteModel).
+import { candidatesForModelKey } from './model-registry'
 export function geminiModelCandidates(modelKey?: string | null): string[] {
-  if (modelKey === 'gemini-pro' || modelKey === 'builtin-deep') {
-    return ['gemini-3.1-pro-preview', 'gemini-3-flash-preview', 'gemini-2.5-flash']
-  }
-  if (modelKey === 'builtin-air') {
-    return ['gemini-3.1-flash-lite-preview', 'gemini-3-flash-preview', 'gemini-2.5-flash']
-  }
-  return ['gemini-3-flash-preview', 'gemini-2.5-flash']
+  return candidatesForModelKey(modelKey)
 }
 
 export function modelLabelFor(model: ModelInfo): string {

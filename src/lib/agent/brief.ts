@@ -111,8 +111,10 @@ export async function buildMorningBrief(businessId: string, userId?: string): Pr
   }
 
   // ---- 2) goods that will be lost (expiry) -------------------------------
+  // R70 / PR-001: the at-risk value is only summed over items whose qty AND
+  // cost are recorded — an unknown cost is flagged, not assumed 0.
   const expiring = items
-    .filter((i) => i.expiresAt && i.stockQty > 0)
+    .filter((i) => i.expiresAt && i.stockQty != null && i.stockQty > 0)
     .map((i) => ({
       ...i,
       days: Math.ceil(((i.expiresAt as Date).getTime() - now) / 86_400_000),
@@ -120,27 +122,30 @@ export async function buildMorningBrief(businessId: string, userId?: string): Pr
     .filter((i) => i.days <= 10)
     .sort((a, b) => a.days - b.days)
   if (expiring.length > 0) {
-    const risk = expiring.reduce((s, i) => s + Math.max(0, i.stockQty) * i.costPrice, 0)
+    const risk = expiring.reduce((s, i) => s + (i.costPrice != null ? Math.max(0, i.stockQty as number) * (i.costPrice as number) : 0), 0)
+    const unknownCost = expiring.filter((i) => i.costPrice == null).length
     const worst = expiring[0]
     out.push({
       id: 'expiring',
       tone: 'time',
       title: `${count(expiring.length, 'صنف', 'أصناف')} صلاحيته قربت — اتحرك قبل الخسارة`,
-      why: `${worst.name} بيفضل ${worst.days < 0 ? 'منتهي بالفعل' : `${plain(worst.days)} يوم`} — حوالي ${egp(risk)} بضاعة معرّضة`,
+      why: `${worst.name} بيفضل ${worst.days < 0 ? 'منتهي بالفعل' : `${plain(worst.days)} يوم`} — حوالي ${egp(risk)} بضاعة معرّضة${unknownCost > 0 ? ` (فيهم ${unknownCost} غير مسجل تكلفته)` : ''}`,
       impact: risk,
       cta: { label: 'شوف الصلاحيات', prompt: 'ايه اللي هيخلص صلاحيته قريب؟' },
     })
   }
 
   // ---- 3) stock about to run out ----------------------------------------
-  const low = items.filter((i) => i.stockQty <= i.lowStockThreshold)
+  // R70 / PR-001: a shortage needs a COUNTED stock and a recorded threshold.
+  const low = items.filter((i) => i.stockQty != null && i.lowStockThreshold != null && i.stockQty <= i.lowStockThreshold)
   if (!manual && low.length > 0) {
-    const refill = low.reduce((s, i) => s + Math.max(0, i.lowStockThreshold - i.stockQty) * i.costPrice, 0)
+    const refill = low.reduce((s, i) => s + (i.costPrice != null ? Math.max(0, (i.lowStockThreshold as number) - (i.stockQty as number)) * (i.costPrice as number) : 0), 0)
+    const unknownCost = low.filter((i) => i.costPrice == null).length
     out.push({
       id: 'low-stock',
       tone: 'risk',
       title: `${count(low.length, 'صنف', 'أصناف')} خلص أو قرّب يخلص`,
-      why: low.length === 1 ? `${low[0].name} محتاج طلب` : `أولهم ${low[0].name} — والطلب كله حوالي ${egp(refill)}`,
+      why: low.length === 1 ? `${low[0].name} محتاج طلب` : `أولهم ${low[0].name} — والطلب كله حوالي ${egp(refill)}${unknownCost > 0 ? ` (فيهم ${unknownCost} غير مسجل تكلفته)` : ''}`,
       impact: refill,
       cta: { label: 'شوف النواقص', prompt: 'ايه اللي ناقص عندي؟' },
     })

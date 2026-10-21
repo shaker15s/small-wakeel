@@ -26,6 +26,11 @@ model Business {
   cashbookEntries CashbookEntry[]
   shopReminders ShopReminder[]
   workspacePreferences WorkspacePreference[]
+  notifications TaskNotification[]
+  companionEnrollments CompanionEnrollment[]
+  companionDevices CompanionDevice[]
+  companionJobs CompanionJob[]
+  reconcileReports ReconcileReport[]
   users          User[]
   items          Item[]
   customers      Customer[]
@@ -33,6 +38,8 @@ model Business {
   operations     Operation[]
   cashEntries    CashEntry[]
   auditEvents    AuditEvent[]
+  agentEvents    AgentEvent[]
+  profile        BusinessProfile?
   conversations  Conversation[]
   scheduledTasks ScheduledTask[]
   memories       AgentMemory[]
@@ -45,6 +52,7 @@ model Business {
   invitations Invitation[]
   settings       AgentSettings?
   tools          CustomTool[] @relation("BusinessTools")
+  pilotBaselines PilotBaseline[]
 }
 
 model User {
@@ -68,10 +76,10 @@ model Item {
   aliases           String    @default("") // comma-separated alt names
   unit              String // piece | kg | gram | liter | milli | box | strip | capsule | session
   category          String    @default("")
-  costPrice         Int       @default(0) // piastres per unit
-  sellPrice         Int       @default(0) // piastres per unit
-  stockQty          Int       @default(0) // in base unit (gram for attar, etc.)
-  lowStockThreshold Int       @default(0)
+  costPrice         Int? // piastres per unit — NULL = غير مسجل (R70: unknown stays unknown, never invented)
+  sellPrice         Int? // piastres per unit — NULL = غير مسجل (R70)
+  stockQty          Int? // base unit (gram for attar, etc.) — NULL = quantity never counted (R70)
+  lowStockThreshold Int? // NULL = no threshold set (R70: a made-up threshold fakes shortages)
   barcode           String? // scanned at the counter (EAN-13 / code-128 / QR)
   batchNo           String? // pharmacy
   expiresAt         DateTime? // pharmacy
@@ -126,6 +134,11 @@ model Operation {
   result         String? // JSON — verification + outcome
   idempotencyKey String    @unique
   conversationId String?
+  // R71 / PR-003 — approval binding (§20.4): the approved bytes are the
+  // executed bytes. payloadHash = sha256 of the canonical payload at draft
+  // time; expiresAt bounds how long an approval holds. Null on pre-R71 rows.
+  payloadHash String?
+  expiresAt DateTime?
   reversalOfRef  String?
   reversedByRef  String?
   reason         String?
@@ -166,6 +179,47 @@ model AuditEvent {
 
   @@index([businessId, createdAt])
   @@index([ref])
+}
+
+// R73 / PR-005 (final plan v2 §20.6): append-only agent trace ledger.
+// Every row is an APPEND — the module exposes no update/delete path, and
+// the rows carry traceId/tenant/sequence so a request is reconstructable
+// end to end. payload is REDACTED JSON (never raw conversation/secrets);
+// sensitive blobs are referenced (operationRef) + hashed, not duplicated.
+// R75 / PR-007 (final plan v2 §7.1): the onboarding state machine, one row
+// per business. `answers` is JSON of the owner's OWN answers (source=owner,
+// answeredAt, skipped) — financial facts only exist when the owner stated
+// them; a skipped financial question stays unknown (null), never 0.
+// `consents` is JSON of per-feature grants (file/photo import) recorded at
+// the onboarding interview, honored by the import routes.
+model BusinessProfile {
+  id                  String   @id @default(cuid())
+  businessId          String   @unique
+  business            Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  stage               String   @default("not_started") // not_started | interviewing | proposed | confirmed
+  answers             String   @default("{}") // JSON { key: { value, source, answeredAt, skipped, corrected? } }
+  consents            String   @default("{}") // JSON { key: { granted, at } }
+  openingCashStatedAt DateTime? // set only when the owner stated an opening cash
+  updatedAt           DateTime @default(now()) @updatedAt
+}
+
+model AgentEvent {
+  id             String   @id @default(cuid())
+  businessId     String // tenant — every query is tenant-scoped
+  business       Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  traceId        String // one per turn
+  conversationId String?
+  sequence       Int // per-trace ordering
+  type           String // turn.started | tool.proposed | tool.refused | ...
+  actor          String // user | model | tool | scheduler | system
+  payload        String // redacted JSON — raw secrets never land here
+  operationRef   String? // WKL-#### when it applies
+  payloadHash    String? // hash of the full (unredacted) payload when trimmed
+  createdAt      DateTime @default(now())
+
+  @@index([traceId, sequence])
+  @@index([businessId, createdAt])
+  @@index([operationRef])
 }
 
 model Conversation {
@@ -246,16 +300,54 @@ model ScheduledTask {
   whenLabel      String
   scheduledFor   DateTime
   recurrence     String? // daily | weekly | monthly
-  status         String    @default("pending") // pending | running | done | failed | cancelled
+  status         String    @default("pending") // pending | running | retry_wait | done | failed | cancelled
   result         String?
   failReason     String?
   createdAt      DateTime  @default(now())
   executedAt     DateTime?
   /** set when a runner atomically claims the task (stuck-run recovery uses it) */
   claimedAt      DateTime?
+  /** which worker holds the lease (PR-010 durable runner) */
+  leaseOwner     String?
+  /** bounded retry budget: a failed run waits until nextRetryAt, then retries */
+  attempts       Int       @default(0)
+  maxAttempts    Int       @default(3)
+  nextRetryAt    DateTime?
+  /** firing generation — keys the outbox row (crash-safe idempotency) */
+  executionCount Int       @default(0)
+  /** last COMPLETED step — the honest task box shows this + the next step */
+  lastStep       String?
+
+  notifications  TaskNotification[]
 
   @@index([status, scheduledFor])
+  @@index([status, nextRetryAt])
   @@index([businessId, userId, status])
+}
+
+// PR-010 — transactional outbox: a task's result is delivered as a separately
+// claimed/committed notification. «task finished» ≠ «notification delivered».
+// The row id is deterministic (`tn_<taskId>_<generation>`) so a crashed and
+// retried firing can never enqueue the same notification twice.
+model TaskNotification {
+  id             String    @id
+  taskId         String
+  task           ScheduledTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  businessId     String
+  business       Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  userId         String
+  conversationId String?
+  payload        String // JSON: { messageId, text, cards?, detail }
+  status         String    @default("pending") // pending | sending | sent | failed
+  attempts       Int       @default(0)
+  claimedAt      DateTime?
+  claimedBy      String?
+  failReason     String?
+  sentAt         DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([status])
+  @@index([taskId])
 }
 
 model AgentMemory {
@@ -589,6 +681,25 @@ model CashbookDialogue {
 // whose supplier/total arrive after the quantity). One active request per
 // conversation; expires like CashbookDialogue (20 min) so a stale «سجله كصنف
 // جديد» never hijacks next week's question.
+// R84 / PR-015 (plan v2 §13 pilot): the OWNER-REPORTED baseline for one
+// agreed workflow — «سجل خط أساس» for the before/after value comparison.
+// Values are human-measured (source: owner_reported) and are NEVER confused
+// with ledger-measured post-use numbers; nulls stay null (no zero-as-unknown).
+model PilotBaseline {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  workflow   String // agreed workflow name, e.g. «إقفال الكاش ونهاية اليوم»
+  tasksCount Int? // how many times the workflow ran in the baseline window
+  minutes    Float? // actual minutes per task, the old way
+  errors     Int? // owner-counted mistakes/rework in the baseline window
+  note       String?
+  recordedBy String // the userId who measured it
+  createdAt  DateTime @default(now())
+
+  @@index([businessId, createdAt])
+}
+
 model PendingRequest {
   id             String   @id @default(cuid())
   businessId     String
@@ -614,4 +725,81 @@ model SpeechSettings {
   provider ModelProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
   remoteId String
   updatedAt DateTime @updatedAt
+}
+
+// PR-011 — companion enrollment: short-lived, single-use activation codes.
+model CompanionEnrollment {
+  id         String    @id @default(cuid())
+  businessId String
+  business   Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  codeHash   String    @unique
+  deviceName String
+  expiresAt  DateTime
+  usedAt     DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([businessId])
+}
+
+// PR-011 — a companion device on the owner's machine. Read-only by
+// construction: its allowlist is explicit (path roots + pinned executables),
+// the secret lives only as a sha256 hash, and revocation is immediate.
+model CompanionDevice {
+  id         String    @id @default(cuid())
+  businessId String
+  business   Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name       String
+  status     String    @default("ACTIVE") // ACTIVE | REVOKED
+  tokenHash  String
+  allowlist  String    @default("{}") // JSON: { paths: string[], cli: [{command,label}] }
+  createdAt  DateTime  @default(now())
+  activatedAt DateTime?
+  revokedAt  DateTime?
+  lastSeenAt DateTime?
+  jobs       CompanionJob[]
+
+  @@index([businessId])
+}
+
+// PR-011 — one signed, expiring, single-purpose job for a companion device.
+model CompanionJob {
+  id           String    @id @default(cuid())
+  businessId   String
+  business     Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  deviceId     String
+  device       CompanionDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  tool         String // list_dir | read_file | run_cli
+  args         String // JSON
+  status       String    @default("QUEUED") // QUEUED | CLAIMED | DELIVERED | FAILED | EXPIRED
+  nonce        String
+  envelopeHmac String
+  expiresAt    DateTime
+  claimedAt    DateTime?
+  result       String? // JSON evidence: { hash, size, lines?, truncated, exitCode? }
+  errorReason  String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @default(now())
+
+  @@index([deviceId, status])
+  @@index([businessId])
+}
+
+// PR-012 — reconciliation report: the dry-run the owner sees BEFORE any
+// write, and the read-back evidence AFTER. contentHash binds the apply to
+// exactly the previewed report (no swapping the file between preview and
+// approval).
+model ReconcileReport {
+  id          String    @id @default(cuid())
+  businessId  String
+  business    Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  fileName    String?
+  contentHash String
+  payload     String // JSON verdicts
+  status      String    @default("DRAFT") // DRAFT | APPLIED | EXPIRED
+  createdAt   DateTime  @default(now())
+  appliedAt   DateTime?
+  readback    String? // JSON per-row read-back evidence
+  errorReason String?
+
+  @@index([businessId, status])
 }

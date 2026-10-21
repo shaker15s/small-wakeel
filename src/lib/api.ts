@@ -137,6 +137,34 @@ export interface ItemImportResult {
   preview?: { name: string; sellPrice: number; stockQty: number }[]
 }
 
+// R75 / PR-007 — onboarding state machine (Business Profile)
+export interface OnboardingProfileAnswer {
+  value: string | number | null
+  source: 'owner'
+  answeredAt: string
+  skipped: boolean
+  corrected?: boolean
+}
+export interface OnboardingProfileQuestion {
+  key: string
+  label: string
+  help?: string
+  required: boolean
+  financial: boolean
+  choices?: string[]
+  skipAllowed: boolean
+  prefill?: 'businessName' | 'businessType'
+}
+export interface OnboardingProfileState {
+  businessId: string
+  stage: 'not_started' | 'interviewing' | 'proposed' | 'confirmed'
+  answers: Record<string, OnboardingProfileAnswer>
+  consents: Record<string, { granted: boolean; at: string }>
+  pending: string[]
+  questions: OnboardingProfileQuestion[]
+  openingCashStatedAt: string | null
+}
+
 export interface SearchHitDTO {
   kind: 'item' | 'customer' | 'supplier' | 'operation' | 'note'
   id: string
@@ -192,6 +220,15 @@ export const api = {
     updateExisting?: boolean
     dryRun?: boolean
   }) => post<ItemImportResult>('/api/items/import', body),
+  // R75 / PR-007 — the onboarding state machine (Business Profile)
+  onboardingProfile: (businessId: string, userId: string) =>
+    get<OnboardingProfileState>(`/api/onboarding/profile?businessId=${businessId}&userId=${userId}`),
+  answerOnboardingProfile: (businessId: string, userId: string, key: string, value?: string | number | null, skip = false) =>
+    post<OnboardingProfileState>('/api/onboarding/profile', { businessId, userId, key, value, skip }),
+  setOnboardingConsent: (businessId: string, userId: string, key: string, granted: boolean) =>
+    post<OnboardingProfileState>('/api/onboarding/profile/consent', { businessId, userId, key, granted }),
+  confirmOnboardingProfile: (businessId: string, userId: string) =>
+    post<OnboardingProfileState>('/api/onboarding/profile/confirm', { businessId, userId }),
   search: (businessId: string, q: string, limit = 12) =>
     get<SearchResultDTO>(`/api/search?businessId=${businessId}&q=${encodeURIComponent(q)}&limit=${limit}`),
   operations: (businessId: string, status?: string) =>

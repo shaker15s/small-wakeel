@@ -29,12 +29,20 @@ import { EmptyState, ErrorState, Money, ViewHeader, ViewProps, arNum, PAGE, PAGE
 } from './shared'
 import { ImportItemsDialog } from './ImportItemsDialog'
 
-function itemValue(it: ItemDTO): number {
-  return it.valueAtCost ?? it.costPrice * it.stockQty
+// R70 / PR-001: a null cost or stock means the value is UNRECORDED, not 0.
+function itemValue(it: ItemDTO): number | null {
+  if (it.valueAtCost != null) return it.valueAtCost
+  if (it.costPrice != null && it.stockQty != null) return it.costPrice * it.stockQty
+  return null
 }
 
 function isLow(it: ItemDTO): boolean {
-  return it.stockQty <= it.lowStockThreshold
+  return it.stockQty != null && it.lowStockThreshold != null && it.stockQty <= it.lowStockThreshold
+}
+
+/** «غير مسجل» chip for a value the owner has not recorded yet. */
+function Unknown() {
+  return <span className="text-xs text-muted-foreground">غير مسجل</span>
 }
 
 /** Expiry state: null = not tracked / fine, 'expired' | 'soon' = needs a badge. */
@@ -87,11 +95,11 @@ export default function InventoryView({ businessId, userId }: ViewProps) {
   }, [items, query, category])
 
   const totalValue = useMemo(
-    () => filtered.reduce((sum, it) => sum + itemValue(it), 0),
+    () => filtered.reduce((sum, it) => sum + (itemValue(it) ?? 0), 0),
     [filtered],
   )
   const allValue = useMemo(
-    () => items.reduce((sum, it) => sum + itemValue(it), 0),
+    () => items.reduce((sum, it) => sum + (itemValue(it) ?? 0), 0),
     [items],
   )
   const lowCount = filtered.filter(isLow).length
@@ -221,16 +229,16 @@ export default function InventoryView({ businessId, userId }: ViewProps) {
                           low && 'text-wakil-amber',
                         )}
                       >
-                        {fmtQty(it.stockQty)}
+                        {it.stockQty == null ? <Unknown /> : fmtQty(it.stockQty)}
                       </TableCell>
                       <TableCell className="py-2.5 text-muted-foreground">
                         {arUnit(it.unit)}
                       </TableCell>
                       <TableCell className="py-2.5">
-                        <Money value={it.sellPrice} />
+                        {it.sellPrice == null ? <Unknown /> : <Money value={it.sellPrice} />}
                       </TableCell>
                       <TableCell className="py-2.5">
-                        <Money value={itemValue(it)} className="font-medium" />
+                        {itemValue(it) == null ? <Unknown /> : <Money value={itemValue(it)!} className="font-medium" />}
                       </TableCell>
                     </TableRow>
                   )
@@ -270,19 +278,19 @@ export default function InventoryView({ businessId, userId }: ViewProps) {
                           low && 'text-wakil-amber',
                         )}
                       >
-                        {fmtQty(it.stockQty)}
+                        {it.stockQty == null ? <Unknown /> : fmtQty(it.stockQty)}
                       </dd>
                     </div>
                     <div>
                       <dt className="text-muted-foreground">سعر البيع</dt>
                       <dd className="num mt-0.5 font-semibold tabular-nums">
-                        {egp(it.sellPrice)}
+                        {it.sellPrice == null ? <Unknown /> : egp(it.sellPrice)}
                       </dd>
                     </div>
                     <div>
                       <dt className="text-muted-foreground">قيمة المخزون</dt>
                       <dd className="num mt-0.5 font-semibold tabular-nums">
-                        {egp(itemValue(it))}
+                        {itemValue(it) == null ? <Unknown /> : egp(itemValue(it)!)}
                       </dd>
                     </div>
                   </dl>

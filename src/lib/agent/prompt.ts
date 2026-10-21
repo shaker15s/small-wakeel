@@ -103,9 +103,11 @@ export function buildSystemPrompt(params: {
   const { business, user, items, customers, suppliers, memories, rules, history } = params
   const isGym = business.type === 'gym'
 
+  // R70 / PR-001: the catalog line shows «غير مسجل» for unknowns — the model
+  // must not quote a price that was never recorded.
   const itemLines = items
     .slice(0, params.catalogLimit ?? 30)
-    .map((i) => `- ${i.name} (وحدة: ${i.unit}، بيع: ${egp(i.sellPrice)}، متاح: ${i.stockQty})${i.aliases ? ` — معروف كمان بـ«${i.aliases}»` : ''}`)
+    .map((i) => `- ${i.name} (وحدة: ${i.unit}، بيع: ${i.sellPrice == null ? 'غير مسجل' : egp(i.sellPrice)}، متاح: ${i.stockQty == null ? 'غير مسجل' : i.stockQty})${i.aliases ? ` — معروف كمان بـ«${i.aliases}»` : ''}`)
     .join('\n')
 
   const partyLines = isGym
@@ -263,7 +265,7 @@ export function buildAgentSystemPrompt(params: {
     .slice(0, 26)
     .map(
       (i) =>
-        `- [id:${i.id}] ${i.name} (بيع: ${egp(i.sellPrice)}، تكلفة: ${egp(i.costPrice)}، متاح: ${i.stockQty} ${i.unit}${
+        `- [id:${i.id}] ${i.name} (بيع: ${i.sellPrice == null ? 'غير مسجل' : egp(i.sellPrice)}، تكلفة: ${i.costPrice == null ? 'غير مسجل' : egp(i.costPrice)}، متاح: ${i.stockQty == null ? 'غير مسجل' : i.stockQty} ${i.unit}${
           i.batchNo ? `، تشغيلة: ${i.batchNo}` : ''
         }${i.expiresAt ? `، صلاحية: ${i.expiresAt.toISOString().slice(0, 10)}` : ''}${
           i.aliases ? `، بيتنادى «${i.aliases}»` : ''
@@ -426,7 +428,7 @@ ${catalogAppendix}
    - \`upsert_catalog_item({name, sellPrice, costPrice?, stockQty?, lowStockThreshold?, unit?, category?, aliases?, batchNo?, expiresAt?})\` → إضافة صنف جديد أو تعديل سعره/رصيده/تشغيلته فوراً
    - \`upsert_party({kind, name, phone?, balance?, plan?})\` → إضافة أو تعديل عميل ("customer") أو مورد ("supplier")
    - \`create_quick_command({label, prompt, icon?})\` → إضافة زرار أمر سريع تحت مربع الكتابة
-   - \`create_business({name, type, openingCash?, ownerName?})\` → إنشاء نشاط تجاري جديد بالكامل (مثل restaurant, clinic, electronics, wholesale, clothing, pharmacy, gym, attar, grocery أو أي نشاط)
+   - \`create_business({name, type, openingCash?, ownerName?})\` → إنشاء نشاط تجاري جديد بالكامل (مثل restaurant, clinic, electronics, wholesale, clothing, tools, pharmacy, gym, attar, grocery أو أي نشاط)
    - \`configure_business({name?, type?, openingCash?, tone?})\` → تعديل اسم المنشأة أو نشاطها أو نبرتك
    - \`memory_save({text, kind?})\` → حفظ معلومة أو قاعدة شغل ("rule") أو تفضيل ("preference") أو وعد سداد في ذاكرتك الدائمة
    - \`memory_forget({query})\` → مسح معلومة من الذاكرة

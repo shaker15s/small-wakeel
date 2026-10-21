@@ -21,6 +21,7 @@ import type { AgentMemory, Business } from '@prisma/client'
 import { db } from '@/lib/db'
 import { egp } from '@/lib/format'
 import { normalizeAr, toWesternDigits, matchEntity, wordBoundedAt } from './arabic'
+import { containsMemorySecret } from './memory-policy'
 import { startOfCairoDay } from '@/app/api/_lib/dates'
 
 // ---------------------------------------------------------------------------
@@ -592,7 +593,8 @@ export async function getSnapshot(business: Business): Promise<BusinessSnapshot>
   const expensesToday = sumOf('expense')
   const inn = cashEntries.filter((e) => e.direction === 'in').reduce((s, e) => s + e.amount, 0)
   const out = cashEntries.filter((e) => e.direction === 'out').reduce((s, e) => s + e.amount, 0)
-  const low = items.filter((it) => it.stockQty <= it.lowStockThreshold)
+  // R70 / PR-001: a shortage needs a COUNTED stock and a recorded threshold.
+  const low = items.filter((it) => it.stockQty != null && it.lowStockThreshold != null && it.stockQty <= it.lowStockThreshold)
   const receivables = customers.filter((c) => c.balance > 0).sort((a, b) => b.balance - a.balance)
   const expiring = items.filter((it) => {
     if (!it.expiresAt) return false
@@ -674,6 +676,12 @@ export async function upsertBusinessRule(params: {
   ruleKey?: string
 }): Promise<UpsertRuleResult> {
   const cleanText = params.text.trim().slice(0, 350)
+  // PR-008: a business rule is standing law — it must never be a credential
+  // vault. (A regex filter is a guard, not a full DLP; the contract is that
+  // nothing secret-shaped becomes a RULE.)
+  if (containsMemorySecret(cleanText)) {
+    throw new Error('مش هحفظ كلمات مرور أو رموز أمان أو مفاتيح API كقاعدة شغل')
+  }
   const normNew = normalizeAr(cleanText)
   const resolvedCategory = params.category?.trim() || ruleCategory(normNew)
 

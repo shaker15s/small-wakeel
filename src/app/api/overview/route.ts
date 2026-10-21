@@ -118,10 +118,11 @@ export async function GET(req: Request) {
       }
     }
 
-    // — Low stock (stockQty at/below its own threshold), worst first
+    // — Low stock (stockQty at/below its own threshold), worst first.
+    // R70 / PR-001: both the stock and the threshold must be recorded.
     const lowStock = items
-      .filter((i) => i.stockQty <= i.lowStockThreshold)
-      .sort((a, b) => a.stockQty - b.stockQty || a.name.localeCompare(b.name, 'ar'))
+      .filter((i) => i.stockQty != null && i.lowStockThreshold != null && i.stockQty <= i.lowStockThreshold)
+      .sort((a, b) => (a.stockQty ?? 0) - (b.stockQty ?? 0) || a.name.localeCompare(b.name, 'ar'))
       .map(serializeItem)
 
     // — Expiry watch: pharmacy only, expired or expiring within 30 days

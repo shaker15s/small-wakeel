@@ -10,6 +10,7 @@ import {
   executePlugin,
   getBusinessPlugins,
   installOrUpdatePlugin,
+  rollbackPlugin,
   STARTER_PLUGIN_CATALOG,
   synthesizePluginWithAI,
   togglePluginActive,
@@ -110,8 +111,16 @@ export async function PATCH(req: NextRequest) {
     const body = (await req.json().catch(() => ({}))) as {
       id?: string
       active?: boolean
+      action?: 'rollback'
     }
-    if (!body.id || typeof body.active !== 'boolean') {
+    if (!body.id) return badRequest('id مطلوب')
+    // R78 / PR-009: one-step rollback to the previous installed version.
+    if (body.action === 'rollback') {
+      const rolled = await rollbackPlugin(body.id, gate.actor.business.id, gate.actor.user.id)
+      if (!rolled) return notFound('مفيش نسخة سابقة للرجوع ليها')
+      return NextResponse.json({ plugin: rolled })
+    }
+    if (typeof body.active !== 'boolean') {
       return badRequest('id و active مطلوبين')
     }
     const updated = await togglePluginActive(body.id, body.active, gate.actor.business.id, gate.actor.user.id)

@@ -142,3 +142,15 @@ export function brainToolSections(): Record<ToolSection, string[]> {
 export function brainToolCount(): number {
   return Object.keys(SPECS).length
 }
+
+/** The registered tool names — ONE set, straight from SPECS (PR-004 gate). */
+export const TOOL_NAME_SET: ReadonlySet<string> = new Set(Object.keys(SPECS))
+
+/** The parameters a tool's schema actually declares — the contract gate uses
+ *  this to tell a LEGAL `ref` (get_transaction_status) from a smuggled one. */
+export function declaredToolParams(name: string): ReadonlySet<string> {
+  const spec = SPECS[name]
+  if (!spec) return new Set()
+  const props = (spec[2] as { properties?: Record<string, unknown> }).properties
+  return new Set(props ? Object.keys(props) : [])
+}

@@ -16,8 +16,9 @@
 //   • Bounded: each sweep takes at most 10 tasks; errors never kill the timer.
 
 import { runCashbookFollowups } from './domain/cashbook-followups'
-import { requeueStuckTasks, runDueTasks } from './tasks/runner'
+import { requeueStuckNotifications, requeueStuckTasks, runDueTasks } from './tasks/runner'
 import { expireStaleDrafts } from './domain/hygiene'
+import { expireLapsedCompanionJobs } from './companion/companion'
 
 const DEFAULT_INTERVAL_MS = 60_000
 
@@ -59,7 +60,12 @@ function intervalMs(): number {
 async function sweep(): Promise<void> {
   const s = state()
   try {
+    // PR-010: recover work a dead worker left behind — task leases AND
+    // in-flight notifications (crash-safe exactly-once delivery).
     await requeueStuckTasks()
+    await requeueStuckNotifications()
+    // Companion jobs are single-purpose and expiring — sweep what lapsed.
+    await expireLapsedCompanionJobs()
     await runCashbookFollowups()
     // Retire drafts nobody approved (default: older than 72h). Cheap and
     // idempotent; a human decision already in flight wins the atomic update.

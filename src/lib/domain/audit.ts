@@ -138,20 +138,34 @@ export async function auditDraft(input: AuditInput): Promise<AuditResult> {
         const unitPrice = Number(line.unitPrice ?? 0)
 
         // — oversell (stock is in the item's base unit; qty is already converted)
-        if (item && input.type === 'sale' && qty > item.stockQty) {
-          findings.push({
-            code: 'oversell',
-            severity: item.stockQty <= 0 ? 'danger' : 'warn',
-            message: `الكمية أكبر من المتاح في المخزون لـ«${item.name}».`,
-            detail: `المطلوب ${qty} والمتاح ${item.stockQty}`,
-          })
+        if (item && input.type === 'sale') {
+          // R70 / PR-001: an UNCOUNTED stock is not "0 available" — it is
+          // unknown. Flag it for a stocktake; the executor will refuse to
+          // sell against it.
+          if (item.stockQty == null) {
+            findings.push({
+              code: 'unknown_stock',
+              severity: 'warn',
+              message: `مخزون «${item.name}» غير مسجل — سجّل الجرد الأول.`,
+              detail: `لا يمكن التحقق من الكمية المتاحة (غير مسجلة في النظام).`,
+            })
+          } else if (qty > item.stockQty) {
+            findings.push({
+              code: 'oversell',
+              severity: item.stockQty <= 0 ? 'danger' : 'warn',
+              message: `الكمية أكبر من المتاح في المخزون لـ«${item.name}».`,
+              detail: `المطلوب ${qty} والمتاح ${item.stockQty}`,
+            })
+          }
         }
 
         // — price sanity against the ledger (last 5 priced sales of this item)
         if (item && unitPrice > 0) {
           const past = (pricesByItem.get(item.id) ?? []).slice(0, 5)
+          // R70 / PR-001: a NULL catalog price is no reference at all —
+          // the check is skipped, not run against a fake 0.
           const reference = median(past) ?? (input.type === 'sale' ? item.sellPrice : item.costPrice)
-          if (reference > 0) {
+          if (reference != null && reference > 0) {
             const deviation = Math.abs(unitPrice - reference) / reference
             if (deviation >= PRICE_WARN) {
               findings.push({

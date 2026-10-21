@@ -116,17 +116,20 @@ export async function scanRisksAndOpportunities(businessId: string, userId: stri
     }
   }
 
+  // R70 / PR-001: a "star" needs recorded prices — an unknown margin is not a
+  // 22% margin.
   const stars = items
     .filter((it) => {
+      if (it.sellPrice == null || it.costPrice == null) return false
       const sold = soldByItem.get(it.id) ?? 0
       const margin = it.sellPrice > 0 ? (it.sellPrice - it.costPrice) / it.sellPrice : 0
       return sold >= 3 && margin >= 0.22
     })
-    .sort((a, b) => (soldByItem.get(b.id) ?? 0) * (b.sellPrice - b.costPrice) - (soldByItem.get(a.id) ?? 0) * (a.sellPrice - a.costPrice))
+    .sort((a, b) => (soldByItem.get(b.id) ?? 0) * ((b.sellPrice as number) - (b.costPrice as number)) - (soldByItem.get(a.id) ?? 0) * ((a.sellPrice as number) - (a.costPrice as number)))
 
   if (biz.workflowMode !== 'cashbook' && stars.length > 0) {
     const top = stars[0]
-    const marginPct = Math.round(((top.sellPrice - top.costPrice) / top.sellPrice) * 100)
+    const marginPct = Math.round((((top.sellPrice as number) - (top.costPrice as number)) / (top.sellPrice as number)) * 100)
     alerts.push({
       id: `opp-star-${top.id.slice(0, 8)}`,
       category: 'opportunity',
@@ -141,9 +144,10 @@ export async function scanRisksAndOpportunities(businessId: string, userId: stri
     })
   }
 
-  const slowHighStock = items.filter((it) => (soldByItem.get(it.id) ?? 0) === 0 && it.stockQty > it.lowStockThreshold * 2 && it.costPrice > 0)
+  // R70 / PR-001: dead-stock value needs a recorded stock AND cost.
+  const slowHighStock = items.filter((it) => (soldByItem.get(it.id) ?? 0) === 0 && it.stockQty != null && it.lowStockThreshold != null && it.stockQty > it.lowStockThreshold * 2 && it.costPrice != null && it.costPrice > 0)
   if (biz.workflowMode !== 'cashbook' && slowHighStock.length > 0) {
-    const lockedCash = slowHighStock.reduce((s, it) => s + Math.round(it.stockQty * it.costPrice), 0)
+    const lockedCash = slowHighStock.reduce((s, it) => s + Math.round((it.stockQty as number) * (it.costPrice as number)), 0)
     alerts.push({
       id: 'opp-unlock-dead-stock',
       category: 'opportunity',
@@ -400,8 +404,8 @@ export class TaskManager {
           updatedItems.push({
             name: res.item.name,
             action: res.created ? 'إضافة جديدة' : 'تحديث سجل',
-            sellPrice: egp(res.item.sellPrice),
-            stock: fmtQty(res.item.stockQty, arUnit(res.item.unit)),
+            sellPrice: res.item.sellPrice == null ? 'غير مسجل' : egp(res.item.sellPrice),
+            stock: res.item.stockQty == null ? 'غير مسجل' : fmtQty(res.item.stockQty, arUnit(res.item.unit)),
           })
         }
         cards = [
@@ -428,9 +432,11 @@ export class TaskManager {
           db.supplier.findMany({ where: { businessId } }),
           db.operation.count({ where: { businessId, status: 'AWAITING_APPROVAL' } }),
         ])
-        const unconfigured = items.filter(it => it.lowStockThreshold <= 0).length
+        // R70 / PR-001: an UNSET threshold (null) is genuinely unconfigured;
+        // an uncounted stock is NOT "low stock".
+        const unconfigured = items.filter(it => it.lowStockThreshold == null || it.lowStockThreshold <= 0).length
         const manual = (await db.business.findUniqueOrThrow({ where: { id: businessId }, select: { workflowMode: true } })).workflowMode === 'cashbook'
-        const lowStockNow = items.filter((i) => i.stockQty <= Math.max(1, i.lowStockThreshold)).length
+        const lowStockNow = items.filter((i) => i.stockQty != null && i.lowStockThreshold != null && i.stockQty <= Math.max(1, i.lowStockThreshold)).length
         cards = [
           {
             kind: 'kv',

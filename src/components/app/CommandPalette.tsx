@@ -283,7 +283,7 @@ export function CommandPalette({
         id: `item-${it.id}`,
         group: 'catalog',
         title: `${it.name} (${it.category})`,
-        subtitle: `سعر البيع: ${egp(it.sellPrice)} · الرصيد: ${it.stockQty}`,
+        subtitle: `سعر البيع: ${it.sellPrice == null ? 'غير مسجل' : egp(it.sellPrice)} · الرصيد: ${it.stockQty == null ? 'غير مسجل' : it.stockQty}`,
         badge: 'صنف',
         icon: <Layers className="w-4 h-4 text-muted-foreground" />,
         onSelect: () => closeAndRun(() => askAgent(`إيه رصيد وسعر وحركة صنف ${it.name}؟`)),

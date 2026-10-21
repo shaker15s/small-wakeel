@@ -1,7 +1,10 @@
-// GET /api/tasks?businessId — scheduled tasks (pending first)
+// GET /api/tasks?businessId — scheduled tasks (pending first), each with an
+//   HONEST box state: statusAr / lastStepAr / nextStepAr / reasonAr (PR-010).
 // POST /api/tasks — create a scheduled task (agent schedules its own reminders)
+// POST /api/tasks {action:'cancel', id} — cancel a pending/retry_wait task.
 import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
+import { describeTask, cancelTask } from '@/lib/tasks/runner'
 import { badRequest, notFound, serverError } from '../_lib/http'
 import { guard } from '../_lib/guard'
 
@@ -27,20 +30,33 @@ export async function GET(req: Request) {
     const all = [...pending, ...rest]
 
     return NextResponse.json({
-      tasks: all.map((t) => ({
-        id: t.id,
-        title: t.title,
-        tool: t.tool,
-        fields: safeParse(t.fields),
-        whenLabel: t.whenLabel,
-        scheduledFor: t.scheduledFor.toISOString(),
-        recurrence: t.recurrence,
-        status: t.status,
-        result: t.result,
-        failReason: t.failReason,
-        executedAt: t.executedAt?.toISOString() ?? null,
-        createdAt: t.createdAt.toISOString(),
-      })),
+      tasks: all.map((t) => {
+        const honest = describeTask(t)
+        return {
+          id: t.id,
+          title: t.title,
+          tool: t.tool,
+          fields: safeParse(t.fields),
+          whenLabel: t.whenLabel,
+          scheduledFor: t.scheduledFor.toISOString(),
+          recurrence: t.recurrence,
+          status: t.status,
+          result: t.result,
+          failReason: t.failReason,
+          attempts: t.attempts,
+          maxAttempts: t.maxAttempts,
+          nextRetryAt: t.nextRetryAt?.toISOString() ?? null,
+          lastStep: t.lastStep,
+          executionCount: t.executionCount,
+          executedAt: t.executedAt?.toISOString() ?? null,
+          createdAt: t.createdAt.toISOString(),
+          // the honest task box: state, last COMPLETED step, next step, reason
+          statusAr: honest.statusAr,
+          lastStepAr: honest.lastStepAr,
+          nextStepAr: honest.nextStepAr,
+          reasonAr: honest.reasonAr,
+        }
+      }),
     })
   } catch (e) {
     return serverError('tasks', e)
@@ -87,11 +103,24 @@ export async function POST(req: Request) {
       scheduledFor?: string
       recurrence?: 'daily' | 'weekly' | 'monthly' | null
       conversationId?: string | null
+      action?: 'cancel'
+      id?: string
     }
     if (!body.businessId) return badRequest('businessId مطلوب')
-    if (!body.userId) return badRequest('userId مطلوب')
+
     const gate = await guard(req, { businessId: body.businessId, userId: body.userId, permission: 'automation.manage' })
     if (!gate.ok) return gate.res
+
+    // Cancel a scheduled task (PR-010). A task that is mid-execution cannot
+    // be canceled — its lease is claimed and it must finish honestly.
+    if (body.action === 'cancel') {
+      if (!body.id) return badRequest('id مطلوب')
+      const ok = await cancelTask(body.id, body.businessId)
+      if (!ok) return notFound('المهمة مش موجودة أو مش ممكن تلغى دلوقتي (قيد التنفيذ)')
+      return NextResponse.json({ ok: true, status: 'cancelled' })
+    }
+
+    if (!body.userId) return badRequest('userId مطلوب')
     if (!body.title?.trim()) return badRequest('عنوان المهمة مطلوب')
     if (!body.tool) return badRequest('الأداة مطلوبة')
 

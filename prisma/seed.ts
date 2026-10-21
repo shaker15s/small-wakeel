@@ -1517,7 +1517,7 @@ async function verify(seeds: Record<string, SeedResult>) {
     check(`cash[${s.name}] net`, cashIn - cashOut, s.expectedCash.net)
 
     const items = await db.item.findMany({ where: { businessId: s.businessId } })
-    const lowCount = items.filter((i) => i.lowStockThreshold > 0 && i.stockQty <= i.lowStockThreshold).length
+    const lowCount = items.filter((i) => i.lowStockThreshold != null && i.lowStockThreshold > 0 && i.stockQty != null && i.stockQty <= i.lowStockThreshold).length
     check(`lowStock[${s.name}]`, lowCount, s.expectedLowStock)
   }
 

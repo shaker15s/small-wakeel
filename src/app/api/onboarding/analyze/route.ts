@@ -104,7 +104,7 @@ ${hasImage ? 'قام المستخدم بمشاركة صورة حية من الك
                   replyAr: { type: Type.STRING, description: 'Warm Egyptian Arabic reply to the owner' },
                   detectedVertical: {
                     type: Type.STRING,
-                    description: 'One of: supermarket, attar, pharmacy, gym, restaurant, electronics, clothing, wholesale, clinic',
+                    description: 'One of: supermarket, attar, pharmacy, gym, restaurant, electronics, clothing, wholesale, clinic, tools',
                   },
                   extractedItems: {
                     type: Type.ARRAY,

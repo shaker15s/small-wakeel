@@ -45,6 +45,7 @@ export const VERTICAL_LABELS: Record<Vertical, string> = {
   electronics: 'الموبايلات والإلكترونيات',
   wholesale: 'تجارة الجملة والمخازن',
   clothing: 'الملابس والأزياء',
+  tools: 'أدوات ومعدات',
 }
 
 export const TIER_AR: Record<string, string> = {

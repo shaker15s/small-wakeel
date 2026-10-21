@@ -155,12 +155,13 @@ export async function buildRadar(businessId: string): Promise<RadarInsightDTO[]>
       if (!p.priceOverride) continue
       const it = itemById.get(String(p.itemId ?? ''))
       const unitPrice = Number(p.unitPrice ?? 0)
-      if (it && unitPrice > 0 && unitPrice < it.costPrice) {
+      // R70 / PR-001: below-cost needs a RECORDED cost to compare against.
+      if (it && unitPrice > 0 && it.costPrice != null && unitPrice < it.costPrice) {
         out.push({
           id: `radar-margin-${sale.id.slice(0, 8)}`,
           level: 'warning',
           title: 'بيع بأقل من سعر التكلفة',
-          detail: `العملية ${sale.ref} اتسجلت بسعر مخصص (${egpPlain(unitPrice)} ج للوحدة) أقل من تكلفة «${it.name}» المسجلة (${egpPlain(it.costPrice)} ج).`,
+          detail: `العملية ${sale.ref} اتسجلت بسعر مخصص (${egpPlain(unitPrice)} ج للوحدة) أقل من تكلفة «${it.name}» المسجلة (${egpPlain(it.costPrice as number)} ج).`,
           evidence: [{ label: `${sale.ref} — ${it.name}`, ref: sale.ref, view: 'journal' }],
         })
       }
@@ -193,6 +194,8 @@ export async function buildRadar(businessId: string): Promise<RadarInsightDTO[]>
   const fastRunningOut = items.filter((it) => {
     const sold7 = soldQty.get(it.id) ?? 0
     if (sold7 <= 0) return false
+    // R70 / PR-001: an uncounted shelf can't be "running out" — we don't know.
+    if (it.stockQty == null) return false
     const daily = sold7 / 7
     const daysLeft = it.stockQty / daily
     return daysLeft <= 3 && it.stockQty > 0

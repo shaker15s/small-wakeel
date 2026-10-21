@@ -22,7 +22,7 @@ async function expense(total = 100) {
 async function sale(stockQty = 10, qty = 2) {
   const it = await item(business.id, stockQty)
   const op = await createDraft({ businessId: business.id, userId: owner.id, type: 'sale', summary: key(), payload: {
-    itemId: it.id, qty, total: qty * it.sellPrice,
+    itemId: it.id, qty, total: qty * (it.sellPrice ?? 0),
   }, idempotencyKey: key() })
   return { it, op }
 }
