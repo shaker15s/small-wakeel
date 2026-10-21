@@ -4,6 +4,8 @@ export interface IndexDirective {
   kind: IndexKind
   fields: string[]
   raw: string
+  /** Legacy suffix emitted by the older db-sync parser; retained only for compatibility. */
+  legacyName?: string
 }
 
 // Prisma's default physical index suffixes are _idx and _key, not the
@@ -25,8 +27,14 @@ export function parseIndexDirectives(schema: string): Record<string, IndexDirect
       const mapName = /\bmap:\s*"([^"]+)"/.exec(attributes)?.[1]
       const suffix = kind === 'index' ? 'idx' : 'key'
       const name = mapName || model + '_' + fields.join('_') + '_' + suffix
-      ;(out[model] ??= []).push({ name, kind, fields, raw })
+      const legacyName = mapName ? undefined : model + '_' + fields.join('_') + '_' + kind
+      ;(out[model] ??= []).push({ name, legacyName, kind, fields, raw })
     }
   }
   return out
+}
+
+/** A legacy name may satisfy schema sync, avoiding a duplicate physical index. */
+export function hasMatchingIndexName(index: IndexDirective, existingNames: Set<string>): boolean {
+  return existingNames.has(index.name) || Boolean(index.legacyName && existingNames.has(index.legacyName))
 }

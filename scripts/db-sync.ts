@@ -23,7 +23,7 @@
 import { readFileSync } from 'node:fs'
 import { createClient } from '@libsql/client'
 import { getDMMF } from '@prisma/internals'
-import { parseIndexDirectives } from './lib/db-index-names'
+import { hasMatchingIndexName, parseIndexDirectives } from './lib/db-index-names'
 
 interface DmmfField {
   name: string
@@ -157,7 +157,7 @@ async function main() {
   const existingIndexes = new Set(indexRes.rows.map((r) => String(r.name)))
   for (const model of models) {
     for (const idx of indexDirectives[model.name] ?? []) {
-      if (existingIndexes.has(idx.name)) continue
+      if (hasMatchingIndexName(idx, existingIndexes)) continue
       statements.push(createIndexSql(model.name, idx))
       report.push(`+ index   ${idx.name} (${idx.fields.join(', ')})`)
     }
