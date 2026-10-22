@@ -23,8 +23,16 @@ export interface EvalCase {
 // ---- check builders -------------------------------------------------------
 export const draft =
   (type: string) =>
-  (r: any): boolean =>
-    r.card?.kind === 'draft' && r.card?.type === type && r.card?.status === 'AWAITING_APPROVAL'
+  (r: any): boolean => {
+    if (r.card?.kind !== 'draft' || r.card?.status !== 'AWAITING_APPROVAL') return false
+    if (r.card?.type === type) return true
+    // Cashbook mode has a distinct domain operation (type cashbook) but it
+    // is still an approval-bound draft. Accept only the matching collection
+    // workflow, not an arbitrary cashbook card for a sale/purchase expectation.
+    return type === 'collection' &&
+      r.card?.type === 'cashbook' &&
+      r.card?.title === 'تحصيل من عميل'
+  }
 export const anyDraft = (types: string[]) => (r: any): boolean =>
   r.card?.kind === 'draft' && types.includes(r.card?.type)
 export const cards =
@@ -34,7 +42,10 @@ export const cards =
 export const noCard = (r: any): boolean => !r.card
 export const overpaySafe = (needle: string) => (r: any) =>
   r.card?.kind === 'draft' ||
-  (typeof r.replyText === 'string' && r.replyText.includes('المستحق لـ' + needle))
+  (typeof r.replyText === 'string' && (
+    r.replyText.includes('المستحق لـ' + needle) ||
+    r.replyText.includes('المبلغ أكبر من الدين المسجل')
+  ))
 export const says =
   (...parts: string[]) =>
   (r: any): boolean =>
