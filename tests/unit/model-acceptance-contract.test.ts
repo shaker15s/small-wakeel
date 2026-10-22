@@ -27,6 +27,8 @@ describe('live model acceptance contract', () => {
     expect(isLiveAcceptanceEndpoint('http://api.example.com/v1', 'secret', ['model-x'])).toBe(false)
     expect(isLiveAcceptanceEndpoint('http://127.0.0.1:3031/v1', 'secret', ['model-x'])).toBe(false)
     expect(isLiveAcceptanceEndpoint('https://192.168.1.20/v1', 'secret', ['model-x'])).toBe(false)
+    expect(isLiveAcceptanceEndpoint('https://[::ffff:7f00:1]/v1', 'secret', ['model-x'])).toBe(false)
+    expect(isLiveAcceptanceEndpoint('https://localhost./v1', 'secret', ['model-x'])).toBe(false)
     expect(isLiveAcceptanceEndpoint('https://api.example.com/v1', 'secret', ['mock-model'])).toBe(false)
   })
 
