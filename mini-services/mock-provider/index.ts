@@ -335,11 +335,21 @@ function queryArgs(text: string, tool: string): Record<string, unknown> {
 }
 
 /** The brain loop expects tool calls, or a final Arabic sentence. */
-function brainReply(rawText: string, model: string): string {
+function brainReply(rawText: string, model: string, messages: Msg[] = []): string {
   // the owner's CURRENT ask (see ownerAsk) — history and tool-result
   // injections are user messages too and must not be read as the request
   const text = rawText;
   const d = detect(text);
+  const systemText = messages.filter((m) => m.role === "system").map((m) => m.content).join("\\n");
+  const readOnly = /قراءة فقط|ممنوع منعًا باتًا استدعاء أي أداة كتابة/.test(systemText);
+
+  // The mock must enforce the same protocol contract being tested: if the
+  // system instruction is read-only, a detected financial write becomes prose,
+  // never a native/JSON tool call. This is fixture behavior, not production auth.
+  if (readOnly && d.kind === "write") {
+    return "أنا في وضع القراءة فقط؛ لن أستدعي أداة كتابة. أحتاج تأكيدًا صريحًا قبل تجهيز أي عملية.";
+  }
+
   if (d.kind === "write") {
     const args: Record<string, unknown> = {
       ...(d.itemName ? { item: d.itemName } : {}),
@@ -347,6 +357,29 @@ function brainReply(rawText: string, model: string): string {
       ...(d.amount ? { amount: d.amount } : {}),
       ...(d.name ? { name: d.name, customerName: d.name } : {}),
     };
+
+    // PR-013 acceptance fixture: produce the actual record_sale schema rather
+    // than historical { item, amount } fields. The probe deliberately uses a
+    // known item and explicit invoice/paid totals so the adapter test is exact.
+    if (d.opType === "sale") {
+      const product = text.match(/(زيت\\s+عباد\\s+1[.٫]5(?:\\s+لتر)?)/);
+      const totalMatch = text.match(/(?:إجمالي(?:\\s+الفاتورة)?|المجموع|بـ|بسعر|بمبلغ)\\s*(?:هو\\s*)?([\\d٠-٩][\\d٠-٩.,]*)/);
+      const paidMatch = text.match(/(?:المدفوع|مدفوع)\\s*(?:هو\\s*)?([\\d٠-٩][\\d٠-٩.,]*)/);
+      const qtyMatch = text.match(/([\\d٠-٩]+)\\s*(?:علب?|علبة)/);
+      const total = totalMatch ? toNum(totalMatch[1]) : d.amount;
+      const paid = paidMatch ? toNum(paidMatch[1]) : total;
+      const qty = qtyMatch ? toNum(qtyMatch[1]) : d.qty;
+      const name = product?.[1] ?? d.itemName;
+      // Replace, don't merge, the legacy argument names for sale acceptance.
+      for (const key of Object.keys(args)) delete args[key];
+      if (name) args.name = name;
+      if (qty != null) args.qty = qty;
+      if (total != null) {
+        args.total = total;
+        args.price = qty ? total / qty : total;
+      }
+      if (paid != null) args.paid = paid;
+    }
     // «وعليه ٢٥٠» → an opening balance for a brand-new party
     if (d.opType === "customer_add" || d.opType === "supplier_add") {
       const mb = text.match(/(?:وعليه|وعليها|عليه|عليها|رصيده|مديونيته)\s*(?:بـ|ب)?\s*([\d٠-٩]+)/);
@@ -447,7 +480,7 @@ function buildReply(model: string, messages: Msg[]): { reasoning: string[]; cont
   const ownerText = ownerAsk(messages) || text;
 
   if (pass === "intent") return { reasoning, content: intentJson(ownerText) };
-  if (pass === "brain") return { reasoning, content: brainReply(isFinalAsk(messages) ? text : ownerText, model) };
+  if (pass === "brain") return { reasoning, content: brainReply(isFinalAsk(messages) ? text : ownerText, model, messages) };
 
   // REPLY PASS — the fixture behaves like a GOOD model: it reads the tool
   // results the harness fed back and speaks about THEM, it never claims a card
