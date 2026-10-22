@@ -57,7 +57,7 @@ for (const suffix of ['-wal', '-shm']) {
     throw new Error(`pilot:gate refuses to copy a seed with a non-empty ${suffix} sidecar; stop fixture writers and retry`)
   }
 }
-writeFileSync(pilotMarkerPath, PILOT_DB_INITIALIZING + '\\n', { flag: 'wx' })
+writeFileSync(pilotMarkerPath, PILOT_DB_INITIALIZING + '\n', { flag: 'wx' })
 copyFileSync(pilotSeedPath, pilotDbPath)
 const pilotEnv = {
   ...process.env,
@@ -72,10 +72,10 @@ const migration = spawnSync('bun', [join(root, 'scripts/migrate.ts')], {
   stdio: ['ignore', 'pipe', 'pipe'],
 })
 if (migration.error || migration.status !== 0) {
-  const detail = [migration.error?.message, migration.stdout, migration.stderr].filter(Boolean).join('\\n').slice(-3000)
+  const detail = [migration.error?.message, migration.stdout, migration.stderr].filter(Boolean).join('\n').slice(-3000)
   throw new Error(`pilot:gate refuses to run without a migrated disposable DB: ${detail || `migration exit ${migration.status}`}`)
 }
-writeFileSync(pilotMarkerPath, PILOT_DB_READY + '\\n', { flag: 'w' })
+writeFileSync(pilotMarkerPath, PILOT_DB_READY + '\n', { flag: 'w' })
 
 function git(...args) {
   try { return execSync(`git ${args.join(' ')}`, { cwd: root, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim() }
