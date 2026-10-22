@@ -33,7 +33,10 @@ export function verifyEvidenceReportHash(reportPath, expectedSha256, root) {
     if (!relativeTarget || relativeTarget === '..' || relativeTarget.startsWith('..' + sep) || isAbsolute(relativeTarget)) return false
     if (!existsSync(evidenceRoot) || !existsSync(target)) return false
 
+    const actualRepoRoot = realpathSync(root)
     const actualRoot = realpathSync(evidenceRoot)
+    const baseRelative = relative(actualRepoRoot, actualRoot)
+    if (!baseRelative || baseRelative === '..' || baseRelative.startsWith('..' + sep) || isAbsolute(baseRelative)) return false
     const actualTarget = realpathSync(target)
     const realRelative = relative(actualRoot, actualTarget)
     if (!realRelative || realRelative === '..' || realRelative.startsWith('..' + sep) || isAbsolute(realRelative)) return false
