@@ -16,9 +16,9 @@ beforeAll(async () => {
     name: `general-mode-cashbook-${randomUUID()}`,
     type: 'supermarket',
   })
-  // Reproduce a newly onboarded general employee: no focused workflow was
-  // explicitly enabled, but the owner can still issue a clear cashbook command.
-  await db.business.update({ where: { id: created.id }, data: { workflowMode: null } })
+  // Reproduce a newly onboarded workspace in the default inventory workflow:
+  // cashbook has not been explicitly activated, but clear cash commands still work.
+  await db.business.update({ where: { id: created.id }, data: { workflowMode: 'inventory' } })
   business = await db.business.findUniqueOrThrow({ where: { id: created.id } })
   owner = await db.user.findUniqueOrThrow({ where: { id: created.users[0].id } })
 })
@@ -30,7 +30,7 @@ afterAll(async () => {
 test('a clear drawer count drafts from general mode and mutates the ledger only after approval', async () => {
   const shop = business!
   const user = owner!
-  expect(shop.workflowMode).toBeNull()
+  expect(shop.workflowMode).toBe('inventory')
   const conversation = await db.conversation.create({
     data: { businessId: shop.id, userId: user.id, title: 'General mode cash count' },
   })
