@@ -5,6 +5,17 @@ import { serializeOp } from '../_lib/serialize'
 import { guard } from '../_lib/guard'
 import { serverError } from '../_lib/http'
 import { cashPositionEvidence } from '@/lib/domain/cashbook'
+
+function expectedCashKnownFromPayload(raw: string): boolean | null {
+  try {
+    const value: unknown = JSON.parse(raw)
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+    const flag = (value as Record<string, unknown>).expectedCashKnown
+    return typeof flag === 'boolean' ? flag : null
+  } catch {
+    return null
+  }
+}
 import { cairoIsoDay } from '../_lib/dates'
 export const dynamic = 'force-dynamic'
 export async function GET(req: NextRequest) {
@@ -15,14 +26,14 @@ export async function GET(req: NextRequest) {
     const result = await db.$transaction(async tx => {
       const [cashPosition, entries, customers, suppliers, reminders, pendingOps] = await Promise.all([
         cashPositionEvidence(tx, business.id),
-        tx.cashbookEntry.findMany({ where: { businessId: business.id }, include: { operation: { select: { reversedByRef: true } } }, orderBy: [{ recordedAt: 'desc' }, { id: 'desc' }], take: 40 }),
+        tx.cashbookEntry.findMany({ where: { businessId: business.id }, include: { operation: { select: { reversedByRef: true, payload: true } } }, orderBy: [{ recordedAt: 'desc' }, { id: 'desc' }], take: 40 }),
         tx.customer.findMany({ where: { businessId: business.id, balance: { gt: 0 } }, select: { id: true, name: true, balance: true }, orderBy: { balance: 'desc' }, take: 50 }),
         tx.supplier.findMany({ where: { businessId: business.id, balance: { gt: 0 } }, select: { id: true, name: true, balance: true }, orderBy: { balance: 'desc' }, take: 50 }),
         tx.shopReminder.findMany({ where: { businessId: business.id, userId: user.id, active: true }, select: { id: true, subject: true }, take: 20 }),
         tx.operation.findMany({ where: { businessId: business.id, status: 'AWAITING_APPROVAL' }, orderBy: { createdAt: 'desc' }, take: 20 }),
       ])
       const totals = await Promise.all([tx.customer.aggregate({ where: { businessId: business.id, balance: { gt: 0 } }, _sum: { balance: true } }), tx.supplier.aggregate({ where: { businessId: business.id, balance: { gt: 0 } }, _sum: { balance: true } })])
-      return { cash: cashPosition.cash, openingCashKnown: cashPosition.openingCashKnown, currentCashKnown: cashPosition.currentCashKnown, cashIn: cashPosition.cashIn, cashOut: cashPosition.cashOut, cashCountAdjustment: cashPosition.cashCountAdjustment, entries, customers, suppliers, reminders, pendingOps: pendingOps.map(op => serializeOp(op)), receivable: totals[0]._sum.balance ?? 0, payable: totals[1]._sum.balance ?? 0, today: cairoIsoDay(new Date()) }
+      return { cash: cashPosition.cash, openingCashKnown: cashPosition.openingCashKnown, currentCashKnown: cashPosition.currentCashKnown, cashIn: cashPosition.cashIn, cashOut: cashPosition.cashOut, cashCountAdjustment: cashPosition.cashCountAdjustment, entries: entries.map(({ operation, ...entry }) => ({ ...entry, expectedCashKnown: entry.kind === 'cash_count' ? expectedCashKnownFromPayload(operation.payload) : null, operation: { reversedByRef: operation.reversedByRef } })), customers, suppliers, reminders, pendingOps: pendingOps.map(op => serializeOp(op)), receivable: totals[0]._sum.balance ?? 0, payable: totals[1]._sum.balance ?? 0, today: cairoIsoDay(new Date()) }
     })
     return NextResponse.json(result)
   } catch (err) { return serverError('cashbook', err) }
