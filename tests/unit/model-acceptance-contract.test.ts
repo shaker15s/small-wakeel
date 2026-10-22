@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  assertSafeAcceptanceCredentialTarget,
   evaluateExpectedSaleCall,
   isLiveAcceptanceEndpoint,
   resolveChatCompletionsUrl,
@@ -27,6 +28,14 @@ describe('live model acceptance contract', () => {
     expect(isLiveAcceptanceEndpoint('http://127.0.0.1:3031/v1', 'secret', ['model-x'])).toBe(false)
     expect(isLiveAcceptanceEndpoint('https://192.168.1.20/v1', 'secret', ['model-x'])).toBe(false)
     expect(isLiveAcceptanceEndpoint('https://api.example.com/v1', 'secret', ['mock-model'])).toBe(false)
+  })
+
+  test('blocks credential transmission to insecure/private/mock endpoints before network access', () => {
+    expect(() => assertSafeAcceptanceCredentialTarget('http://127.0.0.1:3031/v1', 'secret', ['model-x'])).toThrow(/Refusing to send/)
+    expect(() => assertSafeAcceptanceCredentialTarget('https://192.168.1.10/v1', 'secret', ['model-x'])).toThrow(/Refusing to send/)
+    expect(() => assertSafeAcceptanceCredentialTarget('https://api.example.com/v1', 'secret', ['mock-model'])).toThrow(/Refusing to send/)
+    expect(() => assertSafeAcceptanceCredentialTarget('https://generativelanguage.googleapis.com/v1beta', 'secret', ['gemini-3.8-flash'])).not.toThrow()
+    expect(() => assertSafeAcceptanceCredentialTarget('http://127.0.0.1:3031/v1', '', ['mock-model'])).not.toThrow()
   })
 
   test('accepts only a sale call with the expected product identity, quantity and amount', () => {
