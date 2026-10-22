@@ -62,6 +62,39 @@ export async function browserSmoke(databaseUrl: string, key: string, boot: (orig
     await expect(page.getByRole('heading', { name: 'حسابك ومساحة شغلك', exact: true })).toBeVisible()
   }
   const panel = (page: Page) => page.locator('section[aria-labelledby="account-heading"]')
+
+  /**
+   * Each actor and newly-created workspace has its own preference onboarding.
+   * The BusinessProfile interview is tenant-scoped: an invited staff member
+   * reuses the owner's confirmed profile, but a newly created blank workspace
+   * must answer its own required questions before its preferences can be saved.
+   */
+  async function finishFirstRun(page: Page, profileAlreadyConfirmed: boolean) {
+    await expect(page.getByRole('heading', { name: 'معرفك — أنا «وكيل»', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'شوفه شغال', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'أول محادثة هتبقى كده', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'زبطني على شغلك', exact: true }).click()
+
+    if (profileAlreadyConfirmed) {
+      await expect(page.getByRole('button', { name: 'كمل للإعدادات', exact: true })).toBeVisible()
+    } else {
+      await expect(page.getByText('دلوقتي بتسجل البيع والشراء والتحصيل إزاي؟', { exact: true })).toBeVisible()
+      await page.getByRole('button', { name: 'ورقة وقلم', exact: true }).click()
+      await expect(page.getByText('إيه الوحدات اللي بتتداول في شغلك؟ (اختار اللي يناسبك)', { exact: true })).toBeVisible()
+      await page.getByRole('button', { name: 'قطعة', exact: true }).click()
+      await page.getByRole('button', { name: /تأكيد الاختيار/ }).click()
+      await expect(page.getByText(/الخزنة بدأت بكام/)).toBeVisible()
+      await page.getByRole('button', { name: /تخطي — هتفضل/ }).click()
+      await expect(page.getByRole('button', { name: 'راجعت الملف — أكد وأكمل', exact: true })).toBeVisible()
+      await page.getByRole('button', { name: 'راجعت الملف — أكد وأكمل', exact: true }).click()
+      await expect(page.getByRole('button', { name: 'كمل للإعدادات', exact: true })).toBeVisible()
+    }
+
+    await page.getByRole('button', { name: 'كمل للإعدادات', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'وكيل على مقاس شغلك', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'احفظ وابدأ ببياناتي الحقيقية', exact: true }).click()
+    await expect(page.getByLabel('رسالة إلى وكيل', { exact: true })).toBeVisible()
+  }
   try {
     upstream = await boot(origin)
     // Chromium's npm payload includes NSS libraries; unpack locally instead of
@@ -394,21 +427,7 @@ export async function browserSmoke(databaseUrl: string, key: string, boot: (orig
     await staff.getByLabel('تأكيد كلمة المرور', { exact: true }).fill(password)
     const [staffSignup] = await Promise.all([staff.waitForResponse((r) => r.url().endsWith('/api/auth/register') && r.request().method() === 'POST'), staff.getByRole('button', { name: 'إنشاء حساب والانضمام للفريق', exact: true }).click()])
     assert.equal(staffSignup.status(), 200)
-    // Workspace preferences/onboarding are per actor, even when an invited
-    // staff member joins a business whose shared profile interview is already
-    // confirmed by its owner. Complete the real first-run path instead of
-    // clicking the final-stage button before it exists.
-    await expect(staff.getByRole('heading', { name: 'معرفك — أنا «وكيل»', exact: true })).toBeVisible()
-    await staff.getByRole('button', { name: 'شوفه شغال', exact: true }).click()
-    await expect(staff.getByRole('heading', { name: 'أول محادثة هتبقى كده', exact: true })).toBeVisible()
-    await staff.getByRole('button', { name: 'زبطني على شغلك', exact: true }).click()
-    // BusinessProfile is shared by the tenant and was confirmed during owner
-    // onboarding. Staff should reuse it and go straight to their own settings.
-    await expect(staff.getByRole('button', { name: 'كمل للإعدادات', exact: true })).toBeVisible()
-    await staff.getByRole('button', { name: 'كمل للإعدادات', exact: true }).click()
-    await expect(staff.getByRole('heading', { name: 'وكيل على مقاس شغلك', exact: true })).toBeVisible()
-    await staff.getByRole('button', { name: 'احفظ وابدأ ببياناتي الحقيقية', exact: true }).click()
-    await expect(staff.getByLabel('رسالة إلى وكيل', { exact: true })).toBeVisible()
+    await finishFirstRun(staff, true)
     await expect.poll(async () => staff.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--analytics-accent').trim())).toBe('#b45309')
     const employee = await identity(staff)
     assert.equal(employee.memberships.length, 1); assert.equal(employee.memberships[0].role, 'cashier'); assert.equal(employee.account.verified, true)
@@ -420,8 +439,7 @@ export async function browserSmoke(databaseUrl: string, key: string, boot: (orig
     await page.getByText('إنشاء منشأة أخرى', { exact: true }).click()
     await panel(page).getByLabel('اسم المنشأة الجديدة').fill('Browser second workspace')
     await panel(page).getByRole('button', { name: 'إنشاء مساحة فارغة', exact: true }).click()
-    await page.getByRole('button', { name: 'احفظ وابدأ ببياناتي الحقيقية', exact: true }).click()
-    await expect(page.getByLabel('رسالة إلى وكيل', { exact: true })).toBeVisible()
+    await finishFirstRun(page, false)
     const second = await identity(page)
     assert.equal(second.memberships.length, 2); assert.notEqual(second.membershipId, home.id)
     const secondBusiness = second.memberships.find((m) => m.id === second.membershipId)!.businessId
