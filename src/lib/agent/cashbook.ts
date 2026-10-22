@@ -44,8 +44,11 @@ export async function cashbookTurn(ctx: { business: Business; user: User; text: 
     emit({ event: 'cards', cards })
     return finish('ده المسجل فعلًا، مش تأكيد إن حد لسه ما دفعش. لو حصل سداد ولسه ما اتسجلش قولّي نسجله بعد مراجعتك.', { cards })
   }
-  if (business.workflowMode !== 'cashbook') return null
+  // The general employee must still understand a clear, explicit cashbook command.
+  // `workflowMode` enables the focused ledger workflow and restock helpers; it is
+  // not a permission boundary and must not hide safe draft creation from a new shop.
   let parsed = parseCashbook(text)
+  if (business.workflowMode !== 'cashbook' && !startsCashbookRequest(text, parsed)) return null
   const correction = parseFinancialCorrection(text)
   if (correction) {
     const edited = await pendingCashbookCorrection(ctx, correction)
