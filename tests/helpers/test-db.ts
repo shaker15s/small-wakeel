@@ -11,7 +11,7 @@
 import { applyMigrations } from '../../scripts/lib/migrations'
 import { snapshotSqlite } from '../../scripts/lib/sqlite-snapshot'
 import { Database } from 'bun:sqlite'
-import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 
@@ -19,6 +19,8 @@ let dir: string | null = null
 let migrationPromise: Promise<void> | null = null
 let cleanupRegistered = false
 const TEST_DB_MARKER = '.wakil-disposable-test-db'
+const TEST_DB_INITIALIZING = 'WAKIL-DISPOSABLE-SQLITE-INITIALIZING-V1'
+const TEST_DB_READY = 'WAKIL-DISPOSABLE-SQLITE-READY-V1'
 
 function registerCleanup(): void {
   if (cleanupRegistered) return
@@ -39,22 +41,39 @@ function registerCleanup(): void {
  * the other; one copy can then be removed while it is still in use. Reuse only
  * a path carrying our marker, inside tmpdir, and with the expected filename.
  */
-function markedDatabaseFromEnvironment(): { directory: string; target: string } | null {
+function markedDatabaseFromEnvironment(): { directory: string; target: string; markerPath: string; markerState: string } | null {
   const raw = process.env.DATABASE_URL?.trim()
   if (!raw?.startsWith('file:')) return null
 
   const target = resolve(raw.slice('file:'.length))
   const directory = dirname(target)
+  const markerPath = join(directory, TEST_DB_MARKER)
   const tempRoot = resolve(tmpdir())
   const tempPrefix = tempRoot.endsWith(sep) ? tempRoot : `${tempRoot}${sep}`
   if (
     !target.startsWith(tempPrefix) ||
     basename(target) !== 'custom.db' ||
     !basename(directory).startsWith('wakil-test-') ||
-    !existsSync(join(directory, TEST_DB_MARKER))
+    !existsSync(markerPath)
   ) return null
 
-  return { directory, target }
+  let markerState = ''
+  try { markerState = readFileSync(markerPath, 'utf8').trim() } catch { /* caller will fail closed */ }
+  return { directory, target, markerPath, markerState }
+}
+
+async function waitForExistingFixtureReady(target: string, markerPath: string): Promise<void> {
+  const deadline = Date.now() + 30_000
+  while (Date.now() < deadline) {
+    let state = ''
+    try { state = readFileSync(markerPath, 'utf8').trim() } catch { /* initialization may be creating the marker */ }
+    if (state === TEST_DB_READY) return
+    if (state !== TEST_DB_INITIALIZING) {
+      throw new Error(`Disposable test DB marker has unexpected state: ${state || '(empty)'} at ${markerPath}`)
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 25))
+  }
+  throw new Error(`Timed out waiting for the existing disposable test DB to finish migration: ${target}`)
 }
 
 function startMigration(target: string): void {
@@ -81,6 +100,10 @@ function startMigration(target: string): void {
     } finally {
       sqlite?.close()
     }
+    // Publish readiness only after the migration promise completed and the
+    // final SQLite integrity/foreign-key checks passed. A second module context
+    // must wait/reuse, never run its own migrator against this same file.
+    writeFileSync(join(dirname(target), TEST_DB_MARKER), `${TEST_DB_READY}\n`, { flag: 'w' })
   }).catch((error) => {
     console.error('[test-db] migration/integrity FAILED — no test may run against a drifted copy:', error)
     throw error
@@ -93,11 +116,20 @@ export function ensureTestDatabase(): string {
   const inherited = markedDatabaseFromEnvironment()
   if (inherited) {
     dir = inherited.directory
-    // Another preload context may have created this marked snapshot. Re-running
-    // the versioned migrator is idempotent and guarantees schema readiness for
-    // this module registry without binding Prisma to a different filename.
-    startMigration(inherited.target)
     registerCleanup()
+    if (inherited.markerState === TEST_DB_READY) {
+      // The first preload already migrated and integrity-checked this file.
+      // Re-running applyMigrations here opens additional libsql/SQLite handles
+      // for the same path; it is not needed and has caused intermittent I/O
+      // errors in the Prisma adapter during test execution.
+      migrationPromise = Promise.resolve()
+      console.log(`[test-db] reusing ready disposable SQLite snapshot: ${inherited.target}`)
+    } else {
+      // A different module context may see the marker while its owner is still
+      // migrating. Wait for the owner to publish READY instead of racing a
+      // second migrator against the same SQLite file.
+      migrationPromise = waitForExistingFixtureReady(inherited.target, inherited.markerPath)
+    }
     return inherited.target
   }
 
@@ -109,7 +141,7 @@ export function ensureTestDatabase(): string {
   if (!target.startsWith(tempPrefix)) {
     throw new Error('اختبارات وكيل لازم تشتغل على نسخة مؤقتة من الداتابيز — مش على الداتابيز الحقيقية')
   }
-  writeFileSync(join(dir, TEST_DB_MARKER), 'WAKIL-DISPOSABLE-SQLITE-V1\n', { flag: 'wx' })
+  writeFileSync(join(dir, TEST_DB_MARKER), `${TEST_DB_INITIALIZING}\n`, { flag: 'wx' })
   registerCleanup()
   snapshotSqlite(join(process.cwd(), 'db', 'custom.db'), target)
   startMigration(target)
