@@ -1,4 +1,5 @@
 import { cashbookTurn } from './cashbook'
+import { cashPositionEvidence } from '@/lib/domain/cashbook'
 import { resolveCairoSchedule } from '@/lib/tasks/cairo-time'
 import { getWorkspacePreferences, updateWorkspacePreferences } from '@/lib/workspace-preferences'
 import { executePlugin, getActivePlugins, getBusinessPlugins, pluginsPromptSection, synthesizePluginWithAI, togglePluginActive } from './plugin-harness'
@@ -3735,15 +3736,14 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     // shortage line, and any draft waiting on the owner's approval.
     const today = startOfCairoDay(0)
     const yesterdayFrom = startOfCairoDay(1)
-    const [salesYesterday, cashEntries, pendingOps] = await Promise.all([
+    const [salesYesterday, cashPosition, pendingOps] = await Promise.all([
       db.operation.findMany({
         where: { businessId: business.id, status: 'SUCCEEDED', type: { in: ['sale', 'membership'] }, createdAt: { gte: yesterdayFrom, lt: today } },
       }),
-      db.cashEntry.findMany({ where: { businessId: business.id }, select: { direction: true, amount: true } }),
+      db.$transaction(tx => cashPositionEvidence(tx, business.id)),
       db.operation.findMany({ where: { businessId: business.id, status: 'AWAITING_APPROVAL' } }),
     ])
     const ySales = salesYesterday.reduce((s2, o) => s2 + opMoney(o.payload), 0)
-    const cash = business.openingCash + cashEntries.reduce((s2, e) => s2 + (e.direction === 'in' ? e.amount : -e.amount), 0)
     const lowStock = items.filter((i) => i.stockQty != null && i.lowStockThreshold != null && i.stockQty <= i.lowStockThreshold).length
     replyText += ' وشلتلك نظرة النهارده تحت 👇'
     done(IDX.reply)
@@ -3761,7 +3761,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           title: 'نظرة سريعة على الشغل',
           rows: [
             { label: 'بعت امبارح', value: egp(ySales) },
-            { label: 'كاش في الخزنة', value: egp(cash) },
+            { label: 'كاش في الخزنة', value: cashPosition.cash == null ? 'غير معروف — محتاج رصيد بداية أو عدّ فعلي' : egp(cashPosition.cash) },
             { label: 'أصناف على حدود النقص', value: fmtQty(lowStock) },
             ...(pendingOps.length > 0 ? [{ label: 'مسودات مستنية اعتماد', value: fmtQty(pendingOps.length) }] : []),
           ],
@@ -4407,7 +4407,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             question,
             context: [
               `النشاط: ${business.name} (${business.type})`,
-              `الخزنة: ${egp(snapshot?.cash ?? 0)}`,
+              `الخزنة: ${snapshot?.cash == null ? 'غير معروف — رصيد البداية لم يتسجل ولا يوجد عدّ فعلي' : egp(snapshot.cash)}`,
               `مبيعات النهاردة: ${egp(snapshot?.salesToday ?? 0)}`,
             ].join(' — '),
             complete: (messages) => completeChat(model, messages),
@@ -5540,7 +5540,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       { label: 'مبيعات النهاردة', value: egp(snapshot.salesToday) },
       { label: 'تحصيلات النهاردة', value: egp(snapshot.collectionsToday) },
       { label: 'مصروفات النهاردة', value: egp(snapshot.expensesToday) },
-      { label: 'رصيد الخزنة', value: egp(snapshot.cash) },
+      { label: 'رصيد الخزنة', value: snapshot.cash == null ? 'غير معروف — محتاج رصيد بداية أو عدّ فعلي' : egp(snapshot.cash) },
       { label: 'أصناف ناقصة', value: String(snapshot.lowStockCount) },
       { label: 'مديونيات العملاء', value: egp(snapshot.receivablesTotal) },
       { label: 'عمليات مستنية اعتماد', value: String(snapshot.pendingCount) },
@@ -5548,7 +5548,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     // «ورقة وكيل» rides along the advisory prompt too — the paper is alive
     const baseAdvisory = buildAdvisoryPrompt({ business, user, snapshot, memories, history: ctx.history })
     advisorySystem = notesSection ? `${baseAdvisory}\n\n${notesSection}` : baseAdvisory
-    situation = `سؤال عام عن الشغل (استشارة). سياق حقيقي: مبيعات النهاردة ${egp(snapshot.salesToday)}، خزنة ${egp(snapshot.cash)}، ${snapshot.lowStockCount} صنف ناقص، مديونيات ${egp(snapshot.receivablesTotal)}، ${snapshot.pendingCount} عملية مستنية.`
+    situation = `سؤال عام عن الشغل (استشارة). سياق حقيقي: مبيعات النهاردة ${egp(snapshot.salesToday)}، خزنة ${snapshot.cash == null ? 'غير معروف — لا يوجد رصيد بداية أو عدّ معتمد' : egp(snapshot.cash)}، ${snapshot.lowStockCount} صنف ناقص، مديونيات ${egp(snapshot.receivablesTotal)}، ${snapshot.pendingCount} عملية مستنية.`
     replyInstruction = 'انصحه كموظف شاطر بالمصري — ودود ودافئ.'
     for (const m of memories) memCtx.referencedIds.push(m.id)
   }
