@@ -161,12 +161,19 @@ export async function validateCashbook(tx: Prisma.TransactionClient, businessId:
       if (!rows[0] || rows[0].balance < p.amount) fail('المبلغ أكبر من الدين المسجل؛ مش هسجل زيادة أو أعتبرها سداد تلقائي')
     }
   } else if (p.customerId || p.supplierId || p.partyName) fail('الحركة دي مش محتاجة حساب عميل أو مورد')
-  const cash = await cashbookCash(tx, businessId)
+  const cashPosition = await cashPositionEvidence(tx, businessId)
+  const cash = cashPosition.ledgerCash
   if (kind === 'cash_count') {
     if (typeof p.expectedCash !== 'number' || !Number.isSafeInteger(p.expectedCash)) fail('رصيد المقارنة مطلوب لعدّ الخزنة')
     if (cash !== p.expectedCash) fail('الخزنة اتحركت بعد تجهيز العد؛ اعمل عدّ جديد بدل ما نكتب فوق حركة أحدث')
+    if (typeof p.expectedCashKnown === 'boolean' && p.expectedCashKnown !== cashPosition.currentCashKnown) {
+      fail('حالة رصيد الخزنة اتغيرت بعد تجهيز العد؛ اعمل عدّ جديد وراجع الرصيد')
+    }
   }
-  if (['cash_purchase', 'pay', 'expense', 'withdrawal', 'lend'].includes(kind) && p.amount > cash) fail(`الخزنة المسجلة لا تكفي: ${cash / 100} جنيه. عدّ الفلوس أو سجّل مصدرها الأول؛ مش هسيب الرصيد بالسالب`)
+  if (['cash_purchase', 'pay', 'expense', 'withdrawal', 'lend'].includes(kind)) {
+    if (!cashPosition.currentCashKnown) fail('رصيد الخزنة غير معروف؛ سجّل رصيد البداية أو اعمل عدّ فعلي قبل اعتماد خروج فلوس')
+    if (p.amount > cash) fail(`الخزنة المسجلة لا تكفي: ${cash / 100} جنيه. عدّ الفلوس أو سجّل مصدرها الأول؛ مش هسيب الرصيد بالسالب`)
+  }
 }
 
 type Check = { label: string; expected: string; actual: string; pass: boolean }
