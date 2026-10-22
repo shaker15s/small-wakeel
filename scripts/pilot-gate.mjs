@@ -21,12 +21,13 @@
  * before exit so failed releases retain their full diagnostic report.
  */
 import { spawn, spawnSync } from 'node:child_process'
-import { copyFileSync, existsSync, writeFileSync, readFileSync, readdirSync, mkdtempSync, rmSync, statSync } from 'node:fs'
+import { existsSync, writeFileSync, readFileSync, readdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { join, resolve, dirname, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { hasShaBoundCiArtifact, reportsMatchHashes, selectSuccessfulHostedCiRun, validateCapacityEvidence, validateIndependentSecurityAudit, validateP0P8Evidence } from './lib/pilot-gate-evidence.mjs'
 import { execSync } from 'node:child_process'
+import { readCommittedSyntheticSqlite } from './lib/synthetic-db-fixture.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -51,14 +52,13 @@ process.on('exit', cleanup)
 if (!existsSync(pilotSeedPath)) {
   throw new Error('pilot:gate refuses to run: the checked-in synthetic SQLite fixture is missing')
 }
-for (const suffix of ['-wal', '-shm', '-journal']) {
-  const sidecar = pilotSeedPath + suffix
-  if (existsSync(sidecar) && statSync(sidecar).size > 0) {
-    throw new Error(`pilot:gate refuses to copy a seed with a non-empty ${suffix} sidecar; stop fixture writers and retry`)
-  }
-}
-writeFileSync(pilotMarkerPath, PILOT_DB_INITIALIZING + '\n', { flag: 'wx' })
-copyFileSync(pilotSeedPath, pilotDbPath)
+writeFileSync(pilotMarkerPath, PILOT_DB_INITIALIZING + '\n', { flag: 'wx', mode: 0o600 })
+// Read immutable bytes from HEAD only after proving the worktree/index fixture
+// is unchanged, tracked, regular, non-symlinked and not accompanied by active
+// SQLite sidecars. Never copy from the mutable DB path: the app might write to
+// it between validation and copy.
+const committedSeed = readCommittedSyntheticSqlite(root)
+writeFileSync(pilotDbPath, committedSeed, { flag: 'wx', mode: 0o600 })
 const pilotEnv = {
   ...process.env,
   DATABASE_URL: pilotDbUrl,
