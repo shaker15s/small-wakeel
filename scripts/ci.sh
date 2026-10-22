@@ -14,7 +14,15 @@ bun install --frozen-lockfile
 step "Versioned migrations on disposable schema-check copy"
 SOURCE_DATABASE_URL="$DATABASE_URL"
 CI_DB_DIR=$(mktemp -d)
-trap 'rm -rf "$CI_DB_DIR"' EXIT
+MOCK_PROVIDER_PID=''
+cleanup() {
+  if [ -n "$MOCK_PROVIDER_PID" ]; then
+    kill "$MOCK_PROVIDER_PID" 2>/dev/null || true
+    wait "$MOCK_PROVIDER_PID" 2>/dev/null || true
+  fi
+  rm -rf "$CI_DB_DIR"
+}
+trap cleanup EXIT
 cp "${SOURCE_DATABASE_URL#file:}" "$CI_DB_DIR/gate.db"
 export DATABASE_URL="file:$CI_DB_DIR/gate.db"
 bun scripts/migrate.ts
@@ -28,8 +36,25 @@ step "Typecheck"
 bun run typecheck
 step "Lint (app-owned code, not vendored CLI-Anything)"
 bun run lint
-step "Unit + integration tests (disposable DB)"
-bun test
+step "Start deterministic local mock provider for protocol and speech tests"
+bun mini-services/mock-provider/index.ts >"$CI_DB_DIR/mock-provider.log" 2>&1 &
+MOCK_PROVIDER_PID=$!
+MOCK_READY=0
+for _ in $(seq 1 40); do
+  if curl -fsS --max-time 1 http://127.0.0.1:3031/health | grep -q '"ok":true'; then
+    MOCK_READY=1
+    break
+  fi
+  if ! kill -0 "$MOCK_PROVIDER_PID" 2>/dev/null; then break; fi
+  sleep 0.25
+done
+if [ "$MOCK_READY" -ne 1 ]; then
+  cat "$CI_DB_DIR/mock-provider.log"
+  printf '\\n✘ mock-provider did not become healthy on 127.0.0.1:3031\\n' >&2
+  exit 1
+fi
+step "Unit + integration tests (each file isolated; disposable DB per process)"
+bun scripts/run-bun-tests-isolated.mjs
 step "Financial SIGKILL/reopen/commit-ack recovery (disposable DB)"
 bun scripts/financial-crash-smoke.ts
 step "Golden Arabic routing evals (offline; disposable DB)"
