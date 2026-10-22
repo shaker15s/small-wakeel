@@ -60,7 +60,7 @@ describe('core sale accounting across the ten sector profiles', () => {
       expect(approved.outcome.checks.every((check) => check.pass), `${sector}: all checks pass`).toBe(true)
       expect((await db.item.findUniqueOrThrow({ where: { id: item.id } })).stockQty)
         .toBe(8)
-      expect(await db.cashEntry.count({ where: { businessId: business.id, ref: draft.ref }))
+      expect(await db.cashEntry.count({ where: { businessId: business.id, ref: draft.ref } }))
         .toBe(1)
       expect(await db.auditEvent.count({ where: { businessId: business.id, ref: draft.ref, action: 'operation.succeeded' } }))
         .toBe(1)
