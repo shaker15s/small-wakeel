@@ -10,7 +10,8 @@
 // Tests never touch the real `db/custom.db`.
 import { applyMigrations } from '../../scripts/lib/migrations'
 import { snapshotSqlite } from '../../scripts/lib/sqlite-snapshot'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { Database } from 'bun:sqlite'
+import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 
@@ -57,13 +58,33 @@ function markedDatabaseFromEnvironment(): { directory: string; target: string } 
 }
 
 function startMigration(target: string): void {
-  migrationPromise = applyMigrations(target).then(
-    () => undefined,
-    (error) => {
-      console.error('[test-db] migration FAILED — no test may run against a drifted copy:', error)
-      throw error
-    },
-  )
+  migrationPromise = applyMigrations(target).then(() => {
+    // Validate the final test fixture AFTER all migrations and before any test
+    // imports Prisma. Snapshot validation alone only proves the pre-migration
+    // bytes were sound; it cannot catch a migration/adapter leaving WAL state
+    // inconsistent.
+    let sqlite: Database | undefined
+    try {
+      sqlite = new Database(target, { readonly: true })
+      const integrity = sqlite.query('PRAGMA integrity_check').get() as { integrity_check?: string } | null
+      const journal = sqlite.query('PRAGMA journal_mode').get() as { journal_mode?: string } | null
+      const foreignKeys = sqlite.query('PRAGMA foreign_key_check').all() as unknown[]
+      const sidecars = ['-wal', '-shm'].map((suffix) => {
+        const path = target + suffix
+        try { return { suffix, bytes: statSync(path).size } }
+        catch { return { suffix, bytes: 0 } }
+      })
+      console.log(`[test-db] post-migration integrity=${integrity?.integrity_check ?? 'missing'} journal=${journal?.journal_mode ?? 'unknown'} foreignKeyViolations=${foreignKeys.length} mainBytes=${statSync(target).size} sidecars=${JSON.stringify(sidecars)}`)
+      if (integrity?.integrity_check !== 'ok' || foreignKeys.length) {
+        throw new Error(`Disposable test DB failed post-migration integrity checks at ${target}`)
+      }
+    } finally {
+      sqlite?.close()
+    }
+  }).catch((error) => {
+    console.error('[test-db] migration/integrity FAILED — no test may run against a drifted copy:', error)
+    throw error
+  })
 }
 
 export function ensureTestDatabase(): string {
