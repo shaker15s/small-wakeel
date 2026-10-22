@@ -1,4 +1,5 @@
 import { afterAll, expect, test } from 'bun:test'
+import { NextRequest } from 'next/server'
 import { randomUUID } from 'node:crypto'
 import { testDb } from '../helpers/test-db'
 import { createNewBusinessWithDefaults } from '@/lib/domain/business-builder'
@@ -6,6 +7,8 @@ import { answerProfile } from '@/lib/domain/onboarding-profile'
 import { cashPositionEvidence, validateCashbook } from '@/lib/domain/cashbook'
 import { cashbookTurn } from '@/lib/agent/cashbook'
 import { executeOperation } from '@/lib/domain/executors'
+import { GET as getCashbook } from '@/app/api/cashbook/route'
+import { runReadTool } from '@/lib/agent/tools'
 import { cairoIsoDay } from '@/app/api/_lib/dates'
 
 const db = await testDb()
@@ -38,6 +41,19 @@ test('a schema-default zero is unknown; an explicitly stated zero is known', asy
   expect(before.currentCashKnown).toBe(false)
   expect(before.cash).toBeNull()
   expect(before.ledgerCash).toBe(0)
+
+  const positionCard = await runReadTool('get_cash_position', blank.business.id)
+  expect(JSON.stringify(positionCard)).toContain('غير مسجل من صاحب المحل')
+  expect(JSON.stringify(positionCard)).toContain('غير معروف')
+  const response = await getCashbook(new NextRequest(
+    `http://localhost/api/cashbook?businessId=${blank.business.id}&userId=${blank.user.id}`,
+    { headers: { 'x-wakil-business': blank.business.id, 'x-wakil-user': blank.user.id } },
+  ))
+  expect(response.status).toBe(200)
+  const dto = await response.json()
+  expect(dto.cash).toBeNull()
+  expect(dto.openingCashKnown).toBe(false)
+  expect(dto.currentCashKnown).toBe(false)
 
   const statedZero = await shop({ openingCashEgp: 0 })
   const stated = await db.$transaction(tx => cashPositionEvidence(tx, statedZero.business.id))
@@ -84,6 +100,15 @@ test('the first approved count establishes a baseline; later count deltas stay s
   expect(firstPosition.cashOut).toBe(0)
   expect(firstPosition.cashCountAdjustment).toBe(0)
   expect((await db.cashEntry.findFirstOrThrow({ where: { ref: firstOp.ref } })).reason).toContain('أول عدّ')
+  const afterFirstResponse = await getCashbook(new NextRequest(
+    `http://localhost/api/cashbook?businessId=${ctx.business.id}&userId=${ctx.user.id}`,
+    { headers: { 'x-wakil-business': ctx.business.id, 'x-wakil-user': ctx.user.id } },
+  ))
+  const afterFirstDto = await afterFirstResponse.json()
+  expect(afterFirstDto.cash).toBe(250000)
+  expect(afterFirstDto.cashIn).toBe(0)
+  expect(afterFirstDto.cashOut).toBe(0)
+  expect(afterFirstDto.cashCountAdjustment).toBe(0)
 
   const second = await cashbookTurn({
     ...ctx, turnId: randomUUID(), text: 'باقي في الخزنة ٢٦٠٠', history: [],
@@ -99,6 +124,14 @@ test('the first approved count establishes a baseline; later count deltas stay s
   expect(afterSecond.cashIn).toBe(0)
   expect(afterSecond.cashOut).toBe(0)
   expect(afterSecond.cashCountAdjustment).toBe(10000)
+  const afterSecondResponse = await getCashbook(new NextRequest(
+    `http://localhost/api/cashbook?businessId=${ctx.business.id}&userId=${ctx.user.id}`,
+    { headers: { 'x-wakil-business': ctx.business.id, 'x-wakil-user': ctx.user.id } },
+  ))
+  const afterSecondDto = await afterSecondResponse.json()
+  expect(afterSecondDto.cash).toBe(260000)
+  expect(afterSecondDto.cashCountAdjustment).toBe(10000)
+  expect(afterSecondDto.entries.find((entry: { operationRef: string }) => entry.operationRef === secondOp.ref)?.expectedCashKnown).toBe(true)
 })
 
 test('cash outflow is not compared with a fictional zero baseline', async () => {
