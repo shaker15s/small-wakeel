@@ -50,6 +50,13 @@ afterAll(async () => {
 async function shop() {
   const created = await createNewBusinessWithDefaults({ name: `durable-runner-${randomUUID()}`, type: 'supermarket' })
   ids.push(created.id)
+
+  // createNewBusinessWithDefaults creates demo tasks as part of onboarding.
+  // This acceptance suite must control its own due queue so a pre-seeded task
+  // cannot change runDueTasks().due or execute alongside the crash scenario.
+  await db.taskNotification.deleteMany({ where: { businessId: created.id } })
+  await db.scheduledTask.deleteMany({ where: { businessId: created.id } })
+
   return {
     business: await db.business.findUniqueOrThrow({ where: { id: created.id } }),
     user: await db.user.findUniqueOrThrow({ where: { id: created.users[0].id } }),
