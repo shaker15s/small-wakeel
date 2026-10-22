@@ -10,35 +10,18 @@
 // Tests never touch the real `db/custom.db`.
 import { applyMigrations } from '../../scripts/lib/migrations'
 import { snapshotSqlite } from '../../scripts/lib/sqlite-snapshot'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 
 let dir: string | null = null
-// R40-1: migrations are async (libsql driver). Preload is a sync context, so
-// the migration STARTS here and every `testDb()` AWAITs it before the first
-// query — no test can ever hit a half-migrated copy.
 let migrationPromise: Promise<void> | null = null
+let cleanupRegistered = false
+const TEST_DB_MARKER = '.wakil-disposable-test-db'
 
-export function ensureTestDatabase(): string {
-  if (dir) return join(dir, 'custom.db')
-  dir = mkdtempSync(join(tmpdir(), 'wakil-test-'))
-  const target = join(dir, 'custom.db')
-  // Seatbelt for the class of bug this helper exists for: if the preload ever
-  // fails to load, fail LOUDLY instead of writing test drafts into real data.
-  if (!target.startsWith(tmpdir())) {
-    throw new Error('اختبارات وكيل لازم تشتغل على نسخة مؤقتة من الداتابيز — مش على الداتابيز الحقيقية')
-  }
-  snapshotSqlite(join(process.cwd(), 'db', 'custom.db'), target)
-  migrationPromise = applyMigrations(target).then(
-    () => undefined,
-    (e) => {
-      console.error('[test-db] migration FAILED — no test may run against a drifted copy:', e)
-      throw e
-    },
-  )
-  process.env.DATABASE_URL = `file:${target}`
-  // one cleanup for the whole run
+function registerCleanup(): void {
+  if (cleanupRegistered) return
+  cleanupRegistered = true
   process.on('exit', () => {
     try {
       if (dir && existsSync(dir)) rmSync(dir, { recursive: true, force: true })
@@ -46,6 +29,71 @@ export function ensureTestDatabase(): string {
       // best effort — it lives in the OS temp dir anyway
     }
   })
+}
+
+/**
+ * Bun's preload and a test module can be evaluated in different module
+ * registries. If each registry creates its own temp copy, process.env points
+ * at one file while a previously imported Prisma singleton remains bound to
+ * the other; one copy can then be removed while it is still in use. Reuse only
+ * a path carrying our marker, inside tmpdir, and with the expected filename.
+ */
+function markedDatabaseFromEnvironment(): { directory: string; target: string } | null {
+  const raw = process.env.DATABASE_URL?.trim()
+  if (!raw?.startsWith('file:')) return null
+
+  const target = resolve(raw.slice('file:'.length))
+  const directory = dirname(target)
+  const tempRoot = resolve(tmpdir())
+  const tempPrefix = tempRoot.endsWith(sep) ? tempRoot : `${tempRoot}${sep}`
+  if (
+    !target.startsWith(tempPrefix) ||
+    basename(target) !== 'custom.db' ||
+    !basename(directory).startsWith('wakil-test-') ||
+    !existsSync(join(directory, TEST_DB_MARKER))
+  ) return null
+
+  return { directory, target }
+}
+
+function startMigration(target: string): void {
+  migrationPromise = applyMigrations(target).then(
+    () => undefined,
+    (error) => {
+      console.error('[test-db] migration FAILED — no test may run against a drifted copy:', error)
+      throw error
+    },
+  )
+}
+
+export function ensureTestDatabase(): string {
+  if (dir) return join(dir, 'custom.db')
+
+  const inherited = markedDatabaseFromEnvironment()
+  if (inherited) {
+    dir = inherited.directory
+    // Another preload context may have created this marked snapshot. Re-running
+    // the versioned migrator is idempotent and guarantees schema readiness for
+    // this module registry without binding Prisma to a different filename.
+    startMigration(inherited.target)
+    registerCleanup()
+    return inherited.target
+  }
+
+  dir = mkdtempSync(join(tmpdir(), 'wakil-test-'))
+  const target = join(dir, 'custom.db')
+  const tempRoot = resolve(tmpdir())
+  const tempPrefix = tempRoot.endsWith(sep) ? tempRoot : `${tempRoot}${sep}`
+  // Seatbelt: tests must never point the fixture at the real/demo database.
+  if (!target.startsWith(tempPrefix)) {
+    throw new Error('اختبارات وكيل لازم تشتغل على نسخة مؤقتة من الداتابيز — مش على الداتابيز الحقيقية')
+  }
+  writeFileSync(join(dir, TEST_DB_MARKER), 'WAKIL-DISPOSABLE-SQLITE-V1\n', { flag: 'wx' })
+  registerCleanup()
+  snapshotSqlite(join(process.cwd(), 'db', 'custom.db'), target)
+  startMigration(target)
+  process.env.DATABASE_URL = `file:${target}`
+  console.log(`[test-db] disposable SQLite snapshot: ${target}`)
   return target
 }
 
