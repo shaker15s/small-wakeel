@@ -93,20 +93,26 @@ export async function createDraft(params: {
       if (existing.businessId !== params.businessId || existing.userId !== params.userId || existing.type !== params.type) {
         throw new AuthorizationError()
       }
-      let recordedHash = existing.payloadHash
-      if (recordedHash == null) {
-        // Pre-R71 rows have no stored hash. Recompute from their recorded JSON
-        // so legacy idempotency keys are still payload-bound; never let an old
-        // key make a different incoming financial request look like a replay.
-        try {
-          const recordedPayload = JSON.parse(existing.payload) as Record<string, unknown>
-          delete recordedPayload.supersedesRef
-          recordedHash = canonicalPayloadHash(recordedPayload)
-        } catch {
-          throw new OperationValidationError('العملية القديمة لا يمكن التحقق من حمولة مفتاح الاعتماد بتاعها — استخدم طلبًا جديدًا بدل إعادة المفتاح القديم')
+      let recordedPayloadHash: string
+      try {
+        const recordedPayload: unknown = JSON.parse(existing.payload)
+        if (!recordedPayload || typeof recordedPayload !== 'object' || Array.isArray(recordedPayload)) {
+          throw new Error('Stored operation payload is not an object')
         }
+        delete (recordedPayload as Record<string, unknown>).supersedesRef
+        recordedPayloadHash = canonicalPayloadHash(recordedPayload)
+      } catch {
+        throw new OperationValidationError('العملية القديمة لا يمكن التحقق من حمولة مفتاح الاعتماد بتاعها — استخدم طلبًا جديدًا بدل إعادة المفتاح القديم')
       }
-      if (recordedHash !== requestHash) {
+      // Verify both ends of the stored binding. For pre-R71 rows the stored
+      // hash is null, so the recomputed hash proves replay identity; if a newer
+      // row's payload was edited while its hash stayed unchanged, fail closed
+      // rather than handing the caller a draft whose recorded bytes do not
+      // match its approval binding.
+      if (existing.payloadHash != null && existing.payloadHash !== recordedPayloadHash) {
+        throw new OperationValidationError('حمولة المسودة المخزنة لا تطابق بصمة الاعتماد — إعادة الطلب مرفوضة لسلامة السجل')
+      }
+      if (recordedPayloadHash !== requestHash) {
         throw new OperationValidationError('مفتاح الاعتماد ده اتستخدم بالفعل لمسودة مختلفة — العملية اللي قدامك هي اللي مسجلة')
       }
       return existing
