@@ -65,5 +65,6 @@ skills/
 docs/evidence/p0-p8-acceptance.json
 docs/evidence/independent-security-audit.json
 docs/evidence/capacity-acceptance.json
+docs/evidence/artifacts/
 bin/
 tests/node/.mocks/
