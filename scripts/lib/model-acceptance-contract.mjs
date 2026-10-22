@@ -124,7 +124,7 @@ export function assertSafeAcceptanceCredentialTarget(base, apiKey, models = []) 
     return
   }
   if (!isLiveAcceptanceEndpoint(base, apiKey, models)) {
-    throw new Error('Refusing uncredentialed or unsafe model acceptance target; use an uncredentialed loopback mock or a keyed HTTPS public endpoint')
+    throw new Error('Refusing to send an uncredentialed or unsafe request to this model acceptance target; use a loopback mock or a keyed HTTPS public endpoint')
   }
 }
 
