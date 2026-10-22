@@ -12,15 +12,14 @@
 // produced later SQLITE_IOERR/SQLITE_CORRUPT errors through Prisma's adapter.
 import { applyMigrations } from '../../scripts/lib/migrations'
 import {
-  copyFileSync,
   existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { readCommittedSyntheticSqlite } from '../../scripts/lib/synthetic-db-fixture.mjs'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 
 let dir: string | null = null
@@ -123,19 +122,13 @@ export function ensureTestDatabase(): string {
     throw new Error('اختبارات وكيل لازم تشتغل على نسخة مؤقتة من الداتابيز — مش على الداتابيز الحقيقية')
   }
 
-  const source = resolve(process.cwd(), 'db', 'custom.db')
-  // A live source with WAL sidecars cannot be copied by copying only its main
-  // file. Fail closed rather than take a potentially inconsistent local copy.
-  for (const suffix of ['-wal', '-shm']) {
-    const sidecar = source + suffix
-    if (existsSync(sidecar) && statSync(sidecar).size > 0) {
-      throw new Error('Seed SQLite DB has active ' + suffix + ' sidecar. Stop the local app/checkpoint the seed DB before tests: ' + sidecar)
-    }
-  }
-
-  writeFileSync(join(dir, TEST_DB_MARKER), TEST_DB_INITIALIZING + '\n', { flag: 'wx' })
+  // Do not copy the mutable worktree database. Verify it is still the
+  // unchanged checked-in fixture, then materialize bytes from HEAD itself.
+  // If the local app has written real business data, tests fail closed.
+  const committedFixture = readCommittedSyntheticSqlite(process.cwd())
+  writeFileSync(join(dir, TEST_DB_MARKER), TEST_DB_INITIALIZING + '\n', { flag: 'wx', mode: 0o600 })
   registerCleanup()
-  copyFileSync(source, target)
+  writeFileSync(target, committedFixture, { flag: 'wx', mode: 0o600 })
   process.env.DATABASE_URL = 'file:' + target
   startMigration(target)
   console.log('[test-db] disposable SQLite copy: ' + target)
