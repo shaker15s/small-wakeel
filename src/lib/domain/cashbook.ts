@@ -201,7 +201,14 @@ export async function executeCashbook(tx: Prisma.TransactionClient, businessId: 
     }
   }
   const settlements = kind === 'receive' || kind === 'pay' ? await allocateDebtSettlement(tx, businessId, partyId!, customer, amount) : []
-  if (delta !== 0) await tx.cashEntry.create({ data: { businessId, ref, direction: delta > 0 ? 'in' : 'out', amount: Math.abs(delta), reason: kind === 'cash_count' ? 'فرق عدّ غير مصنّف — ليس مبيعات أو أرباح' : CASHBOOK_LABELS[kind] } })
+  if (delta !== 0) await tx.cashEntry.create({ data: {
+    businessId, ref, direction: delta > 0 ? 'in' : 'out', amount: Math.abs(delta),
+    reason: kind === 'cash_count'
+      ? p.expectedCashKnown === false
+        ? 'تثبيت رصيد الخزنة من أول عدّ — ليس مبيعات أو أرباح'
+        : 'فرق عدّ غير مصنّف — ليس مبيعات أو أرباح'
+      : CASHBOOK_LABELS[kind],
+  } })
   const operation = await tx.operation.findUniqueOrThrow({ where: { ref } })
   const entry = await tx.cashbookEntry.create({ data: {
     businessId, operationRef: ref, userId: operation.userId, kind, amount,
@@ -222,7 +229,11 @@ export async function executeCashbook(tx: Prisma.TransactionClient, businessId: 
   return { ok: check.every(c => c.pass), checks: check, effects: [
     { label: CASHBOOK_LABELS[kind], value: `${amount / 100} جنيه`, tone: 'neutral' as const },
     { label: 'رصيد الخزنة المسجل', value: `${cashAfter / 100} جنيه`, tone: 'good' as const },
-    ...(kind === 'cash_count' ? [{ label: 'فرق عدّ غير مصنّف (مش مبيعات)', value: `${delta / 100} جنيه`, tone: 'neutral' as const }] : []),
+    ...(kind === 'cash_count'
+      ? p.expectedCashKnown === false
+        ? [{ label: 'تثبيت الرصيد بعد أول عدّ', value: `${amount / 100} جنيه`, tone: 'neutral' as const }]
+        : [{ label: 'فرق عدّ غير مصنّف (مش مبيعات)', value: `${delta / 100} جنيه`, tone: 'neutral' as const }]
+      : []),
   ] }
 }
 
