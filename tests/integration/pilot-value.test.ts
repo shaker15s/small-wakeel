@@ -224,8 +224,10 @@ test('the release gate runs and reports an HONEST verdict — no auto-GO, never 
     child.on('close', res)
   })
   try {
-    expect(code).toBe(0) // the gate RAN
     const r = JSON.parse(readFileSync(reportPath, 'utf8'))
+    // The gate process exits nonzero for NO-GO; that is a correct verdict, not
+    // a failed test runner. Only GO_CANDIDATE returns zero, and never auto-GO.
+    expect(code).toBe(r.overall === 'GO_CANDIDATE' ? 0 : 1)
     // the verdict is one of the two honest states — never an auto 'GO'
     expect(['NO-GO', 'GO_CANDIDATE']).toContain(r.overall)
     // this sandbox has a mock model endpoint → item 3 can never be 'met' here
