@@ -5,11 +5,11 @@ import { testDb } from '../helpers/test-db'
 import { createNewBusinessWithDefaults } from '@/lib/domain/business-builder'
 import { cashbookTurn } from '@/lib/agent/cashbook'
 import { cashbookCash } from '@/lib/domain/cashbook'
-import { createDraft, executeOperation } from '@/lib/domain/executors'
+import { executeOperation } from '@/lib/domain/executors'
 
 const db = await testDb()
-let business: Business
-let owner: User
+let business: Business | undefined
+let owner: User | undefined
 
 beforeAll(async () => {
   const created = await createNewBusinessWithDefaults({
@@ -24,19 +24,21 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
-  if (business?.id) await db.business.delete({ where: { id: business.id } })
+  if (business) await db.business.delete({ where: { id: business.id } })
 })
 
 test('a clear drawer count drafts from general mode and mutates the ledger only after approval', async () => {
-  expect(business.workflowMode).toBeNull()
+  const shop = business!
+  const user = owner!
+  expect(shop.workflowMode).toBeNull()
   const conversation = await db.conversation.create({
-    data: { businessId: business.id, userId: owner.id, title: 'General mode cash count' },
+    data: { businessId: shop.id, userId: user.id, title: 'General mode cash count' },
   })
-  const initialCash = await db.$transaction((tx) => cashbookCash(tx, business.id))
+  const initialCash = await db.$transaction((tx) => cashbookCash(tx, shop.id))
 
   const result = await cashbookTurn({
-    business,
-    user: owner,
+    business: shop,
+    user,
     conversationId: conversation.id,
     turnId: randomUUID(),
     text: 'باقي في الخزنة ٢٥٠٠',
@@ -47,9 +49,9 @@ test('a clear drawer count drafts from general mode and mutates the ledger only 
   expect(result?.card?.title).toBe('عدّ الخزنة الفعلي')
   expect(result?.card?.status).toBe('AWAITING_APPROVAL')
   expect(result?.opId).toBeTruthy()
-  expect(await db.$transaction((tx) => cashbookCash(tx, business.id))).toBe(initialCash)
-  expect(await db.cashbookEntry.count({ where: { businessId: business.id, kind: 'cash_count' } })).toBe(0)
-  expect(await db.operation.count({ where: { businessId: business.id, type: 'sale' } })).toBe(0)
+  expect(await db.$transaction((tx) => cashbookCash(tx, shop.id))).toBe(initialCash)
+  expect(await db.cashbookEntry.count({ where: { businessId: shop.id, kind: 'cash_count' } })).toBe(0)
+  expect(await db.operation.count({ where: { businessId: shop.id, type: 'sale' } })).toBe(0)
 
   const operation = await db.operation.findUniqueOrThrow({ where: { id: result!.opId! } })
   expect(operation.status).toBe('AWAITING_APPROVAL')
@@ -59,8 +61,8 @@ test('a clear drawer count drafts from general mode and mutates the ledger only 
     expectedCash: initialCash,
   })
 
-  const executed = await executeOperation(operation.id, owner.id)
+  const executed = await executeOperation(operation.id, user.id)
   expect(executed.outcome.ok).toBe(true)
   expect((await db.cashbookEntry.findUniqueOrThrow({ where: { operationRef: operation.ref } })).kind).toBe('cash_count')
-  expect(await db.operation.count({ where: { businessId: business.id, type: 'sale' } })).toBe(0)
+  expect(await db.operation.count({ where: { businessId: shop.id, type: 'sale' } })).toBe(0)
 })
