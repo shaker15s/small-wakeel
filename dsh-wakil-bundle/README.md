@@ -73,6 +73,7 @@ If your installation exposes Creator Mode, it can author/install the bundle whil
 - prepare_draft — write a pending draft only.
 
 The API has no implementation for approve, execute, confirm, reject or delete actions. Money arguments are in EGP with up to two decimal places; the server converts to integer piastres and the domain executor validates the payload. For catalog-based sale/purchase drafts, pass item IDs obtained from the catalog and never invent unknown prices or stock.
+For sales, purchases and memberships, explicitly provide `paidEgp`, including `0` when nothing has been paid. An omitted payment amount is rejected; the tool must ask whether the operation is cash, credit or a partial payment rather than assuming it is fully paid.
 
 ## Verification boundary
 
