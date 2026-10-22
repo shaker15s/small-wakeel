@@ -27,6 +27,112 @@ export async function cashbookCash(tx: Prisma.TransactionClient, businessId: str
   return entries.reduce((n, e) => n + (e.direction === 'in' ? e.amount : -e.amount), biz.openingCash)
 }
 
+export interface CashPositionEvidence {
+  /** Owner-verifiable current balance; null until an opening figure or count establishes it. */
+  cash: number | null
+  /** Arithmetic ledger value, for internal reconciliation only. */
+  ledgerCash: number
+  openingCashKnown: boolean
+  currentCashKnown: boolean
+  cashIn: number
+  cashOut: number
+  /** Net discrepancy from counts performed against an already-known balance. */
+  cashCountAdjustment: number
+}
+
+function countPayload(raw: string): Record<string, unknown> {
+  try {
+    const value: unknown = JSON.parse(raw)
+    return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+  } catch {
+    return {}
+  }
+}
+
+function signedCash(entry: { direction: string; amount: number }): number {
+  return entry.direction === 'in' ? entry.amount : -entry.amount
+}
+
+/**
+ * The database's zero default is a storage detail, not an owner-stated fact.
+ * Only an explicit onboarding answer or an approved, unreversed cash count can
+ * make the current balance user-facing truth. Cash-count movements are kept
+ * out of normal receipt/payment totals because they are reconciliation deltas,
+ * never sales, receipts, or payments.
+ */
+export async function cashPositionEvidence(
+  tx: Prisma.TransactionClient,
+  businessId: string,
+): Promise<CashPositionEvidence> {
+  const [business, profile, cashEntries, countEntries] = await Promise.all([
+    tx.business.findUniqueOrThrow({ where: { id: businessId }, select: { openingCash: true } }),
+    tx.businessProfile.findUnique({ where: { businessId }, select: { openingCashStatedAt: true } }),
+    tx.cashEntry.findMany({ where: { businessId }, select: { direction: true, amount: true, ref: true } }),
+    tx.cashbookEntry.findMany({
+      where: { businessId, kind: 'cash_count' },
+      select: {
+        operationRef: true,
+        operation: { select: { reversedByRef: true, payload: true } },
+      },
+    }),
+  ])
+
+  // If a profile exists and its opening-cash marker is null, that explicit
+  // unknown state overrides a leftover legacy numeric value in Business.
+  const openingCashKnown = profile
+    ? profile.openingCashStatedAt !== null
+    : business.openingCash !== 0
+  const activeCounts = countEntries.filter((entry) => entry.operation.reversedByRef === null)
+  const currentCashKnown = openingCashKnown || activeCounts.length > 0
+  const allCountRefs = countEntries.map((entry) => entry.operationRef)
+  const reversals = allCountRefs.length
+    ? await tx.operation.findMany({
+        where: { businessId, reversalOfRef: { in: allCountRefs } },
+        select: { ref: true, reversalOfRef: true },
+      })
+    : []
+  const countFlowRefs = new Set<string>([
+    ...allCountRefs,
+    ...reversals.map((operation) => operation.ref),
+  ])
+  const knownCountRefs = new Set<string>()
+  for (const entry of countEntries) {
+    const payload = countPayload(entry.operation.payload)
+    // Older entries without the new flag can be treated as a reconciliation
+    // only when the business currently has a documented opening balance.
+    if (payload.expectedCashKnown === true ||
+        (payload.expectedCashKnown === undefined && openingCashKnown)) {
+      knownCountRefs.add(entry.operationRef)
+    }
+  }
+  const knownCountFlowRefs = new Set<string>([
+    ...knownCountRefs,
+    ...reversals
+      .filter((operation) => operation.reversalOfRef != null && knownCountRefs.has(operation.reversalOfRef))
+      .map((operation) => operation.ref),
+  ])
+  const ledgerCash = cashEntries.reduce((balance, entry) => balance + signedCash(entry), business.openingCash)
+  const cashIn = cashEntries
+    .filter((entry) => entry.direction === 'in' && !countFlowRefs.has(entry.ref ?? ''))
+    .reduce((sum, entry) => sum + entry.amount, 0)
+  const cashOut = cashEntries
+    .filter((entry) => entry.direction === 'out' && !countFlowRefs.has(entry.ref ?? ''))
+    .reduce((sum, entry) => sum + entry.amount, 0)
+  const cashCountAdjustment = cashEntries
+    .filter((entry) => knownCountFlowRefs.has(entry.ref ?? ''))
+    .reduce((sum, entry) => sum + signedCash(entry), 0)
+
+  return {
+    cash: currentCashKnown ? ledgerCash : null,
+    ledgerCash,
+    openingCashKnown,
+    currentCashKnown,
+    cashIn,
+    cashOut,
+    cashCountAdjustment,
+  }
+}
+
 /** Runs both at draft and approval. No floats, implicit party matching, or backdated drawer overwrite. */
 export async function validateCashbook(tx: Prisma.TransactionClient, businessId: string, p: Record<string, unknown>) {
   const kind = String(p.kind)
