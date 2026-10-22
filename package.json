@@ -35,7 +35,8 @@
     "recovery:quarantine": "bun scripts/restore-quarantine.ts",
     "smoke:crash": "bun scripts/financial-crash-smoke.ts",
     "model:acceptance:legacy": "bun scripts/live-model-acceptance.ts",
-    "voice:acceptance": "bun scripts/live-voice-acceptance.ts"
+    "voice:acceptance": "bun scripts/live-voice-acceptance.ts",
+    "dsh:mcp": "bun scripts/dsh-mcp-server.ts"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

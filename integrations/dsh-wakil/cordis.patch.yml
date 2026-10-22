@@ -1,0 +1,32 @@
+# Adds a WAKIL preset but does not replace the default DSH preset.
+- insert:
+    - id: preset-wakil
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: wakil
+        name: 'وكيل — موظف أعمالك'
+        description: 'موظف أعمال محلي: يقرأ سجل WAKIL ويجهز مسودات تنتظر اعتماد المالك.'
+        plugins:
+          - id: mcp-wakil-local
+            name: '@deepseek-ai/dsh-mcp-client'
+            config:
+              transport: stdio
+              serverName: wakil-local
+              command: !!js "process.env.WAKIL_BUN_PATH ?? 'bun'"
+              args:
+                - scripts/dsh-mcp-server.ts
+              cwd: !!js "process.env.WAKIL_HOME ?? ''"
+              env:
+                WAKIL_HOME: !!js "process.env.WAKIL_HOME ?? ''"
+                WAKIL_DSH_MCP_ENABLE: !!js "process.env.WAKIL_DSH_MCP_ENABLE ?? ''"
+                WAKIL_DSH_BUSINESS_ID: !!js "process.env.WAKIL_DSH_BUSINESS_ID ?? ''"
+                WAKIL_DSH_USER_ID: !!js "process.env.WAKIL_DSH_USER_ID ?? ''"
+                DATABASE_URL: !!js "process.env.WAKIL_DATABASE_URL ?? ''"
+                WAKIL_STRICT_APPROVALS: '1'
+              failOnStartupError: true
+              maxInstructionBytes: 16000
+              reconnect:
+                enabled: true
+                initialDelayMs: 500
+                maxDelayMs: 10000
+                maxAttempts: 5

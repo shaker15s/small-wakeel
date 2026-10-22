@@ -1,0 +1,9 @@
+{
+  "name": "@local/wakil-dsh-bundle",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "WAKIL local business employee preset for DSH; financial operations remain owner-approved drafts.",
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "files": ["cordis.patch.yml", "locale/*.json", "icon.svg", "README.md"]
+}
