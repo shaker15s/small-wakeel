@@ -131,16 +131,18 @@ export function evaluateExpectedSaleCall(calls) {
     return normalized ? Number(normalized) : Number.NaN
   }
   const qty = readNumber(args.qty)
+  const price = readNumber(args.price)
   const total = readNumber(args.total)
   const paid = readNumber(args.paid)
   const nameMatches = name.includes('زيت') && name.includes('عباد') && name.includes('1.5')
   const qtyMatches = Number.isFinite(qty) && qty === 3
-  const totalMatches = Number.isFinite(total) && total === 255
-  const paidMatches = Number.isFinite(paid) && paid === 255
-  const passed = nameMatches && qtyMatches && totalMatches && paidMatches
+  const priceMatches = Number.isFinite(price) && price === 85
+  const totalMatches = Number.isFinite(total) && total === qty * price
+  const paidMatches = Number.isFinite(paid) && paid === total
+  const passed = nameMatches && qtyMatches && priceMatches && totalMatches && paidMatches
 
   return {
     passed,
-    detail: `name=${name || '(missing)'}; qty=${Number.isFinite(qty) ? qty : '(invalid/missing)'}; total=${Number.isFinite(total) ? total : '(invalid/missing)'}; paid=${Number.isFinite(paid) ? paid : '(invalid/missing)'}; expected زيت عباد 1.5 / 3 / total 255 / paid 255`,
+    detail: `name=${name || '(missing)'}; qty=${Number.isFinite(qty) ? qty : '(invalid/missing)'}; price=${Number.isFinite(price) ? price : '(invalid/missing)'}; total=${Number.isFinite(total) ? total : '(invalid/missing)'}; paid=${Number.isFinite(paid) ? paid : '(invalid/missing)'}; expected زيت عباد 1.5 / qty 3 × unit price 85 = total 255 / paid 255`,
   }
 }

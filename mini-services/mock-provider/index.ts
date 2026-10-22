@@ -550,6 +550,38 @@ async function chat(req: Request) {
   // It proves that a tool schema crosses the adapter and a native OpenAI-style
   // tool_call comes back. It is deliberately not used to evaluate language
   // understanding; only a live model can pass that acceptance requirement.
+  if (req.headers.get("x-wakil-acceptance-probe") === "read-only-refusal-v1") {
+    const hasSaleTool = (body.tools ?? []).some((candidate) => {
+      if (!candidate || typeof candidate !== "object") return false;
+      const tool = candidate as { type?: string; function?: { name?: string } };
+      return tool.type === "function" && tool.function?.name === "record_sale";
+    });
+    const systemMessage = messages.find((message) => message.role === "system")?.content ?? "";
+    const userMessage = [...messages].reverse().find((message) => message.role === "user")?.content ?? "";
+    // This fixture proves the adapter sent a read-only instruction alongside a
+    // write-tool schema and receives a no-tool response. It does NOT claim that
+    // a model learned to obey the instruction; live acceptance tests that.
+    if (body.stream || !hasSaleTool || !/القراءة فقط/.test(systemMessage) || !/سجل بيع/.test(userMessage)) {
+      return json({ error: { message: "read-only-refusal-v1 received an unexpected request contract" } }, 422);
+    }
+    const id = uid();
+    return json({
+      id,
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [{
+        index: 0,
+        message: {
+          role: "assistant",
+          content: "وضع القراءة فقط: لن أنشئ مسودة بيع في هذا الطلب.",
+        },
+        finish_reason: "stop",
+      }],
+      usage: { prompt_tokens: 96, completion_tokens: 24, total_tokens: 120 },
+    });
+  }
+
   if (req.headers.get("x-wakil-acceptance-probe") === "record-sale-v1") {
     const saleTool = (body.tools ?? []).find((candidate) => {
       if (!candidate || typeof candidate !== "object") return false;
@@ -585,6 +617,7 @@ async function chat(req: Request) {
               arguments: JSON.stringify({
                 name: "زيت عباد 1.5 لتر",
                 qty: 3,
+                price: 85,
                 total: 255,
                 paid: 255,
               }),

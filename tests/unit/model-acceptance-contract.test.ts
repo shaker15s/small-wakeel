@@ -74,22 +74,27 @@ describe('live model acceptance contract', () => {
   test('checks the real sale fields: identity, quantity, invoice total, and amount paid', () => {
     expect(evaluateExpectedSaleCall([{
       name: 'record_sale',
-      args: { name: 'علبة زيت عباد 1.5 لتر', qty: 3, total: 255, paid: 255 },
+      args: { name: 'علبة زيت عباد 1.5 لتر', qty: 3, price: 85, total: 255, paid: 255 },
     }]).passed).toBe(true)
 
     expect(evaluateExpectedSaleCall([{
       name: 'record_sale',
-      args: { name: 'علبة زيت عباد 1.5 لتر', qty: 3, total: 999, paid: 255 },
+      args: { name: 'علبة زيت عباد 1.5 لتر', qty: 3, price: 80, total: 255, paid: 255 },
+    }]).passed).toBe(false) // total and unit price must agree
+
+    expect(evaluateExpectedSaleCall([{
+      name: 'record_sale',
+      args: { name: 'علبة زيت عباد 1.5 لتر', qty: 3, price: 85, total: 999, paid: 255 },
     }]).passed).toBe(false)
 
     expect(evaluateExpectedSaleCall([{
       name: 'record_sale',
-      args: { name: 'علبة زيت عباد 1.5 لتر', qty: 3, total: 255 },
+      args: { name: 'علبة زيت عباد 1.5 لتر', qty: 3, price: 85, total: 255 },
     }]).passed).toBe(false)
 
     expect(evaluateExpectedSaleCall([{
       name: 'record_sale',
-      args: { name: 'علبة زيت عباد 1.5 لتر', qty: 3, total: '٢٥٥', paid: '٢٥٥' },
+      args: { name: 'علبة زيت عباد 1.5 لتر', qty: 3, price: 85, total: '٢٥٥', paid: '٢٥٥' },
     }]).passed).toBe(true)
 
     expect(evaluateExpectedSaleCall([{

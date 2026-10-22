@@ -148,7 +148,7 @@ async function runModel(model) {
       { role: 'user', content: 'سجل بيع 10 علب شاي العروسة بإجمالي 150 جنيه والمدفوع 150 جنيه.' },
     ], {
       tools: [TOOL, READ_TOOL],
-      ...(isMockEndpoint ? { extraHeaders: { 'x-wakil-acceptance-probe': 'record-sale-v1' } } : {}),
+      ...(isMockEndpoint ? { acceptanceProbe: 'read-only-refusal-v1' } : {}),
     })
     const parsed = safeJson(r.raw)
     const calls = extractToolCalls(parsed)
