@@ -172,23 +172,23 @@ ${lines.join('\n')}`
  *     the footer totals («إجمالي المديونيات: ٤٧٣ ج.م»)
  * Never throws; returns the number of jots it started (fire-and-forget writes).
  */
-export function jotFactsFromCards(
+export async function jotFactsFromCards(
   ids: { businessId: string; userId: string; conversationId: string },
   cards: ResultCardDTO[],
-): number {
+): Promise<number> {
   let count = 0
-  const jot = (text: string, source: string) => {
+  const jot = async (text: string, source: string): Promise<void> => {
     if (!text.trim() || count >= 4) return // cap 4 notes per tool run — no clutter
     count++
-    void jotNote({ ...ids, kind: 'fact', text, source })
+    await jotNote({ ...ids, kind: 'fact', text, source })
   }
   for (const c of cards) {
     if (c.kind === 'kv') {
       for (const r of c.rows) {
-        if (/[\d٠-٩]/.test(r.value)) jot(`${r.label}: ${r.value}`, c.title)
+        if (/[\d٠-٩]/.test(r.value)) await jot(`${r.label}: ${r.value}`, c.title)
       }
     } else if (c.kind === 'table') {
-      for (const f of c.footer ?? []) jot(`${f.label}: ${f.value}`, c.title)
+      for (const f of c.footer ?? []) await jot(`${f.label}: ${f.value}`, c.title)
       for (const r of c.rows.slice(0, 4)) {
         const name = r.name ?? Object.values(r)[0] ?? ''
         const rest = Object.entries(r)
@@ -196,7 +196,7 @@ export function jotFactsFromCards(
           .map(([, v]) => v)
           .filter(Boolean)
           .join(' @ ')
-        if (name && rest) jot(`${name}: ${rest}`, c.title)
+        if (name && rest) await jot(`${name}: ${rest}`, c.title)
       }
     }
   }
