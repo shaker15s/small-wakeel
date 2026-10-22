@@ -167,23 +167,35 @@ async function listParties(businessId: string, body: Record<string, unknown>) {
   }
   const query = optionalString(body.query, 'query', 100)
   const limit = toLimit(body.limit, 30, 100)
-  const rows = partyType === 'customers'
-    ? await db.customer.findMany({ where: { businessId }, orderBy: { name: 'asc' }, take: 500, select: { id: true, name: true, phone: true, balance: true, plan: true, expiresAt: true } })
-    : await db.supplier.findMany({ where: { businessId }, orderBy: { name: 'asc' }, take: 500, select: { id: true, name: true, phone: true, balance: true } })
   const needle = query ? normalizeAr(query) : ''
+
+  if (partyType === 'customers') {
+    const rows = await db.customer.findMany({
+      where: { businessId }, orderBy: { name: 'asc' }, take: 500,
+      select: { id: true, name: true, phone: true, balance: true, plan: true, expiresAt: true },
+    })
+    const matches = needle ? rows.filter((row) => normalizeAr(row.name + ' ' + (row.phone ?? '')).includes(needle)) : rows
+    return {
+      partyType, count: matches.length, limit,
+      parties: matches.slice(0, limit).map((row) => ({
+        id: row.id, name: row.name, phone: row.phone, balance: money(row.balance),
+        plan: row.plan, expiresAt: row.expiresAt?.toISOString() ?? null,
+      })),
+      note: 'رصيد العميل الموجب يعني مبلغًا مستحقًا للنشاط حسب دفتر وكيل.',
+    }
+  }
+
+  const rows = await db.supplier.findMany({
+    where: { businessId }, orderBy: { name: 'asc' }, take: 500,
+    select: { id: true, name: true, phone: true, balance: true },
+  })
   const matches = needle ? rows.filter((row) => normalizeAr(row.name + ' ' + (row.phone ?? '')).includes(needle)) : rows
   return {
-    partyType,
-    count: matches.length,
-    limit,
+    partyType, count: matches.length, limit,
     parties: matches.slice(0, limit).map((row) => ({
-      id: row.id,
-      name: row.name,
-      phone: row.phone,
-      balance: money(row.balance),
-      ...('plan' in row ? { plan: row.plan, expiresAt: row.expiresAt?.toISOString() ?? null } : {}),
+      id: row.id, name: row.name, phone: row.phone, balance: money(row.balance),
     })),
-    note: partyType === 'customers' ? 'رصيد العميل الموجب يعني مبلغًا مستحقًا للنشاط حسب دفتر وكيل.' : 'رصيد المورد الموجب يعني مبلغًا مستحقًا للمورد حسب دفتر وكيل.',
+    note: 'رصيد المورد الموجب يعني مبلغًا مستحقًا للمورد حسب دفتر وكيل.',
   }
 }
 
@@ -236,7 +248,7 @@ async function overview(businessId: string, body: Record<string, unknown>) {
     cashIsPhysicalCount: false,
     receivables: money(receivable),
     payables: money(payable),
-    catalog: { itemCount, stockUnknownCount },
+    catalog: { itemCount, stockUnknownCount: unknownStockCount },
     pendingApprovalCount: pendingCount,
     recentOperations: recent.map((op) => ({ ...op, createdAt: op.createdAt.toISOString() })),
     note: 'الأرصدة من دفتر وكيل وليست جردًا ماديًا. لا تعتبر الفرق ربحًا أو مبيعات. الأرقام null تعني غير مسجلة وليست صفرًا.',
@@ -249,21 +261,39 @@ async function uniquePartyId(
   id: unknown,
   name: unknown,
 ): Promise<string> {
-  const table = kind === 'customer' ? db.customer : db.supplier
-  if (typeof id === 'string' && id.trim()) {
-    const row = await table.findFirst({ where: { id: id.trim(), businessId }, select: { id: true, name: true } })
-    if (!row) throw new WakilBridgeError(400, 'الحساب المحدد غير موجود داخل النشاط الحالي: ' + kind)
-    const suppliedName = optionalString(name, kind === 'customer' ? 'customerName' : 'supplierName', 100)
+  const suppliedId = typeof id === 'string' ? id.trim() : ''
+  if (kind === 'customer') {
+    if (suppliedId) {
+      const row = await db.customer.findFirst({ where: { id: suppliedId, businessId }, select: { id: true, name: true } })
+      if (!row) throw new WakilBridgeError(400, 'الحساب المحدد غير موجود داخل النشاط الحالي: customer')
+      const suppliedName = optionalString(name, 'customerName', 100)
+      if (suppliedName && normalizeAr(suppliedName) !== normalizeAr(row.name)) {
+        throw new WakilBridgeError(400, 'معرّف الحساب لا يطابق اسمه؛ راجع المسودة')
+      }
+      return row.id
+    }
+    const suppliedName = requiredString(name, 'customerName', 100)
+    const rows = await db.customer.findMany({ where: { businessId }, select: { id: true, name: true } })
+    const matches = rows.filter((row) => normalizeAr(row.name) === normalizeAr(suppliedName))
+    if (matches.length === 0) throw new WakilBridgeError(400, 'العميل «' + suppliedName + '» غير موجود. اعرض العملاء ثم حدّد الحساب الصحيح؛ لن أنشئ حسابًا ضمنيًا للتحصيل.')
+    if (matches.length > 1) throw new WakilBridgeError(409, 'أكثر من عميل يطابق «' + suppliedName + '»؛ استخدم معرف الحساب الصحيح.')
+    return matches[0].id
+  }
+
+  if (suppliedId) {
+    const row = await db.supplier.findFirst({ where: { id: suppliedId, businessId }, select: { id: true, name: true } })
+    if (!row) throw new WakilBridgeError(400, 'الحساب المحدد غير موجود داخل النشاط الحالي: supplier')
+    const suppliedName = optionalString(name, 'supplierName', 100)
     if (suppliedName && normalizeAr(suppliedName) !== normalizeAr(row.name)) {
-      throw new WakilBridgeError(400, 'معرّف الحساب لا يطابق اسمه؛ راجع الكتالوج قبل تجهيز المسودة')
+      throw new WakilBridgeError(400, 'معرّف الحساب لا يطابق اسمه؛ راجع المسودة')
     }
     return row.id
   }
-  const suppliedName = requiredString(name, kind === 'customer' ? 'customerName' : 'supplierName', 100)
-  const rows = await table.findMany({ where: { businessId }, select: { id: true, name: true } })
+  const suppliedName = requiredString(name, 'supplierName', 100)
+  const rows = await db.supplier.findMany({ where: { businessId }, select: { id: true, name: true } })
   const matches = rows.filter((row) => normalizeAr(row.name) === normalizeAr(suppliedName))
-  if (matches.length === 0) throw new WakilBridgeError(400, 'الحساب «' + suppliedName + '» غير موجود. اعرض ' + (kind === 'customer' ? 'العملاء' : 'الموردين') + ' ثم حدّد الحساب الصحيح؛ لن أنشئ حسابًا ضمنيًا للتحصيل أو السداد.')
-  if (matches.length > 1) throw new WakilBridgeError(409, 'أكثر من حساب يطابق «' + suppliedName + '»؛ استخدم معرف الحساب الصحيح.')
+  if (matches.length === 0) throw new WakilBridgeError(400, 'المورد «' + suppliedName + '» غير موجود. اعرض الموردين ثم حدّد الحساب الصحيح؛ لن أنشئ حسابًا ضمنيًا للسداد.')
+  if (matches.length > 1) throw new WakilBridgeError(409, 'أكثر من مورد يطابق «' + suppliedName + '»؛ استخدم معرف الحساب الصحيح.')
   return matches[0].id
 }
 
