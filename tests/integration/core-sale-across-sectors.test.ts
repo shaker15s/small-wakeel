@@ -50,7 +50,7 @@ describe('core sale accounting across the ten sector profiles', () => {
       expect(draft.status, `${sector}: sale should be a draft until approval`).toBe('AWAITING_APPROVAL')
       expect((await db.item.findUniqueOrThrow({ where: { id: item.id } })).stockQty)
         .toBe(10)
-      expect(await db.cashEntry.count({ where: { businessId: business.id, ref: draft.ref }))
+      expect(await db.cashEntry.count({ where: { businessId: business.id, ref: draft.ref } }))
         .toBe(0)
 
       const approved = await executeOperation(draft.id, owner.id)
@@ -62,7 +62,7 @@ describe('core sale accounting across the ten sector profiles', () => {
         .toBe(8)
       expect(await db.cashEntry.count({ where: { businessId: business.id, ref: draft.ref }))
         .toBe(1)
-      expect(await db.auditEvent.count({ where: { businessId: business.id, ref: draft.ref, action: 'operation.succeeded' }))
+      expect(await db.auditEvent.count({ where: { businessId: business.id, ref: draft.ref, action: 'operation.succeeded' } }))
         .toBe(1)
     }
   })
