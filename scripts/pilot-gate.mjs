@@ -25,7 +25,7 @@ import { existsSync, writeFileSync, readFileSync, readdirSync, mkdtempSync, rmSy
 import { join, resolve, dirname, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { hasShaBoundCiArtifact, reportsMatchHashes, selectSuccessfulHostedCiRun, validateCapacityEvidence, validateIndependentSecurityAudit, validateP0P8Evidence } from './lib/pilot-gate-evidence.mjs'
+import { hasShaBoundCiArtifact, reportsMatchHashes, selectSuccessfulHostedCiRun, validateCapacityEvidence, validateIndependentSecurityAudit, validateLegalPolicyReview, validateP0P8Evidence } from './lib/pilot-gate-evidence.mjs'
 import { execSync } from 'node:child_process'
 import { readCommittedSyntheticSqlite } from './lib/synthetic-db-fixture.mjs'
 
@@ -316,16 +316,22 @@ const items = []
   )
   const privacy = existsSync(join(root, 'docs/PRIVACY.md')) || existsSync(join(root, 'PRIVACY.md'))
   const terms = existsSync(join(root, 'docs/TERMS.md')) || existsSync(join(root, 'TERMS.md'))
+  const legal = readEvidenceJson(
+    'docs/evidence/legal-review.json',
+    validateLegalPolicyReview,
+    sha,
+  )
   const missing = [
     ...docs.missing.map((file) => `MISSING: ${file}`),
     ...(!privacy ? ['MISSING: privacy policy (PRIVACY.md)'] : []),
     ...(!terms ? ['MISSING: terms of service (TERMS.md)'] : []),
     ...ev.evidence,
+    ...legal.evidence,
   ]
   items.push({
     id: '7_security_audit_docs',
-    requirement: 'Independent security audit + privacy/terms/support/operations/monitoring evidence',
-    status: ev.met && docs.missing.length === 0 && privacy && terms ? 'met' : 'not_met',
+    requirement: 'Independent security audit + Egyptian legal review of privacy/terms and applicable data-protection obligations + support/operations/monitoring evidence',
+    status: ev.met && legal.met && docs.missing.length === 0 && privacy && terms ? 'met' : 'not_met',
     evidence: [
       ...docs.found.map((file) => `present: ${file}`),
       ...missing,

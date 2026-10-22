@@ -22,3 +22,7 @@ The hosted workflow runs `scripts/ci.sh`: frozen dependency install, schema chec
 This is not a live-model quality test, a third-party security audit, production hosting acceptance, external mail delivery, provider integration acceptance, or a load test. Those are separate, explicitly evidenced release gates.
 
 Never place provider secrets, customer data, or raw financial records in these manifests or public CI artifacts.
+
+- docs/evidence/legal-review.json: exact targetCommitSha, status passed, independentReview true, counsel identity, organization, Egyptian professional licence number and licensedInEgypt true, reviewedPolicies containing both docs/PRIVACY.md and docs/TERMS.md, all required Egyptian PDPL review topics, completion date, HTTPS report URL, report path under docs/evidence/artifacts/, and report SHA-256.
+
+The legal-review report must come from a genuinely independent, appropriately licensed Egyptian lawyer who reviewed the exact final SHA. The gate validates the manifest and report bytes; it cannot authenticate a lawyer's identity/licence by itself. The owner must independently verify credentials and keep the signed report. The policy documents added in this PR are drafts and cannot be treated as final merely because they exist.

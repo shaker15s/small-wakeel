@@ -10,6 +10,7 @@ import {
   reportsMatchHashes,
   validateCapacityEvidence,
   validateIndependentSecurityAudit,
+  validateLegalPolicyReview,
   validateP0P8Evidence,
 } from '../../scripts/lib/pilot-gate-evidence.mjs'
 
@@ -81,6 +82,40 @@ describe('release-gate evidence is exact-SHA and evidence-bound', () => {
     expect(validateIndependentSecurityAudit(evidence, sha)).toBe(true)
     expect(validateIndependentSecurityAudit({ ...evidence, independenceConfirmed: false }, sha)).toBe(false)
     expect(validateIndependentSecurityAudit({ ...evidence, targetCommitSha: 'c'.repeat(40) }, sha)).toBe(false)
+  })
+
+  test('public launch needs independent Egyptian counsel review of both policy documents and PDPL topics', () => {
+    const evidence = {
+      targetCommitSha: sha,
+      status: 'passed',
+      independentReview: true,
+      counsel: {
+        name: 'Independent Egyptian Counsel',
+        organization: 'External Law Office',
+        licenceNumber: 'EG-LAW-0000',
+        licensedInEgypt: true,
+      },
+      reviewedPolicies: ['docs/PRIVACY.md', 'docs/TERMS.md'],
+      reviewedTopics: [
+        'law_151_2020',
+        'executive_regulations_816_2025',
+        'controller_processor_roles_and_registration',
+        'cross_border_ai_and_asr_transfers',
+        'data_subject_rights_and_retention',
+        'security_breach_and_incident_reporting',
+        'privacy_policy_and_terms_of_service',
+        'dpo_and_other_applicable_obligations',
+      ],
+      completedAt: '2026-10-22T00:00:00Z',
+      reportUrl: 'https://legal.example/report',
+      reportPath: 'docs/evidence/artifacts/legal-review.pdf',
+      reportSha256: reportHash,
+    }
+    expect(validateLegalPolicyReview(evidence, sha)).toBe(true)
+    expect(validateLegalPolicyReview({ ...evidence, targetCommitSha: 'c'.repeat(40) }, sha)).toBe(false)
+    expect(validateLegalPolicyReview({ ...evidence, counsel: { ...evidence.counsel, licensedInEgypt: false } }, sha)).toBe(false)
+    expect(validateLegalPolicyReview({ ...evidence, reviewedTopics: evidence.reviewedTopics.slice(1) }, sha)).toBe(false)
+    expect(validateLegalPolicyReview({ ...evidence, reviewedPolicies: ['docs/PRIVACY.md'] }, sha)).toBe(false)
   })
 
   test('capacity evidence must contain real-shaped metrics tied to exact code and environment', () => {

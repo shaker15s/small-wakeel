@@ -111,6 +111,40 @@ export function validateIndependentSecurityAudit(evidence, sha) {
     Number.isFinite(Date.parse(evidence.completedAt))
 }
 
+const REQUIRED_LEGAL_REVIEW_TOPICS = [
+  'law_151_2020',
+  'executive_regulations_816_2025',
+  'controller_processor_roles_and_registration',
+  'cross_border_ai_and_asr_transfers',
+  'data_subject_rights_and_retention',
+  'security_breach_and_incident_reporting',
+  'privacy_policy_and_terms_of_service',
+  'dpo_and_other_applicable_obligations',
+]
+
+/**
+ * Legal review is distinct from the technical security audit. The gate verifies
+ * the evidence shape/report; the owner must independently verify counsel licence.
+ */
+export function validateLegalPolicyReview(evidence, sha) {
+  if (!evidence || evidence.targetCommitSha !== sha || !SHA_RE.test(sha)) return false
+  const policies = Array.isArray(evidence.reviewedPolicies) ? evidence.reviewedPolicies : []
+  const topics = Array.isArray(evidence.reviewedTopics) ? evidence.reviewedTopics : []
+  return evidence.status === 'passed' &&
+    evidence.independentReview === true &&
+    evidence.counsel?.licensedInEgypt === true &&
+    typeof evidence.counsel?.name === 'string' && evidence.counsel.name.trim().length > 1 &&
+    typeof evidence.counsel?.organization === 'string' && evidence.counsel.organization.trim().length > 1 &&
+    typeof evidence.counsel?.licenceNumber === 'string' && evidence.counsel.licenceNumber.trim().length > 1 &&
+    policies.includes('docs/PRIVACY.md') &&
+    policies.includes('docs/TERMS.md') &&
+    REQUIRED_LEGAL_REVIEW_TOPICS.every((topic) => topics.includes(topic)) &&
+    isHttpsUrl(evidence.reportUrl) &&
+    typeof evidence.reportPath === 'string' &&
+    isShaDigest(evidence.reportSha256) &&
+    Number.isFinite(Date.parse(evidence.completedAt))
+}
+
 /** Capacity evidence must identify this commit, a production-like run and its raw report. */
 export function validateCapacityEvidence(evidence, sha) {
   if (!evidence || evidence.targetCommitSha !== sha || !SHA_RE.test(sha)) return false
