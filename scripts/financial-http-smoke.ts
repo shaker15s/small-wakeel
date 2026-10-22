@@ -197,17 +197,29 @@ export async function financialHttpSmoke(params: {
     assert.equal(chatOp.status, 'AWAITING_APPROVAL')
     assert.equal(
       chatOp.type,
-      'expense',
-      `Arabic expense phrase created the wrong draft type: type=${String(chatOp.type)}; summary=${String(chatOp.summary)}; payload=${JSON.stringify(chatPayload)}`,
+      'cashbook',
+      `Arabic shop-expense phrase must use the cashbook contract: type=${String(chatOp.type)}; summary=${String(chatOp.summary)}; payload=${JSON.stringify(chatPayload)}`,
     )
     assert.equal(
-      chatPayload.total,
+      chatPayload.kind,
+      'expense',
+      `Arabic shop-expense phrase produced the wrong cashbook movement: ${JSON.stringify(chatPayload)}`,
+    )
+    assert.equal(
+      chatPayload.amount,
       3300,
       `Arabic expense amount was not stored as canonical piastres: type=${String(chatOp.type)}; payload=${JSON.stringify(chatPayload)}`,
     )
+    assert.equal(chatPayload.reason, 'صيانة', `expense reason was not preserved: ${JSON.stringify(chatPayload)}`)
     assert.equal(await ledgerCount(String(chatOp.ref)), 0)
+    assert.equal(Number((await row('SELECT COUNT(*) AS n FROM CashbookEntry WHERE operationRef = ?', [chatOp.ref])).n), 0)
     await succeeded({ id: draftId }, 'HTTP smoke approval')
     assert.equal(await ledgerCount(String(chatOp.ref)), 1)
+    const cashbookEntry = await row('SELECT kind, amount, cashDelta, dateSource FROM CashbookEntry WHERE operationRef = ?', [chatOp.ref])
+    assert.equal(cashbookEntry.kind, 'expense')
+    assert.equal(Number(cashbookEntry.amount), 3300)
+    assert.equal(Number(cashbookEntry.cashDelta), -3300)
+    assert.equal(cashbookEntry.dateSource, 'assumed_today')
     const replay = await post('/api/chat', owner, { ...chatBody, conversationId })
     assert.equal(replay.status, 200)
     assert.match(await replay.text(), /"replayed":true/)
