@@ -1,5 +1,17 @@
 const GOOGLE_OPENAI_HOST = 'generativelanguage.googleapis.com'
 
+/** True only for an explicit mock model or a loopback test endpoint. */
+export function isMockAcceptanceEndpoint(base, models = []) {
+  if (Array.isArray(models) && models.some((model) => /mock/i.test(String(model)))) return true
+  try {
+    const host = new URL(base).hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '')
+    return host === 'localhost' || host.endsWith('.localhost') ||
+      host === '127.0.0.1' || host === '::1' || host === '0.0.0.0'
+  } catch {
+    return false
+  }
+}
+
 /**
  * Mirror the application's authoritative record_sale contract. The unit
  * suite compares this fixture to brainToolSchemas() so the live acceptance
