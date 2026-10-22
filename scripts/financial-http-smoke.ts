@@ -193,8 +193,18 @@ export async function financialHttpSmoke(params: {
     assert.ok(conversationId && draftId, 'Arabic chat must emit a real persisted draft')
     assert.equal(conversationId, fixtureConversation)
     const chatOp = await current(draftId)
+    const chatPayload = JSON.parse(String(chatOp.payload)) as Record<string, unknown>
     assert.equal(chatOp.status, 'AWAITING_APPROVAL')
-    assert.equal(JSON.parse(String(chatOp.payload)).total, 3300)
+    assert.equal(
+      chatOp.type,
+      'expense',
+      `Arabic expense phrase created the wrong draft type: type=${String(chatOp.type)}; summary=${String(chatOp.summary)}; payload=${JSON.stringify(chatPayload)}`,
+    )
+    assert.equal(
+      chatPayload.total,
+      3300,
+      `Arabic expense amount was not stored as canonical piastres: type=${String(chatOp.type)}; payload=${JSON.stringify(chatPayload)}`,
+    )
     assert.equal(await ledgerCount(String(chatOp.ref)), 0)
     await succeeded({ id: draftId }, 'HTTP smoke approval')
     assert.equal(await ledgerCount(String(chatOp.ref)), 1)
