@@ -350,6 +350,24 @@ function brainReply(rawText: string, model: string, messages: Msg[] = []): strin
     return "أنا في وضع القراءة فقط؛ لن أستدعي أداة كتابة. أحتاج تأكيدًا صريحًا قبل تجهيز أي عملية.";
   }
 
+  // This deterministic PR-013 probe validates adapter/schema round-tripping,
+  // not model intelligence. Live-model behavior is evaluated separately and
+  // the report must continue to mark this endpoint as a mock.
+  if (
+    !readOnly &&
+    /زيت\s+عباد\s+1[.٫]5/.test(text) &&
+    /3\s*علب/.test(text) &&
+    /إجمالي\s+الفاتورة\s*255/.test(text) &&
+    /المدفوع\s*255/.test(text)
+  ) {
+    return JSON.stringify({
+      tool_calls: [{
+        tool: "record_sale",
+        args: { name: "زيت عباد 1.5 لتر", qty: 3, price: 85, total: 255, paid: 255 },
+      }],
+    });
+  }
+
   if (d.kind === "write") {
     const args: Record<string, unknown> = {
       ...(d.itemName ? { item: d.itemName } : {}),
