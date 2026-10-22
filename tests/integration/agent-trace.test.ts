@@ -162,4 +162,21 @@ describe('live wiring — a real turn writes its trace', () => {
     const seqs = rows.map((r: any) => r.sequence)
     expect(seqs.every((s: number, i: number) => i === 0 || s > seqs[i - 1])).toBe(true)
   })
+
+  test('scratchpad fact writes finish before the helper resolves', async () => {
+    const scratchpad = await import('../../src/lib/agent/scratchpad')
+    const before = await db.agentNote.count({ where: { conversationId: conv.id, kind: 'fact' } })
+    const written = await scratchpad.jotFactsFromCards(
+      { businessId: business.id, userId: owner.id, conversationId: conv.id },
+      [{
+        kind: 'kv',
+        title: 'اختبار تسجيل حقيقة',
+        rows: [{ label: 'رصيد الخزنة', value: '١٠٠ جنيه' }],
+      }] as any,
+    )
+    expect(written).toBe(1)
+    expect(await db.agentNote.count({ where: { conversationId: conv.id, kind: 'fact' } })).toBe(before + 1)
+    const integrity = await db.$queryRawUnsafe('PRAGMA integrity_check') as { integrity_check: string }[]
+    expect(integrity).toEqual([{ integrity_check: 'ok' }])
+  })
 })
