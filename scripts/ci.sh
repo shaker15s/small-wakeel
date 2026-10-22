@@ -32,7 +32,7 @@ cleanup() {
   rm -rf "$CI_DB_DIR"
 }
 trap cleanup EXIT
-bun scripts/copy-database.ts --source "$SOURCE_DATABASE_PATH" --output "$CI_DB_DIR/gate.db"
+bun scripts/create-synthetic-db-fixture.ts --output "$CI_DB_DIR/gate.db"
 export DATABASE_URL="file:$CI_DB_DIR/gate.db"
 bun scripts/migrate.ts
 step "Schema drift (read only, migrated copy)"
