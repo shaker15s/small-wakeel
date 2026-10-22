@@ -173,15 +173,24 @@ const items = []
 {
   const reportPath = join(tmp, 'model-acceptance.json')
   const child = spawn(process.execPath, ['scripts/model-acceptance.mjs', '--report', reportPath], { cwd: root, env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe'] })
-  await new Promise((r) => child.on('close', r))
+  const modelExitCode = await new Promise((resolveExit) => child.on('close', resolveExit))
   let live = false
   let env = 'unreachable'
   let allPass = false
+  let checkedModels = 0
   try {
     const rep = JSON.parse(readFileSync(reportPath, 'utf8'))
     live = rep.liveAcceptance === true
     env = rep.environment ?? 'unknown'
-    allPass = rep.models?.every((m) => m.passed === true) ?? false
+    const requiredIds = ['A1', 'A2', 'A3', 'A4']
+    const results = Array.isArray(rep.results) ? rep.results : []
+    checkedModels = results.length
+    allPass = modelExitCode === 0 && checkedModels > 0 && results.every((model) => {
+      const checks = Array.isArray(model.checks) ? model.checks : []
+      const byId = new Map(checks.map((check) => [check.id, check]))
+      return requiredIds.every((id) => byId.get(id)?.pass === true) &&
+        checks.every((check) => check.pass === true || check.id === 'A5')
+    })
   } catch { /* no report */ }
   items.push({
     id: '3_model_acceptance_live',
@@ -190,7 +199,9 @@ const items = []
     evidence: [
       `model-acceptance environment: ${env}`,
       `liveAcceptance: ${live}`,
-      live && allPass ? 'live acceptance passed on a real endpoint' : 'mock run = adapter-contract proof only (liveAcceptance:false) — a LIVE endpoint with WAKIL_ACCEPTANCE_BASE_URL/API_KEY is required',
+      `checked models: ${checkedModels}`,
+      `model-acceptance exit code: ${modelExitCode}`,
+      live && allPass ? 'A1–A4 passed for every checked model on a live endpoint' : 'A live endpoint with WAKIL_ACCEPTANCE_BASE_URL/API_KEY and passing A1–A4 is required',
     ],
   })
 }
