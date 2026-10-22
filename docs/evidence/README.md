@@ -3,12 +3,13 @@
 The launch gate deliberately fails closed. **Do not create these files with guessed or placeholder values.** Each manifest must be tied to the exact release commit and backed by real retained artifacts.
 
 **These three JSON manifests are intentionally ignored by Git and must remain local operator evidence.** Prepare them only after the target release SHA is fixed; otherwise committing a manifest changes the SHA it claims to verify and makes the evidence circular. Do not force-add them to the repository.
+Local report copies in `docs/evidence/artifacts/` are ignored too. The gate calculates the SHA-256 from each file itself and refuses to count a syntactically valid digest if the file is missing or its bytes differ.
 
 The gate reads these optional evidence files:
 
-- `docs/evidence/p0-p8-acceptance.json`: `targetCommitSha` plus all nine entries `P0` through `P8`. Each entry must have `status: "passed"`, an HTTPS `reportUrl`, and a SHA-256 `reportSha256`.
-- `docs/evidence/independent-security-audit.json`: `targetCommitSha`, `status: "passed"`, `independenceConfirmed: true`, external auditor name and organization, completion date, audit scope, an HTTPS report URL, and the report's SHA-256. A project-authored checklist is not an independent audit.
-- `docs/evidence/capacity-acceptance.json`: exact `targetCommitSha`, `status: "passed"`, `environmentClass: "production-like"`, test-suite/version, test date, request count, concurrency, p50/p95/p99 latency, error rate, HTTPS report URL and SHA-256.
+- `docs/evidence/p0-p8-acceptance.json`: `targetCommitSha` plus all nine entries `P0` through `P8`. Each entry must have `status: "passed"`, an HTTPS `reportUrl`, a `reportPath` under `docs/evidence/artifacts/`, and a SHA-256 `reportSha256` that matches the actual file bytes.
+- `docs/evidence/independent-security-audit.json`: `targetCommitSha`, `status: "passed"`, `independenceConfirmed: true`, external auditor name and organization, completion date, audit scope, an HTTPS report URL, a `reportPath` under `docs/evidence/artifacts/`, and a SHA-256 that matches the report copy byte-for-byte. A project-authored checklist is not an independent audit.
+- `docs/evidence/capacity-acceptance.json`: exact `targetCommitSha`, `status: "passed"`, `environmentClass: "production-like"`, test-suite/version, test date, request count, concurrency, p50/p95/p99 latency, error rate, HTTPS report URL, a `reportPath` under `docs/evidence/artifacts/`, and a SHA-256 that matches the report copy byte-for-byte.
 
 ## Hosted CI evidence
 
