@@ -36,6 +36,11 @@ const ids: string[] = []
 
 beforeAll(async () => {
   db = await testDb()
+  // The test DB is copied from the developer seed, which intentionally contains
+  // example reminders. Remove that demo queue from this disposable test copy so
+  // global worker sweeps measure only tasks created by this proof matrix.
+  await db.taskNotification.deleteMany()
+  await db.scheduledTask.deleteMany()
 })
 
 afterAll(async () => {
