@@ -24,7 +24,7 @@ import { spawn } from 'node:child_process'
 import { existsSync, writeFileSync, readFileSync, readdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { hasShaBoundCiArtifact, selectSuccessfulHostedCiRun, validateCapacityEvidence, validateIndependentSecurityAudit, validateP0P8Evidence } from './lib/pilot-gate-evidence.mjs'
+import { hasShaBoundCiArtifact, reportsMatchHashes, selectSuccessfulHostedCiRun, validateCapacityEvidence, validateIndependentSecurityAudit, validateP0P8Evidence } from './lib/pilot-gate-evidence.mjs'
 import { execSync } from 'node:child_process'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -127,12 +127,18 @@ function readEvidenceJson(relativePath, validator, sha) {
   if (!existsSync(fullPath)) return { met: false, evidence: [`MISSING: ${relativePath}`] }
   try {
     const evidence = JSON.parse(readFileSync(fullPath, 'utf8'))
-    const met = validator(evidence, sha)
+    const claimsValid = validator(evidence, sha)
+    const reportBytesMatch = claimsValid && reportsMatchHashes(evidence, root)
+    const met = claimsValid && reportBytesMatch
     return {
       met,
       evidence: met
-        ? [`validated ${relativePath} for exact SHA ${sha}`]
-        : [`${relativePath} exists but its claims are incomplete, malformed or not bound to exact SHA ${sha}`],
+        ? [`validated ${relativePath} for exact SHA ${sha}; local report bytes match every declared SHA-256`]
+        : [
+            !claimsValid
+              ? `${relativePath} exists but its claims are incomplete, malformed or not bound to exact SHA ${sha}`
+              : `${relativePath} claims are shaped correctly, but a report copy is missing, empty, outside docs/evidence/artifacts, or its actual SHA-256 does not match`,
+          ],
     }
   } catch (error) {
     return { met: false, evidence: [`${relativePath} could not be parsed: ${error instanceof Error ? error.message : String(error)}`] }
