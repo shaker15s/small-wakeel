@@ -50,7 +50,7 @@ const READ_TOOL = {
   parameters: { type: 'object', properties: {}, required: [] },
 }
 
-async function chat(model, messages, { tools, stream = false } = {}) {
+async function chat(model, messages, { tools, stream = false, acceptanceProbe } = {}) {
   // Fail closed before network I/O when a real key targets an unsafe endpoint.
   assertSafeAcceptanceCredentialTarget(BASE, KEY, MODELS)
   const url = resolveChatCompletionsUrl(BASE)
@@ -60,7 +60,7 @@ async function chat(model, messages, { tools, stream = false } = {}) {
   let raw = ''
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', ...(KEY ? { authorization: `Bearer ${KEY}` } : {}) },
+    headers: { 'content-type': 'application/json', ...(KEY ? { authorization: `Bearer ${KEY}` } : {}), ...(acceptanceProbe ? { 'x-wakil-acceptance-probe': acceptanceProbe } : {}) },
     body: JSON.stringify(body),
     redirect: 'error',
   })
@@ -127,7 +127,7 @@ async function runModel(model) {
     const r = await chat(model, [
       { role: 'system', content: 'استخدم الأدوات المتاحة عند الطلب. رد بأداة tool_calls أو نية واضحة.' },
       { role: 'user', content: 'سجل بيع 3 علب من زيت عباد 1.5 لتر؛ إجمالي الفاتورة 255 جنيه والمدفوع 255 جنيه.' },
-    ], { tools: [TOOL, READ_TOOL] })
+    ], { tools: [TOOL, READ_TOOL], ...(isMockEndpoint ? { acceptanceProbe: 'record-sale-v1' } : {}) })
     const parsed = safeJson(r.raw)
     const calls = extractToolCalls(parsed)
     const validation = evaluateExpectedSaleCall(calls)
