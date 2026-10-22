@@ -125,7 +125,7 @@ describe('PR-013 — model:acceptance harness', () => {
       if (a3?.pass !== true) {
         throw new Error(`A3 adapter contract failed: ${a3?.detail ?? 'missing A3 result'}`)
       }
-      expect(checks.get('A3')).toBe(true) // tool calling round-trip
+      expect(checks.get('A3'), report.results[0].checks.find((c: { id: string }) => c.id === 'A3')?.detail ?? 'A3 missing from report').toBe(true) // tool calling round-trip
       expect(checks.get('A4')).toBe(true) // write refusal
       expect(checks.get('A5')).toBe(true) // latency + cost measured
       // A2 (marker echo) is a LIVE-model behaviour — the mock is not a model,
