@@ -18,6 +18,8 @@ The bridge uses a bearer token between the local DSH process and the WAKIL serve
 
 This is an opt-in controlled-local integration, not a public-SaaS deployment. The official DSH project is still a developer preview and its plugin Host code is not a security sandbox. Test with synthetic data first.
 
+Because DSH Host plugins run in the same trusted process and may access process environment, treat the bridge token as visible to every trusted Host plugin in this profile. Keep this profile dedicated to WAKIL; do not install third-party or unreviewed bundles into it. The profile is an operational boundary, not a sandbox against malicious Host code.
+
 ## Compatibility
 
 The package declares DSH version range >=0.2.1-rc.2 and <0.3.0. Check the installed runtime with dsh --version before installing. Do not infer the Windows-installed version from the upstream repository's current version.
