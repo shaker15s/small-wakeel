@@ -1,3 +1,7 @@
+import { createHash } from 'node:crypto'
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { isAbsolute, relative, resolve, sep } from 'node:path'
+
 const SHA_RE = /^[a-f0-9]{40}$/i
 const P0_TO_P8 = ['P0', 'P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8']
 
@@ -11,6 +15,44 @@ function isHttpsUrl(value) {
 
 function isShaDigest(value) {
   return typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value)
+}
+
+/**
+ * Verify report bytes, not merely the shape of a manifest's claimed digest.
+ * Release reports must be copied into the ignored local evidence directory;
+ * arbitrary paths and symlinks out of that directory are rejected.
+ */
+export function verifyEvidenceReportHash(reportPath, expectedSha256, root) {
+  if (typeof reportPath !== 'string' || !reportPath.trim() || !isShaDigest(expectedSha256)) return false
+  if (isAbsolute(reportPath) || reportPath.split(/[\\/]/).includes('..')) return false
+
+  try {
+    const evidenceRoot = resolve(root, 'docs/evidence/artifacts')
+    const target = resolve(root, reportPath)
+    const relativeTarget = relative(evidenceRoot, target)
+    if (!relativeTarget || relativeTarget === '..' || relativeTarget.startsWith('..' + sep) || isAbsolute(relativeTarget)) return false
+    if (!existsSync(evidenceRoot) || !existsSync(target)) return false
+
+    const actualRoot = realpathSync(evidenceRoot)
+    const actualTarget = realpathSync(target)
+    const realRelative = relative(actualRoot, actualTarget)
+    if (!realRelative || realRelative === '..' || realRelative.startsWith('..' + sep) || isAbsolute(realRelative)) return false
+    const stat = statSync(actualTarget)
+    if (!stat.isFile() || stat.size === 0) return false
+
+    const actualSha256 = createHash('sha256').update(readFileSync(actualTarget)).digest('hex')
+    return actualSha256.toLowerCase() === expectedSha256.toLowerCase()
+  } catch {
+    return false
+  }
+}
+
+/** Every linked evidence report must have a local copy matching its claimed hash. */
+export function reportsMatchHashes(evidence, root) {
+  const reports = Array.isArray(evidence?.gates) ? evidence.gates : [evidence]
+  return reports.length > 0 && reports.every((report) =>
+    verifyEvidenceReportHash(report?.reportPath, report?.reportSha256, root),
+  )
 }
 
 /** Find a completed successful push CI run on the exact commit and workflow. */
@@ -47,6 +89,7 @@ export function validateP0P8Evidence(evidence, sha) {
     const item = evidence.gates.find((entry) => entry?.id === id)
     return item?.status === 'passed' &&
       isHttpsUrl(item.reportUrl) &&
+      typeof item.reportPath === 'string' &&
       isShaDigest(item.reportSha256)
   })
 }
@@ -59,6 +102,7 @@ export function validateIndependentSecurityAudit(evidence, sha) {
     typeof evidence.auditor?.name === 'string' && evidence.auditor.name.trim().length > 1 &&
     typeof evidence.auditor?.organization === 'string' && evidence.auditor.organization.trim().length > 1 &&
     isHttpsUrl(evidence.reportUrl) &&
+    typeof evidence.reportPath === 'string' &&
     isShaDigest(evidence.reportSha256) &&
     typeof evidence.scope === 'string' && /financial|tenant|authorization|security/i.test(evidence.scope) &&
     Number.isFinite(Date.parse(evidence.completedAt))
@@ -79,5 +123,6 @@ export function validateCapacityEvidence(evidence, sha) {
     Number.isFinite(m?.p99Ms) && m.p99Ms >= m.p95Ms &&
     Number.isFinite(m?.errorRatePct) && m.errorRatePct >= 0 && m.errorRatePct <= 100 &&
     isHttpsUrl(evidence.reportUrl) &&
+    typeof evidence.reportPath === 'string' &&
     isShaDigest(evidence.reportSha256)
 }
