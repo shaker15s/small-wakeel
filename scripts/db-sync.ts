@@ -23,6 +23,7 @@
 import { readFileSync } from 'node:fs'
 import { createClient } from '@libsql/client'
 import { getDMMF } from '@prisma/internals'
+import { defaultPrismaIndexName } from './lib/prisma-index-names'
 
 interface DmmfField {
   name: string
@@ -80,7 +81,7 @@ function parseIndexDirectives(schema: string): Record<string, { name: string; ki
       if (!match) continue
       const [, kind, fieldsRaw, mapName] = match
       const fields = fieldsRaw.split(',').map((f) => f.trim().replace(/\(.*\)$/, ''))
-      const name = mapName || `${model}_${fields.join('_')}_${kind}`
+      const name = defaultPrismaIndexName(model, fields, kind as 'index' | 'unique', mapName)
       ;(out[model] ??= []).push({ name, kind: kind as 'index' | 'unique', fields, raw: trimmed })
     }
   }
