@@ -34,7 +34,7 @@ describe('live model acceptance contract', () => {
 
   test('only explicit mock model IDs and loopback endpoints are mock; missing credentials are not a mock', () => {
     expect(isMockAcceptanceEndpoint('http://127.0.0.1:3031/v1', ['real-model'])).toBe(true)
-    expect(isMockAcceptanceEndpoint('https://api.example.com/v1', ['wakil-mock-flash'])).toBe(true)
+    expect(isMockAcceptanceEndpoint('https://api.example.com/v1', ['wakil-mock-flash'])).toBe(false)
     expect(isMockAcceptanceEndpoint('https://api.example.com/v1', ['real-model'])).toBe(false)
     expect(isMockAcceptanceEndpoint('https://192.168.1.20/v1', ['real-model'])).toBe(false)
   })
@@ -61,6 +61,9 @@ describe('live model acceptance contract', () => {
     expect(() => assertSafeAcceptanceCredentialTarget('https://api.internal/v1', 'secret', ['model-x'])).toThrow(/Refusing to send/)
     expect(() => assertSafeAcceptanceCredentialTarget('https://api.example.com/v1?key=secret', 'secret', ['model-x'])).toThrow(/Refusing to send/)
     expect(() => assertSafeAcceptanceCredentialTarget('https://api.example.com/v1', 'secret', ['mock-model'])).toThrow(/Refusing to send/)
+    expect(() => assertSafeAcceptanceCredentialTarget('https://api.example.com/v1', '', ['model-x'])).toThrow(/Refusing to send/)
+    expect(() => assertSafeAcceptanceCredentialTarget('https://192.168.1.20/v1', '', ['model-x'])).toThrow(/Refusing to send/)
+    expect(() => assertSafeAcceptanceCredentialTarget('', '', ['mock-model'])).toThrow(/WAKIL_ACCEPTANCE_BASE_URL/)
     expect(() => assertSafeAcceptanceCredentialTarget('https://generativelanguage.googleapis.com/v1beta', 'secret', ['gemini-3.8-flash'])).not.toThrow()
     expect(() => assertSafeAcceptanceCredentialTarget('http://127.0.0.1:3031/v1', '', ['mock-model'])).not.toThrow()
   })
