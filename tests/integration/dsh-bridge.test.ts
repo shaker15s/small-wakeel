@@ -115,6 +115,41 @@ describe('native DSH bridge — owner-bound and draft-only', () => {
     expect(catalog.body.data?.items?.[0]?.sellPrice).toEqual({ piastres: 2_500, egp: '25.00' })
   })
 
+  test('oversized bridge requests are rejected before JSON parsing', async () => {
+    const response = await bridgePost(new Request('http://localhost/api/dsh/bridge', {
+      method: 'POST',
+      headers: { authorization: 'Bearer ' + bridgeToken, 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'overview', padding: 'x'.repeat(65 * 1024) }),
+    }))
+    expect(response.status).toBe(413)
+  })
+
+  test('a sale draft refuses unknown price or uncounted stock instead of inventing facts', async () => {
+    const unpriced = await db.item.create({
+      data: { businessId, name: 'Synthetic unpriced item', unit: 'piece', stockQty: 20, sellPrice: null, costPrice: 1_000 },
+    })
+    const unknownStock = await db.item.create({
+      data: { businessId, name: 'Synthetic uncounted item', unit: 'piece', stockQty: null, sellPrice: 1_500, costPrice: 1_000 },
+    })
+    const priceResult = await call({
+      action: 'prepare_draft',
+      requestId: 'c'.repeat(64),
+      operationType: 'sale',
+      summary: 'بيع بسعر غير مسجل',
+      payload: { lines: [{ itemId: unpriced.id, qty: 1 }] },
+    })
+    expect(priceResult.status).toBe(422)
+    const stockResult = await call({
+      action: 'prepare_draft',
+      requestId: 'd'.repeat(64),
+      operationType: 'sale',
+      summary: 'بيع بمخزون غير معدود',
+      payload: { lines: [{ itemId: unknownStock.id, qty: 1 }] },
+    })
+    expect(stockResult.status).toBe(422)
+    expect(await db.operation.count({ where: { businessId, status: 'AWAITING_APPROVAL' } })).toBe(0)
+  })
+
   test('sale tool prepares an idempotent draft and never mutates stock or cash', async () => {
     const requestId = 'a'.repeat(64)
     const body = {
