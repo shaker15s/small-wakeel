@@ -106,11 +106,22 @@ export async function applyMigrations(dbPath: string, migrationsDir?: string): P
   const dir = migrationsDir ?? findMigrationsDir()
   if (!dir) throw new Error('db/migrations directory not found (run from the repo root or set WAKIL_PROJECT_ROOT)')
   const absolute = isAbsolute(dbPath) ? dbPath : join(process.cwd(), dbPath)
-  const client: Client = createClient({ url: `file:${absolute}` })
+  // Local libSQL currently has an upstream lock-leak edge case when a
+  // deferred transaction's COMMIT returns SQLITE_BUSY under rollback-journal
+  // mode: later writes may fail with P1008/SocketTimeout for the life of the
+  // process. WAL lets readers keep their snapshot without blocking COMMIT.
+  // Make the mode explicit before creating transactions; fail closed if the
+  // database cannot enter WAL rather than serving a fragile local ledger.
+  const client: Client = createClient({ url: `file:${absolute}`, timeout: 10_000 })
   const applied: string[] = []
   let skipped = 0
   try {
-    await client.execute('PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON;')
+    const journal = await client.execute('PRAGMA journal_mode = WAL')
+    const journalMode = String(journal.rows[0]?.journal_mode ?? '').toLowerCase()
+    if (journalMode !== 'wal') {
+      throw new Error(`Local SQLite must use WAL journal mode; got ${journalMode || 'unknown'}`)
+    }
+    await client.execute('PRAGMA foreign_keys = ON')
     await client.execute('CREATE TABLE IF NOT EXISTS _WakilMigration (id TEXT PRIMARY KEY, checksum TEXT NOT NULL, appliedAt TEXT NOT NULL)')
     for (const id of readdirSync(dir).sort()) {
       const contentPath = join(dir, id, 'migration.sql')
