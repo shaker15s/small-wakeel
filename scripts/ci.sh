@@ -5,14 +5,16 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 FAST=0
 [ "${1:-}" = "--fast" ] && FAST=1
-export DATABASE_URL="${DATABASE_URL:-file:./db/custom.db}"
+# CI must never snapshot a DATABASE_URL inherited from a developer or a
+# connected service. Use only the checked-in synthetic fixture as the source.
+SOURCE_DATABASE_PATH="$PWD/db/custom.db"
+export DATABASE_URL="file:./db/custom.db"
 export NEXT_TELEMETRY_DISABLED=1
 export WAKIL_OFFLINE=1
 step() { printf '\n▶ %s\n' "$1"; }
 step "Frozen install + engine-free Prisma client"
 bun install --frozen-lockfile
-step "Versioned migrations on disposable schema-check copy"
-SOURCE_DATABASE_URL="$DATABASE_URL"
+step "Versioned migrations on disposable synthetic schema-check copy"
 CI_DB_DIR=$(mktemp -d)
 MOCK_PROVIDER_PID=''
 cleanup() {
@@ -23,7 +25,7 @@ cleanup() {
   rm -rf "$CI_DB_DIR"
 }
 trap cleanup EXIT
-bun scripts/copy-database.ts --source "${SOURCE_DATABASE_URL#file:}" --output "$CI_DB_DIR/gate.db"
+bun scripts/copy-database.ts --source "$SOURCE_DATABASE_PATH" --output "$CI_DB_DIR/gate.db"
 export DATABASE_URL="file:$CI_DB_DIR/gate.db"
 bun scripts/migrate.ts
 step "Schema drift (read only, migrated copy)"
