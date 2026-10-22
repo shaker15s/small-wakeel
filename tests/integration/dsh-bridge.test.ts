@@ -58,19 +58,27 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (businessId) await db.business.deleteMany({ where: { id: businessId } })
-  process.env.WAKIL_DSH_ENABLED = priorEnv.enabled
-  process.env.WAKIL_DSH_BRIDGE_TOKEN = priorEnv.token
-  process.env.WAKIL_DSH_BUSINESS_ID = priorEnv.businessId
-  process.env.WAKIL_DSH_USER_ID = priorEnv.userId
+  const restoreEnv = (key: string, value: string | undefined) => {
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
+  restoreEnv('WAKIL_DSH_ENABLED', priorEnv.enabled)
+  restoreEnv('WAKIL_DSH_BRIDGE_TOKEN', priorEnv.token)
+  restoreEnv('WAKIL_DSH_BUSINESS_ID', priorEnv.businessId)
+  restoreEnv('WAKIL_DSH_USER_ID', priorEnv.userId)
 })
 
 describe('native DSH bridge — owner-bound and draft-only', () => {
   test('disabled bridge fails closed', async () => {
+    const previous = process.env.WAKIL_DSH_ENABLED
     process.env.WAKIL_DSH_ENABLED = '0'
-    const result = await call({ action: 'overview' })
-    expect(result.status).toBe(503)
-    expect(result.body.ok).toBe(false)
-    process.env.WAKIL_DSH_ENABLED = '1'
+    try {
+      const result = await call({ action: 'overview' })
+      expect(result.status).toBe(503)
+      expect(result.body.ok).toBe(false)
+    } finally {
+      process.env.WAKIL_DSH_ENABLED = previous ?? '1'
+    }
   })
 
   test('missing and wrong bearer tokens cannot read data', async () => {
@@ -79,7 +87,9 @@ describe('native DSH bridge — owner-bound and draft-only', () => {
   })
 
   test('overview and catalog read only the server-configured tenant', async () => {
-    const overview = await call({ action: 'overview', businessId: 'model-supplied-tenant', userId: 'model-supplied-user' })
+    const forgedTenant = await call({ action: 'overview', businessId: 'model-supplied-tenant', userId: 'model-supplied-user' })
+    expect(forgedTenant.status).toBe(400)
+    const overview = await call({ action: 'overview' })
     expect(overview.status).toBe(200)
     expect(overview.body.data.business.id).toBe(businessId)
     expect(overview.body.data.business.name).toContain('DSH bridge synthetic')
