@@ -196,6 +196,7 @@ function rTokens(parsed) {
 }
 
 const isMockEndpoint = isMockAcceptanceEndpoint(BASE, MODELS)
+const liveEndpoint = isLiveAcceptanceEndpoint(BASE, KEY, MODELS)
 
 const startedAt = new Date().toISOString()
 const results = []
@@ -205,14 +206,23 @@ for (const model of MODELS) {
 }
 
 const allPass = results.every((r) => r.checks.every((c) => c.pass || c.id === 'A5'))
+// For a mock, A2 is intentionally not a model-quality assertion. The mock run
+// succeeds only when the transport contract itself (A1 reachability, A3 tool
+// call, A4 write refusal, A5 measurement) is proven for every checked model.
+const mockAdapterPasses = isMockEndpoint && results.length > 0 && results.every((model) => {
+  const byId = new Map(model.checks.map((check) => [check.id, check.pass]))
+  return ['A1', 'A3', 'A4', 'A5'].every((id) => byId.get(id) === true)
+})
 const report = {
   startedAt,
   endpoint: BASE || '(none — set WAKIL_ACCEPTANCE_BASE_URL)',
-  environment: isMockEndpoint ? 'mock' : isLiveAcceptanceEndpoint(BASE, KEY, MODELS) ? 'live' : 'unconfigured',
-  liveAcceptance: !isMockEndpoint && allPass,
+  environment: isMockEndpoint ? 'mock' : liveEndpoint ? 'live' : 'unconfigured',
+  liveAcceptance: liveEndpoint && allPass,
   note: isMockEndpoint
-    ? 'موك — يثبت عقد الأداتر والقياس فقط، مو قبول موديل حي (plan §11.4)'
-    : allPass ? 'live acceptance passed for all checked models' : 'failures present — see checks',
+    ? mockAdapterPasses
+      ? 'موك — عقد الأداتر والقياس ناجح فقط؛ ليس قبول موديل حي (plan §11.4)'
+      : 'فشل عقد الأداتر في الموك؛ راجع A1/A3/A4/A5 — لا يوجد ادعاء بقبول حي'
+    : liveEndpoint && allPass ? 'live acceptance passed for all checked models' : 'failures present or endpoint unconfigured — see checks',
   results,
 }
 
@@ -221,4 +231,6 @@ if (reportIdx > 0 && process.argv[reportIdx + 1]) {
   writeFileSync(process.argv[reportIdx + 1], JSON.stringify(report, null, 2))
 }
 console.log(JSON.stringify(report, null, 2))
-process.exit(isMockEndpoint ? 0 : allPass ? 0 : 1)
+// Exit 0 only for a fully-passing live endpoint, or a fully-passing local mock
+// adapter contract. An unconfigured/private/uncredentialed remote endpoint must fail.
+process.exit(mockAdapterPasses ? 0 : liveEndpoint && allPass ? 0 : 1)
