@@ -2,6 +2,8 @@
 
 The launch gate deliberately fails closed. **Do not create these files with guessed or placeholder values.** Each manifest must be tied to the exact release commit and backed by real retained artifacts.
 
+**These three JSON manifests are intentionally ignored by Git and must remain local operator evidence.** Prepare them only after the target release SHA is fixed; otherwise committing a manifest changes the SHA it claims to verify and makes the evidence circular. Do not force-add them to the repository.
+
 The gate reads these optional evidence files:
 
 - `docs/evidence/p0-p8-acceptance.json`: `targetCommitSha` plus all nine entries `P0` through `P8`. Each entry must have `status: "passed"`, an HTTPS `reportUrl`, and a SHA-256 `reportSha256`.
