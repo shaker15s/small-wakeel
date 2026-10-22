@@ -77,6 +77,7 @@ test('a clear drawer count drafts from general mode and mutates the ledger only 
     kind: 'cash_count',
     amount: 250000,
     expectedCash: initialCash,
+    expectedCashKnown: false,
   })
 
   const executed = await executeOperation(operation.id, user.id)
