@@ -24,6 +24,9 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 
 let dir: string | null = null
+// Only the process that creates a temp DB owns and may delete that directory.
+// Child test runners can inherit DATABASE_URL and reuse the parent's marker.
+let ownsDir = false
 let migrationPromise: Promise<void> | null = null
 let cleanupRegistered = false
 
@@ -36,7 +39,7 @@ function registerCleanup(): void {
   cleanupRegistered = true
   process.on('exit', () => {
     try {
-      if (dir && existsSync(dir)) rmSync(dir, { recursive: true, force: true })
+      if (ownsDir && dir && existsSync(dir)) rmSync(dir, { recursive: true, force: true })
     } catch {
       // best-effort cleanup of an OS temp directory
     }
@@ -101,8 +104,9 @@ export function ensureTestDatabase(): string {
 
   const inherited = markedDatabaseFromEnvironment()
   if (inherited) {
+    // Inherited fixture: it belongs to the parent process. Never register
+    // cleanup for a directory this process did not create.
     dir = inherited.directory
-    registerCleanup()
     migrationPromise = inherited.markerState === TEST_DB_READY
       ? Promise.resolve()
       : waitForExistingFixtureReady(inherited.target, inherited.markerPath)
@@ -110,6 +114,7 @@ export function ensureTestDatabase(): string {
   }
 
   dir = mkdtempSync(join(tmpdir(), 'wakil-test-'))
+  ownsDir = true
   const target = join(dir, 'custom.db')
   const tempRoot = resolve(tmpdir())
   const tempPrefix = tempRoot.endsWith(sep) ? tempRoot : `${tempRoot}${sep}`

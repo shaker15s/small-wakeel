@@ -37,7 +37,7 @@ describe('local SQLite write concurrency and integrity', () => {
     expect(before[0]?.integrity_check).toBe('ok')
 
     // Match the overlapping writes made by a real agent turn: chat messages,
-    // append-only trace rows and their shared WAL-backed database.
+    // append-only trace rows and their local SQLite database under the configured rollback-journal policy.
     await Promise.all([
       ...Array.from({ length: 80 }, (_, index) =>
         db.message.create({

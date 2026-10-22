@@ -9,9 +9,10 @@
 import { beforeAll, afterAll, test, expect } from 'bun:test'
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { applyMigrations } from '../../scripts/lib/migrations'
 import { testDb } from '../helpers/test-db'
 import { GET } from '@/app/api/pilot/route'
 import { POST as recordBaseline } from '@/app/api/pilot/baseline/route'
@@ -217,44 +218,51 @@ test('before/after comparison: missing sides are reported missing, never padded 
 test('the release gate runs and reports an HONEST verdict — no auto-GO, never fake evidence', async () => {
   const tmp = mkdtempSync(join(tmpdir(), 'pilot-gate-test-'))
   const reportPath = join(tmp, 'gate.json')
-  const code = await new Promise<number>((res) => {
-    const child = spawn(process.execPath, ['scripts/pilot-gate.mjs', '--report', reportPath], {
-      cwd: process.cwd(),
-      // Make the environment claim explicit: this integration test validates
-      // the mock-only adapter path, never a live provider acceptance. CI starts
-      // the deterministic mock server before running test files.
-      env: {
-        ...process.env,
-        WAKIL_ACCEPTANCE_BASE_URL: 'http://127.0.0.1:3031/v1',
-        WAKIL_ACCEPTANCE_MODELS: 'wakil-mock-flash',
-        WAKIL_OFFLINE: '1',
-        WAKIL_SCHEDULER: 'off',
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    child.on('close', res)
-  })
+  // The release gate starts nested test workers. Give them their own disposable
+  // database; sharing this file with this test process lets a child cleanup its
+  // parent fixture and makes the parent's afterAll fail with SQLITE_READONLY.
+  const gateDbDir = mkdtempSync(join(tmpdir(), 'wakil-test-'))
+  const gateDbPath = join(gateDbDir, 'custom.db')
+  const gateMarker = join(gateDbDir, '.wakil-disposable-test-db')
   try {
+    writeFileSync(gateMarker, 'WAKIL-DISPOSABLE-SQLITE-INITIALIZING-V1\\n', { flag: 'wx' })
+    copyFileSync(join(process.cwd(), 'db', 'custom.db'), gateDbPath)
+    await applyMigrations(gateDbPath)
+    writeFileSync(gateMarker, 'WAKIL-DISPOSABLE-SQLITE-READY-V1\\n', { flag: 'w' })
+
+    const code = await new Promise<number>((res) => {
+      const child = spawn(process.execPath, ['scripts/pilot-gate.mjs', '--report', reportPath], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          DATABASE_URL: `file:${gateDbPath}`,
+          WAKIL_ACCEPTANCE_BASE_URL: 'http://127.0.0.1:3031/v1',
+          WAKIL_ACCEPTANCE_MODELS: 'wakil-mock-flash',
+          WAKIL_OFFLINE: '1',
+          WAKIL_SCHEDULER: 'off',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      child.on('close', (exitCode) => res(exitCode ?? 1))
+    })
+
     const r = JSON.parse(readFileSync(reportPath, 'utf8'))
     // The gate process exits nonzero for NO-GO; that is a correct verdict, not
     // a failed test runner. Only GO_CANDIDATE returns zero, and never auto-GO.
     expect(code).toBe(r.overall === 'GO_CANDIDATE' ? 0 : 1)
-    // the verdict is one of the two honest states — never an auto 'GO'
     expect(['NO-GO', 'GO_CANDIDATE']).toContain(r.overall)
-    // this sandbox has a mock model endpoint → item 3 can never be 'met' here
     const item3 = r.items.find((i: { id: string }) => i.id === '3_model_acceptance_live')
     expect(item3.status).toBe('not_met')
     expect(item3.evidence.join(' ')).toContain('mock')
-    // every item carries a status + evidence — nothing is asserted without proof
     for (const i of r.items) {
       expect(['met', 'not_met', 'not_evidenced']).toContain(i.status)
       expect(Array.isArray(i.evidence) && i.evidence.length > 0).toBe(true)
     }
     expect(r.met).toBe(`${r.items.filter((i: { status: string }) => i.status === 'met').length}/${r.items.length}`)
-    // an honest verdict states what it is; NO-GO says the release stays NO-GO
     if (r.overall === 'NO-GO') expect(r.decision).toContain('NO-GO')
     if (r.overall === 'GO_CANDIDATE') expect(r.decision).toContain('DOCUMENTED OWNER APPROVAL')
   } finally {
     rmSync(tmp, { recursive: true, force: true })
+    rmSync(gateDbDir, { recursive: true, force: true })
   }
 })
