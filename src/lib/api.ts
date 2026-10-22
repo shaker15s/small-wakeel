@@ -186,7 +186,13 @@ const patchWorkspace = (businessId: string, userId: string, value: import('./wor
 
 export interface CashbookDTO {
   pendingOps: OperationDTO[]
-  cash: number; receivable: number; payable: number; today: string
+  cash: number | null
+  openingCashKnown: boolean
+  currentCashKnown: boolean
+  cashIn: number
+  cashOut: number
+  cashCountAdjustment: number
+  receivable: number; payable: number; today: string
   reminders: { id: string; subject: string }[]
   customers: { id: string; name: string; balance: number }[]
   suppliers: { id: string; name: string; balance: number }[]
