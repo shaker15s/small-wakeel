@@ -16,10 +16,42 @@ export function IdentityBoundary({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!validLink) return
     const controller = new AbortController()
-    void fetch('/api/auth/config', { cache: 'no-store', signal: controller.signal }).then(async (r) => {
-      if (!r.ok) throw new Error('Auth configuration unavailable')
-      return r.json()
-    }).then(setConfig).catch(() => { if (!controller.signal.aborted) setFailed(true) })
+
+    // A security-link landing page is a safe GET. Retry a small number of
+    // transient failures automatically: a one-off failed fetch must not leave
+    // the user stuck on the retry screen when the next request succeeds.
+    void (async () => {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const response = await fetch('/api/auth/config', {
+            cache: 'no-store',
+            signal: controller.signal,
+          })
+          if (!response.ok) throw new Error('Auth configuration unavailable')
+          const value: unknown = await response.json()
+          if (
+            !value ||
+            typeof value !== 'object' ||
+            typeof (value as { saasEnabled?: unknown }).saasEnabled !== 'boolean' ||
+            typeof (value as { registrationEnabled?: unknown }).registrationEnabled !== 'boolean'
+          ) {
+            throw new Error('Auth configuration response is invalid')
+          }
+          if (!controller.signal.aborted) {
+            setConfig(value as { saasEnabled: boolean; registrationEnabled: boolean })
+            setFailed(false)
+          }
+          return
+        } catch {
+          if (controller.signal.aborted) return
+          if (attempt < 2) {
+            await new Promise((resolve) => setTimeout(resolve, 120 * (attempt + 1)))
+          }
+        }
+      }
+      if (!controller.signal.aborted) setFailed(true)
+    })()
+
     return () => controller.abort()
   }, [validLink, action])
   // Never silently show a stale signup/app screen while a security link loads.
