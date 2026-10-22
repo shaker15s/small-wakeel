@@ -11,6 +11,7 @@ import { brotliDecompressSync } from 'node:zlib'
 import { chromium as playwright, expect as baseExpect, type Page } from '@playwright/test'
 import chromium from '@sparticuz/chromium'
 import { createClient } from '@libsql/client'
+import { sqliteBusyTimeoutMs } from '../src/lib/db-config'
 import { totp } from '../src/lib/saas/crypto'
 
 const expect = baseExpect.configure({ timeout: 15_000 })
@@ -18,8 +19,11 @@ const expect = baseExpect.configure({ timeout: 15_000 })
 type Identity = { csrfToken: string; membershipId: string; account: { verified: boolean; mfaEnabled: boolean }; memberships: { id: string; businessId: string; userId: string; role: string }[] }
 export async function browserSmoke(databaseUrl: string, key: string, boot: (origin: string) => Promise<string>) {
   const temp = mkdtempSync(join(tmpdir(), 'wakil-browser-'))
-  const sql = createClient({ url: databaseUrl })
-  await sql.execute('PRAGMA busy_timeout=10000')
+  // The application deliberately uses local SQLite concurrency=1 while WAL is disabled.
+  // The browser's observer must use the same lock discipline; a wide default pool that
+  // polls while the app commits can starve its writer and create a test-only P1008.
+  const sql = createClient({ url: databaseUrl, concurrency: 1, timeout: sqliteBusyTimeoutMs() })
+  await sql.execute(`PRAGMA busy_timeout=${sqliteBusyTimeoutMs()}`)
   let upstream = ''
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', join(temp, 'key.pem'), '-out', join(temp, 'cert.pem'), '-days', '1', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1'], { stdio: 'ignore' })
   const proxy = Bun.serve({ port: 0, hostname: '127.0.0.1', tls: { key: readFileSync(join(temp, 'key.pem')), cert: readFileSync(join(temp, 'cert.pem')) }, async fetch(req) {
