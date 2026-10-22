@@ -3,6 +3,7 @@ import {
   assertSafeAcceptanceCredentialTarget,
   evaluateExpectedSaleCall,
   isLiveAcceptanceEndpoint,
+  isMockAcceptanceEndpoint,
   resolveChatCompletionsUrl,
   SALE_TOOL_ACCEPTANCE_SCHEMA,
 } from '../../scripts/lib/model-acceptance-contract.mjs'
@@ -22,6 +23,13 @@ describe('live model acceptance contract', () => {
   test('appends the chat-completions route to a generic OpenAI-compatible base', () => {
     expect(resolveChatCompletionsUrl('https://api.example.com/v1/'))
       .toBe('https://api.example.com/v1/chat/completions')
+  })
+
+  test('only explicit mock model IDs and loopback endpoints are mock; missing credentials are not a mock', () => {
+    expect(isMockAcceptanceEndpoint('http://127.0.0.1:3031/v1', ['real-model'])).toBe(true)
+    expect(isMockAcceptanceEndpoint('https://api.example.com/v1', ['wakil-mock-flash'])).toBe(true)
+    expect(isMockAcceptanceEndpoint('https://api.example.com/v1', ['real-model'])).toBe(false)
+    expect(isMockAcceptanceEndpoint('https://192.168.1.20/v1', ['real-model'])).toBe(false)
   })
 
   test('rejects missing keys, insecure endpoints, localhost and private IPv4 addresses as live evidence', () => {
