@@ -87,9 +87,10 @@ export async function cashPositionEvidence(
     : null
   const openingWasSkipped = openingAnswer?.skipped === true || openingAnswer?.value === null
   const openingWasAnswered = typeof openingAnswer?.value === 'number' && openingAnswer.skipped !== true
-  const openingCashKnown = profile?.openingCashStatedAt !== null && profile?.openingCashStatedAt !== undefined
-    || openingWasAnswered
-    || (!openingWasSkipped && business.openingCash !== 0)
+  const openingCashKnown =
+    (profile?.openingCashStatedAt !== null && profile?.openingCashStatedAt !== undefined) ||
+    openingWasAnswered ||
+    (!openingWasSkipped && business.openingCash !== 0)
   const activeCounts = countEntries.filter((entry) => entry.operation.reversedByRef === null)
   const currentCashKnown = openingCashKnown || activeCounts.length > 0
   const allCountRefs = countEntries.map((entry) => entry.operationRef)
