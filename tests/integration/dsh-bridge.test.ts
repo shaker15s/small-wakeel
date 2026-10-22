@@ -124,6 +124,20 @@ describe('native DSH bridge — owner-bound and draft-only', () => {
     expect(response.status).toBe(413)
   })
 
+  test('a sale draft requires explicit payment terms instead of assuming cash', async () => {
+    const result = await call({
+      action: 'prepare_draft',
+      requestId: 'e'.repeat(64),
+      operationType: 'sale',
+      summary: 'بيع بدون تحديد المدفوع',
+      payload: { lines: [{ itemId, qty: 1 }] },
+    })
+    expect(result.status).toBe(422)
+    expect(result.body.ok).toBe(false)
+    expect(result.body.error).toContain('المدفوع غير محدد')
+    expect(await db.operation.count({ where: { businessId, status: 'AWAITING_APPROVAL' } })).toBe(0)
+  })
+
   test('a sale draft refuses unknown price or uncounted stock instead of inventing facts', async () => {
     const unpriced = await db.item.create({
       data: { businessId, name: 'Synthetic unpriced item', unit: 'piece', stockQty: 20, sellPrice: null, costPrice: 1_000 },
