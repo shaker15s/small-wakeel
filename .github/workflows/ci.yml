@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: wakil-ci-${{ github.workflow }}-${{ github.ref }}
+  group: wakil-ci-v2-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
