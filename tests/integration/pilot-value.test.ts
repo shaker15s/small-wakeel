@@ -225,10 +225,10 @@ test('the release gate runs and reports an HONEST verdict — no auto-GO, never 
   const gateDbPath = join(gateDbDir, 'custom.db')
   const gateMarker = join(gateDbDir, '.wakil-disposable-test-db')
   try {
-    writeFileSync(gateMarker, 'WAKIL-DISPOSABLE-SQLITE-INITIALIZING-V1\\n', { flag: 'wx' })
+    writeFileSync(gateMarker, 'WAKIL-DISPOSABLE-SQLITE-INITIALIZING-V1\n', { flag: 'wx' })
     copyFileSync(join(process.cwd(), 'db', 'custom.db'), gateDbPath)
     await applyMigrations(gateDbPath)
-    writeFileSync(gateMarker, 'WAKIL-DISPOSABLE-SQLITE-READY-V1\\n', { flag: 'w' })
+    writeFileSync(gateMarker, 'WAKIL-DISPOSABLE-SQLITE-READY-V1\n', { flag: 'w' })
 
     const code = await new Promise<number>((res) => {
       const child = spawn(process.execPath, ['scripts/pilot-gate.mjs', '--report', reportPath], {
