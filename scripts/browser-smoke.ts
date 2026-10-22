@@ -394,6 +394,19 @@ export async function browserSmoke(databaseUrl: string, key: string, boot: (orig
     await staff.getByLabel('تأكيد كلمة المرور', { exact: true }).fill(password)
     const [staffSignup] = await Promise.all([staff.waitForResponse((r) => r.url().endsWith('/api/auth/register') && r.request().method() === 'POST'), staff.getByRole('button', { name: 'إنشاء حساب والانضمام للفريق', exact: true }).click()])
     assert.equal(staffSignup.status(), 200)
+    // Workspace preferences/onboarding are per actor, even when an invited
+    // staff member joins a business whose shared profile interview is already
+    // confirmed by its owner. Complete the real first-run path instead of
+    // clicking the final-stage button before it exists.
+    await expect(staff.getByRole('heading', { name: 'معرفك — أنا «وكيل»', exact: true })).toBeVisible()
+    await staff.getByRole('button', { name: 'شوفه شغال', exact: true }).click()
+    await expect(staff.getByRole('heading', { name: 'أول محادثة هتبقى كده', exact: true })).toBeVisible()
+    await staff.getByRole('button', { name: 'زبطني على شغلك', exact: true }).click()
+    // BusinessProfile is shared by the tenant and was confirmed during owner
+    // onboarding. Staff should reuse it and go straight to their own settings.
+    await expect(staff.getByRole('button', { name: 'كمل للإعدادات', exact: true })).toBeVisible()
+    await staff.getByRole('button', { name: 'كمل للإعدادات', exact: true }).click()
+    await expect(staff.getByRole('heading', { name: 'وكيل على مقاس شغلك', exact: true })).toBeVisible()
     await staff.getByRole('button', { name: 'احفظ وابدأ ببياناتي الحقيقية', exact: true }).click()
     await expect(staff.getByLabel('رسالة إلى وكيل', { exact: true })).toBeVisible()
     await expect.poll(async () => staff.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--analytics-accent').trim())).toBe('#b45309')
