@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { streamChat } from '@/lib/agent/llm'
+import { completeChat, streamChat } from '@/lib/agent/llm'
 
 let server: Server
 let baseUrl = ''
@@ -55,6 +55,12 @@ describe('offline LLM network boundary', () => {
         }
       }
       await expect(consumeStream()).rejects.toThrow(/offline mode/i)
+      expect(requests).toBe(0)
+
+      // The non-streaming intent/research path must fail closed too; it must
+      // not enter provider retries or the builtin SDK while offline.
+      await expect(completeChat(model, [{ role: 'user', content: 'test non-streaming' }]))
+        .rejects.toThrow(/offline mode/i)
       expect(requests).toBe(0)
     } finally {
       if (oldOffline === undefined) delete process.env.WAKIL_OFFLINE
