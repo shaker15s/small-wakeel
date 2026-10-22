@@ -110,21 +110,20 @@ export async function applyMigrations(
   const dir = migrationsDir ?? findMigrationsDir()
   if (!dir) throw new Error('db/migrations directory not found (run from the repo root or set WAKIL_PROJECT_ROOT)')
   const absolute = isAbsolute(dbPath) ? dbPath : join(process.cwd(), dbPath)
-  // Local libSQL currently has an upstream lock-leak edge case when a
-  // deferred transaction's COMMIT returns SQLITE_BUSY under rollback-journal
-  // mode: later writes may fail with P1008/SocketTimeout for the life of the
-  // process. WAL lets readers keep their snapshot without blocking COMMIT.
-  // Make the mode explicit before creating transactions; fail closed if the
-  // database cannot enter WAL rather than serving a fragile local ledger.
   const client: Client = createClient({ url: `file:${absolute}`, timeout: 10_000 })
   const applied: string[] = []
   let skipped = 0
   try {
+    // Preserve WAL but keep each migration inside an explicit immediate-write
+    // transaction. The recent batch API path passed a preliminary integrity
+    // check yet later surfaced SQLITE_CORRUPT/IOERR through Prisma. This path
+    // uses one client consistently for DDL and its checksum receipt.
     const journal = await client.execute('PRAGMA journal_mode = WAL')
     const journalMode = String(journal.rows[0]?.journal_mode ?? '').toLowerCase()
     if (journalMode !== 'wal') {
       throw new Error(`Local SQLite must use WAL journal mode; got ${journalMode || 'unknown'}`)
     }
+    await client.execute('PRAGMA busy_timeout = 10000')
     await client.execute('PRAGMA foreign_keys = ON')
     await client.execute('CREATE TABLE IF NOT EXISTS _WakilMigration (id TEXT PRIMARY KEY, checksum TEXT NOT NULL, appliedAt TEXT NOT NULL)')
     for (const id of readdirSync(dir).sort()) {
@@ -132,58 +131,34 @@ export async function applyMigrations(
       if (!existsSync(contentPath)) continue
       const content = readFileSync(contentPath, 'utf8')
       const checksum = createHash('sha256').update(content).digest('hex')
-      // Read the ledger first, then use Client.migrate() for an atomic file
-      // migration. Do not open one interactive client.transaction() per file:
-      // local @libsql/client versions can retain the detached native SQLite/WAL
-      // handle after commit/rollback; dozens of migrations then leave competing
-      // handles on the same test/runtime DB (observed SQLITE_IOERR_SHORT_READ).
-      const row = await client.execute({
-        sql: 'SELECT checksum FROM _WakilMigration WHERE id = ?',
-        args: [id],
-      })
-      const existing = row.rows[0]?.checksum as string | undefined
-      if (existing) {
-        if (existing !== checksum) throw new Error(`Migration checksum mismatch: ${id}`)
-        skipped++
-        continue
-      }
-
-      const statements = [
-        ...splitSqlStatements(content).map((sql) => ({ sql })),
-        {
-          sql: 'INSERT INTO _WakilMigration VALUES (?, ?, ?)',
-          args: [id, checksum, new Date().toISOString()],
-        },
-      ]
+      let isNew = false
+      // libsql modes: 'write' (immediate write lock) | 'read' | 'deferred'
+      const tx = await client.transaction('write')
       try {
-        // The library-managed migration path uses its active client handle and
-        // wraps all statements + the ledger receipt in one SQLite transaction.
-        await client.migrate(statements)
-        applied.push(id)
-      } catch (error) {
-        // Two app processes may race on first startup. If the other process
-        // atomically applied this exact checksum, treat it as already applied;
-        // otherwise preserve the original failure and stop boot.
-        const settled = await client.execute({
-          sql: 'SELECT checksum FROM _WakilMigration WHERE id = ?',
-          args: [id],
-        })
-        const settledChecksum = settled.rows[0]?.checksum as string | undefined
-        if (settledChecksum === checksum) {
-          skipped++
-          continue
+        const row = await tx.execute({ sql: 'SELECT checksum FROM _WakilMigration WHERE id = ?', args: [id] })
+        const existing = row.rows[0]?.checksum as string | undefined
+        if (existing) {
+          if (existing !== checksum) throw new Error(`Migration checksum mismatch: ${id}`)
+        } else {
+          for (const stmt of splitSqlStatements(content)) {
+            await tx.execute({ sql: stmt })
+          }
+          await tx.execute({ sql: 'INSERT INTO _WakilMigration VALUES (?, ?, ?)', args: [id, checksum, new Date().toISOString()] })
+          isNew = true
         }
-        throw error
+        await tx.commit()
+      } catch (e) {
+        await tx.rollback().catch(() => {})
+        throw e
       }
+      if (isNew) applied.push(id)
+      else skipped++
     }
     const fk = await client.execute('PRAGMA foreign_key_check')
     if (fk.rows.length) throw new Error('Migration foreign key check failed')
 
-    // Optional expensive full-database integrity verification. The caller can
-    // request this for throwaway fixtures / backup drills; run it on the SAME
-    // libsql client that performed migrations. Do not reopen a WAL-mode DB with
-    // Bun's SQLite engine between migrations and Prisma's first use: mixed
-    // native SQLite/libsql handles can disagree on WAL shared-memory state.
+    // For test fixtures / backup drills, check the migrated database through
+    // the same client that performed the migrations.
     if (options.integrityCheck) {
       const integrity = await client.execute('PRAGMA integrity_check')
       const result = String(integrity.rows[0]?.integrity_check ?? '')
