@@ -45,7 +45,7 @@ describe('live model acceptance contract', () => {
   test('acceptance sends the same record_sale schema as the real WAKIL tool registry', () => {
     const actual = brainToolSchemas().find((tool) => tool.function.name === 'record_sale')?.function
     expect(actual).toBeDefined()
-    expect(SALE_TOOL_ACCEPTANCE_SCHEMA).toEqual(actual)
+    expect(SALE_TOOL_ACCEPTANCE_SCHEMA).toEqual(actual!)
   })
 
   test('checks the real sale fields: identity, quantity, invoice total, and amount paid', () => {
