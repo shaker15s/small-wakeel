@@ -17,7 +17,6 @@ import { existsSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 import { PrismaClient } from '@prisma/client'
 import { PrismaLibSQL } from '@prisma/adapter-libsql'
-import { createClient } from '@libsql/client'
 import { isLocalSqliteUrl, sqliteBusyTimeoutMs } from './db-config'
 
 const globalForPrisma = globalThis as unknown as {
@@ -71,15 +70,13 @@ export function databaseUrl(): string {
 
 function createPrismaClient(): PrismaClient {
   const url = databaseUrl()
-  // Use an explicitly configured libSQL client so every local SQLite
-  // connection (including internal transaction connections) receives the same
-  // bounded busy timeout. A PRAGMA on a separate admin/test connection does
-  // not configure this client's connections.
-  const driver = createClient({
+  // Pass the bounded lock-wait timeout through the adapter's supported config
+  // API. A PRAGMA on a separate admin/test connection does not configure the
+  // adapter's own local SQLite connections.
+  const adapter = new PrismaLibSQL({
     url,
     ...(isLocalSqliteUrl(url) ? { timeout: sqliteBusyTimeoutMs() } : {}),
   })
-  const adapter = new PrismaLibSQL(driver)
   return new PrismaClient({
     adapter,
     // `log: ['query']` used to be hardcoded — it printed every SQL statement in
