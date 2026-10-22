@@ -196,7 +196,7 @@ export interface CashbookDTO {
   reminders: { id: string; subject: string }[]
   customers: { id: string; name: string; balance: number }[]
   suppliers: { id: string; name: string; balance: number }[]
-  entries: { id: string; kind: string; amount: number; partyName: string; dateSource: string; occurredOn: string; dueOn: string | null; cashDelta: number; operationRef: string; recordedAt: string; note: string; operation: { reversedByRef: string | null } }[]
+  entries: { id: string; kind: string; amount: number; partyName: string; dateSource: string; occurredOn: string; dueOn: string | null; cashDelta: number; operationRef: string; recordedAt: string; note: string; expectedCashKnown: boolean | null; operation: { reversedByRef: string | null } }[]
 }
 export const api = {
   speechStatus: () => get<{ available: boolean; providerLabel: string | null }>('/api/speech'),
