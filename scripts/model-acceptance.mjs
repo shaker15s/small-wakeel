@@ -27,6 +27,7 @@
  */
 import { createHash } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
+import { evaluateExpectedSaleCall, isLiveAcceptanceEndpoint, resolveChatCompletionsUrl } from './lib/model-acceptance-contract.mjs'
 
 const BASE = (process.env.WAKIL_ACCEPTANCE_BASE_URL ?? '').replace(/\/$/, '')
 const KEY = process.env.WAKIL_ACCEPTANCE_API_KEY ?? ''
@@ -48,7 +49,7 @@ const TOOL = {
   parameters: {
     type: 'object',
     properties: { item: { type: 'string' }, qty: { type: 'number' }, amount: { type: 'number' } },
-    required: ['item'],
+    required: ['item', 'qty', 'amount'],
   },
 }
 const READ_TOOL = {
@@ -58,7 +59,7 @@ const READ_TOOL = {
 }
 
 async function chat(model, messages, { tools, stream = false } = {}) {
-  const url = `${BASE}/chat/completions`
+  const url = resolveChatCompletionsUrl(BASE)
   const body = { model, messages, stream, ...(tools ? { tools: tools.map((t) => ({ type: 'function', function: t })) } : {}) }
   const started = Date.now()
   let ttft = null
@@ -134,9 +135,8 @@ async function runModel(model) {
     ], { tools: [TOOL, READ_TOOL] })
     const parsed = safeJson(r.raw)
     const calls = extractToolCalls(parsed)
-    const first = calls[0]
-    const called = first?.name === 'record_sale'
-    add('A3', 'tool calling: right tool + args', called, called ? `args=${JSON.stringify(first.args)}` : `got=${first ? first.name : '(none)'} raw=${r.raw.slice(0, 200)}`)
+    const validation = evaluateExpectedSaleCall(calls)
+    add('A3', 'tool calling: right tool + exact expected arguments', validation.passed, validation.detail)
   } catch (e) {
     add('A3', 'tool calling: right tool + args', false, e.message)
   }
@@ -192,10 +192,7 @@ function rTokens(parsed) {
   return it || ot ? { inputTokens: it, outputTokens: ot } : null
 }
 
-const isMockEndpoint =
-  !BASE ||
-  /localhost|127\.0\.0\.1|0\.0\.0\.0/.test(BASE) ||
-  MODELS.some((m) => m.includes('mock'))
+const isMockEndpoint = !isLiveAcceptanceEndpoint(BASE, KEY, MODELS)
 
 const startedAt = new Date().toISOString()
 const results = []
