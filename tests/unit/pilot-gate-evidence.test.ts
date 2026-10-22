@@ -1,7 +1,13 @@
+import { createHash } from 'node:crypto'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, test } from 'bun:test'
 import {
   hasShaBoundCiArtifact,
   selectSuccessfulHostedCiRun,
+  verifyEvidenceReportHash,
+  reportsMatchHashes,
   validateCapacityEvidence,
   validateIndependentSecurityAudit,
   validateP0P8Evidence,
@@ -32,8 +38,34 @@ describe('release-gate evidence is exact-SHA and evidence-bound', () => {
     expect(hasShaBoundCiArtifact([{ name: `launch-gate-${sha}`, expired: true, size_in_bytes: 100 }], sha)).toBe(false)
   })
 
+  test('hashes actual local report bytes and rejects missing, altered, or escaping report paths', () => {
+    const root = mkdtempSync(join(tmpdir(), 'wakil-evidence-'))
+    try {
+      const directory = join(root, 'docs/evidence/artifacts')
+      mkdirSync(directory, { recursive: true })
+      const bytes = Buffer.from('independent report bytes for the evidence gate')
+      writeFileSync(join(directory, 'report.pdf'), bytes)
+      writeFileSync(join(root, 'outside.pdf'), bytes)
+      const digest = createHash('sha256').update(bytes).digest('hex')
+      expect(verifyEvidenceReportHash('docs/evidence/artifacts/report.pdf', digest, root)).toBe(true)
+      expect(verifyEvidenceReportHash('docs/evidence/artifacts/report.pdf', 'c'.repeat(64), root)).toBe(false)
+      expect(verifyEvidenceReportHash('outside.pdf', digest, root)).toBe(false)
+      expect(verifyEvidenceReportHash('../outside.pdf', digest, root)).toBe(false)
+      expect(reportsMatchHashes({
+        targetCommitSha: sha,
+        gates: [{ reportPath: 'docs/evidence/artifacts/report.pdf', reportSha256: digest }],
+      }, root)).toBe(true)
+      expect(reportsMatchHashes({
+        targetCommitSha: sha,
+        gates: [{ reportPath: 'docs/evidence/artifacts/report.pdf', reportSha256: 'd'.repeat(64) }],
+      }, root)).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   test('P0–P8 requires all nine gate entries with report URLs and SHA256 digests', () => {
-    const gates = Array.from({ length: 9 }, (_, i) => ({ id: `P${i}`, status: 'passed', reportUrl: 'https://evidence.example/report', reportSha256: reportHash }))
+    const gates = Array.from({ length: 9 }, (_, i) => ({ id: `P${i}`, status: 'passed', reportUrl: 'https://evidence.example/report', reportPath: `docs/evidence/artifacts/p${i}.pdf`, reportSha256: reportHash }))
     expect(validateP0P8Evidence({ targetCommitSha: sha, gates }, sha)).toBe(true)
     expect(validateP0P8Evidence({ targetCommitSha: 'c'.repeat(40), gates }, sha)).toBe(false)
     expect(validateP0P8Evidence({ targetCommitSha: sha, gates: gates.slice(0, 8) }, sha)).toBe(false)
@@ -43,7 +75,7 @@ describe('release-gate evidence is exact-SHA and evidence-bound', () => {
     const evidence = {
       targetCommitSha: sha, status: 'passed', independenceConfirmed: true,
       auditor: { name: 'Independent Reviewer', organization: 'External Audit Firm' },
-      reportUrl: 'https://audit.example/report', reportSha256: reportHash,
+      reportUrl: 'https://audit.example/report', reportPath: 'docs/evidence/artifacts/independent-audit.pdf', reportSha256: reportHash,
       scope: 'Security, tenant isolation, financial writes', completedAt: '2026-10-22T00:00:00Z',
     }
     expect(validateIndependentSecurityAudit(evidence, sha)).toBe(true)
@@ -56,7 +88,7 @@ describe('release-gate evidence is exact-SHA and evidence-bound', () => {
       targetCommitSha: sha, status: 'passed', environmentClass: 'production-like',
       testSuite: 'load-v1', testedAt: '2026-10-22T00:00:00Z',
       metrics: { requestCount: 1000, concurrency: 20, p50Ms: 100, p95Ms: 300, p99Ms: 500, errorRatePct: 0 },
-      reportUrl: 'https://load.example/report', reportSha256: reportHash,
+      reportUrl: 'https://load.example/report', reportPath: 'docs/evidence/artifacts/capacity.pdf', reportSha256: reportHash,
     }
     expect(validateCapacityEvidence(evidence, sha)).toBe(true)
     expect(validateCapacityEvidence({ ...evidence, targetCommitSha: 'c'.repeat(40) }, sha)).toBe(false)
