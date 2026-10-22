@@ -87,17 +87,17 @@ export async function POST(req: NextRequest) {
     const name = String(body.name ?? '').trim()
     if (!name) return badRequest('اسم المنشأة مطلوب')
 
-    const cash =
+    const openingCashEgp =
       typeof body.openingCashEgp === 'number'
         ? body.openingCashEgp
         : typeof body.openingCash === 'number'
           ? body.openingCash
-          : 0
+          : undefined
 
     const created = await createNewBusinessWithDefaults({
       name,
       type: String(body.type ?? 'supermarket').trim() || 'supermarket',
-      openingCashEgp: cash,
+      ...(openingCashEgp !== undefined ? { openingCashEgp } : {}),
       ownerName: body.ownerName,
       customItems: Array.isArray(body.customItems) ? body.customItems : undefined,
     })
