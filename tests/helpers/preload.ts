@@ -14,6 +14,9 @@
 // Setting the environment variable per file was never enough: whichever module
 // graph loads first wins. A preload is the only place that is guaranteed to run
 // first.
-import { ensureTestDatabase } from './test-db'
+import { ensureTestDatabaseReady } from './test-db'
 
-ensureTestDatabase()
+// Top-level await is intentional: preload scripts complete before Bun loads
+// test modules, so no singleton can open the file while the migration/WAL mode
+// transition is still in flight.
+await ensureTestDatabaseReady()

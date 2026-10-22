@@ -48,10 +48,21 @@ export function ensureTestDatabase(): string {
   return target
 }
 
+/**
+ * The preload must await migrations before Bun evaluates any test module.
+ * Some tests import the Prisma singleton at module scope, before beforeAll().
+ * Merely starting this promise in preload leaves a race while WAL/schema are
+ * being initialized, which can corrupt the copied test DB or surface SQLITE_IOERR.
+ */
+export async function ensureTestDatabaseReady(): Promise<string> {
+  const target = ensureTestDatabase()
+  if (migrationPromise) await migrationPromise
+  return target
+}
+
 /** The Prisma handle bound to the shared temp copy of the seeded database. */
 export async function testDb() {
-  ensureTestDatabase()
-  if (migrationPromise) await migrationPromise
+  await ensureTestDatabaseReady()
   const mod = await import('../../src/lib/db')
   return mod.db as import('@prisma/client').PrismaClient
 }
