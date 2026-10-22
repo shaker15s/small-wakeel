@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, lstatSync } from 'node:fs'
+import { lstatSync } from 'node:fs'
 import { join } from 'node:path'
 
 /**
@@ -65,11 +65,11 @@ export function readCommittedSyntheticSqlite(root) {
   for (const suffix of ['-wal', '-shm', '-journal']) {
     const path = source + suffix
     try {
-      if (existsSync(path)) {
-        const st = lstatSync(path)
-        sidecars.push({ name: suffix, size: st.size, symlink: st.isSymbolicLink() })
-      }
-    } catch {
+      // lstat catches dangling symlinks too; existsSync alone would miss those.
+      const st = lstatSync(path)
+      sidecars.push({ name: suffix, size: st.size, symlink: st.isSymbolicLink() })
+    } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') continue
       sidecars.push({ name: suffix, size: 1, symlink: true })
     }
   }
