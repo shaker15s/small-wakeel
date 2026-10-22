@@ -81,6 +81,7 @@ const nextConfig: NextConfig = {
   outputFileTracingIncludes: {
     "/*": [
       "./node_modules/@libsql/client/**/*",
+      "./node_modules/@libsql/core/**/*",
       "./node_modules/@libsql/hrana-client/**/*",
       "./node_modules/@libsql/isomorphic-ws/**/*",
       "./node_modules/libsql/**/*",
