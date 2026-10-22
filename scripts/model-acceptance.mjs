@@ -59,6 +59,11 @@ const READ_TOOL = {
 }
 
 async function chat(model, messages, { tools, stream = false } = {}) {
+  // Do not send a real credential to localhost, a private endpoint, HTTP, or a mock.
+  // A mock can still be exercised when no API key is configured.
+  if (KEY && !isLiveAcceptanceEndpoint(BASE, KEY, MODELS)) {
+    throw new Error('Refusing to send WAKIL_ACCEPTANCE_API_KEY to a non-HTTPS, private, or mock endpoint')
+  }
   const url = resolveChatCompletionsUrl(BASE)
   const body = { model, messages, stream, ...(tools ? { tools: tools.map((t) => ({ type: 'function', function: t })) } : {}) }
   const started = Date.now()
