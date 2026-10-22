@@ -593,7 +593,7 @@ async function chat(req: Request) {
       return tool.type === "function" &&
         tool.function?.name === "record_sale" &&
         !!properties &&
-        ["name", "qty", "total", "paid"].every((key) => Object.prototype.hasOwnProperty.call(properties, key));
+        ["name", "qty", "price", "total", "paid"].every((key) => Object.prototype.hasOwnProperty.call(properties, key));
     });
     if (body.stream || !saleTool) {
       return json({ error: { message: "record-sale-v1 requires the non-streaming record_sale tool schema" } }, 422);
@@ -630,75 +630,7 @@ async function chat(req: Request) {
     });
   }
 
-  // Explicit model-acceptance fixtures exercise the OpenAI-compatible adapter
-  // contract deterministically. They do NOT model LLM instruction-following;
-  // the report stays environment=mock and can never prove live acceptance.
-  const acceptanceProbe = req.headers.get("x-wakil-acceptance-probe")
-  const availableToolNames = (Array.isArray(body.tools) ? body.tools : []).flatMap((entry) => {
-    if (!entry || typeof entry !== "object" || !("function" in entry)) return []
-    const fn = (entry as { function?: { name?: unknown } }).function
-    return typeof fn?.name === "string" ? [fn.name] : []
-  })
-  const acceptanceCreated = Math.floor(Date.now() / 1000)
-  if (acceptanceProbe === "record-sale-v1") {
-    if (!availableToolNames.includes("record_sale")) {
-      return json({ error: { message: "record-sale-v1 requires the record_sale function schema" } }, 400)
-    }
-    if (body.stream) {
-      return json({ error: { message: "record-sale-v1 is a non-streaming contract fixture" } }, 400)
-    }
-    return json({
-      id: uid(),
-      object: "chat.completion",
-      created: acceptanceCreated,
-      model,
-      choices: [{
-        index: 0,
-        message: {
-          role: "assistant",
-          content: null,
-          tool_calls: [{
-            id: "call_acceptance_sale",
-            type: "function",
-            function: {
-              name: "record_sale",
-              arguments: JSON.stringify({
-                name: "علبة زيت عباد 1.5 لتر",
-                qty: 3,
-                price: 85,
-                total: 255,
-                paid: 255,
-              }),
-            },
-          }],
-        },
-        finish_reason: "tool_calls",
-      }],
-      usage: { prompt_tokens: 96, completion_tokens: 48, total_tokens: 144 },
-    })
-  }
-  if (acceptanceProbe === "read-only-refusal-v1") {
-    if (body.stream) {
-      return json({ error: { message: "read-only-refusal-v1 is a non-streaming contract fixture" } }, 400)
-    }
-    return json({
-      id: uid(),
-      object: "chat.completion",
-      created: acceptanceCreated,
-      model,
-      choices: [{
-        index: 0,
-        message: {
-          role: "assistant",
-          content: "لن أنشئ مسودة بيع في وضع القراءة فقط.",
-        },
-        finish_reason: "stop",
-      }],
-      usage: { prompt_tokens: 96, completion_tokens: 24, total_tokens: 120 },
-    })
-  }
-
-  const { reasoning, content } = buildReply(model, messages);
+    const { reasoning, content } = buildReply(model, messages);
   const id = uid();
   const created = Math.floor(Date.now() / 1000);
 
