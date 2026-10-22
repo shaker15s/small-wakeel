@@ -4,7 +4,9 @@ import {
   evaluateExpectedSaleCall,
   isLiveAcceptanceEndpoint,
   resolveChatCompletionsUrl,
+  SALE_TOOL_ACCEPTANCE_SCHEMA,
 } from '../../scripts/lib/model-acceptance-contract.mjs'
+import { brainToolSchemas } from '@/lib/agent/tool-schemas'
 
 describe('live model acceptance contract', () => {
   test('uses Google official OpenAI-compatible endpoint instead of the wrong route', () => {
@@ -40,20 +42,36 @@ describe('live model acceptance contract', () => {
     expect(() => assertSafeAcceptanceCredentialTarget('http://127.0.0.1:3031/v1', '', ['mock-model'])).not.toThrow()
   })
 
-  test('accepts only a sale call with the expected product identity, quantity and amount', () => {
+  test('acceptance sends the same record_sale schema as the real WAKIL tool registry', () => {
+    const actual = brainToolSchemas().find((tool) => tool.function.name === 'record_sale')?.function
+    expect(actual).toBeDefined()
+    expect(SALE_TOOL_ACCEPTANCE_SCHEMA).toEqual(actual)
+  })
+
+  test('checks the real sale fields: identity, quantity, invoice total, and amount paid', () => {
     expect(evaluateExpectedSaleCall([{
       name: 'record_sale',
-      args: { item: 'علبة زيت عباد 1.5 لتر', qty: 3, amount: 255 },
+      args: { name: 'علبة زيت عباد 1.5 لتر', qty: 3, total: 255, paid: 255 },
     }]).passed).toBe(true)
 
     expect(evaluateExpectedSaleCall([{
       name: 'record_sale',
-      args: { item: 'علبة زيت عباد 1.5 لتر', qty: 3, amount: 999 },
+      args: { name: 'علبة زيت عباد 1.5 لتر', qty: 3, total: 999, paid: 255 },
     }]).passed).toBe(false)
 
     expect(evaluateExpectedSaleCall([{
       name: 'record_sale',
-      args: { item: 'زيت عباد 1.5 لتر', amount: 255 },
+      args: { name: 'علبة زيت عباد 1.5 لتر', qty: 3, total: 255 },
+    }]).passed).toBe(false)
+
+    expect(evaluateExpectedSaleCall([{
+      name: 'record_sale',
+      args: { name: 'علبة زيت عباد 1.5 لتر', qty: 3, total: '٢٥٥', paid: '٢٥٥' },
+    }]).passed).toBe(true)
+
+    expect(evaluateExpectedSaleCall([{
+      name: 'record_sale',
+      args: { name: 'علبة زيت عباد 1.5 لتر', total: 255, paid: 255 },
     }]).passed).toBe(false)
   })
 
