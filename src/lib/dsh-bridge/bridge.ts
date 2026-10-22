@@ -350,7 +350,10 @@ async function normalizeDraftPayload(type: OpType, sourceValue: unknown, busines
       lines.push({ itemId, qty, unitPrice, total: lineTotal })
     }
 
-    const paid = source.paidEgp == null ? total : egpToPiastres(source.paidEgp, 'paidEgp', true)
+    if (source.paidEgp === undefined || source.paidEgp === null) {
+      throw new WakilBridgeError(422, 'المدفوع غير محدد. اسأل المالك هل العملية كاش بالكامل أو آجل أو مدفوع منها جزء؛ لا تفترض طريقة السداد.')
+    }
+    const paid = egpToPiastres(source.paidEgp, 'paidEgp', true)
     if (paid > total) throw new WakilBridgeError(400, 'المدفوع أكبر من إجمالي العملية')
     const payload: Record<string, unknown> = { lines, total, paid }
     if (source.note != null) {
@@ -423,7 +426,10 @@ async function normalizeDraftPayload(type: OpType, sourceValue: unknown, busines
   if (type === 'membership') {
     onlyKeys(source, ['totalEgp', 'paidEgp', 'customerId', 'customerName', 'months', 'plan', 'note'], type)
     const total = egpToPiastres(source.totalEgp, 'totalEgp')
-    const paid = source.paidEgp == null ? total : egpToPiastres(source.paidEgp, 'paidEgp', true)
+    if (source.paidEgp === undefined || source.paidEgp === null) {
+      throw new WakilBridgeError(422, 'المبلغ المدفوع للاشتراك غير محدد. اسأل المالك قبل تجهيز المسودة.')
+    }
+    const paid = egpToPiastres(source.paidEgp, 'paidEgp', true)
     if (paid > total) throw new WakilBridgeError(400, 'المدفوع أكبر من إجمالي الاشتراك')
     const customerId = optionalString(source.customerId, 'customerId', 100)
     const customerName = optionalString(source.customerName, 'customerName', 100)
