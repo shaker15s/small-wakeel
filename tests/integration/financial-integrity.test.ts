@@ -107,6 +107,18 @@ describe('financial write boundary', () => {
       payload: { total: 7000 }, idempotencyKey: legacy.idempotencyKey,
     })).rejects.toBeInstanceOf(OperationValidationError)
   })
+  test('a present payloadHash cannot mask a tampered stored payload during replay', async () => {
+    const op = await expense(7000)
+    await db.operation.update({
+      where: { id: op.id },
+      data: { payload: JSON.stringify({ total: 8000 }) },
+    })
+    await expect(createDraft({
+      businessId: business.id, userId: owner.id, type: 'expense', summary: key(),
+      payload: { total: 7000 }, idempotencyKey: op.idempotencyKey,
+    })).rejects.toBeInstanceOf(OperationValidationError)
+    expect(await db.operation.count({ where: { idempotencyKey: op.idempotencyKey } })).toBe(1)
+  })
   test('concurrent creation with one key produces one draft and one audit', async () => {
     const params = { businessId: business.id, userId: owner.id, type: 'expense' as const, summary: key(), payload: { total: 100 }, idempotencyKey: key() }
     const rows = await Promise.all([createDraft(params), createDraft(params), createDraft(params)])
