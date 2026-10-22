@@ -1,17 +1,18 @@
 // Synthetic restore rehearsal ONLY; does not establish production RPO/RTO.
 import { applyMigrations } from './lib/migrations'
 import assert from 'node:assert/strict'
-import { copyFileSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createClient, type Client } from '@libsql/client'
+import { snapshotSqlite } from './lib/sqlite-snapshot'
 
 const start = Date.now()
 const dir = mkdtempSync(join(tmpdir(), 'wakil-backup-drill-'))
 const sourcePath = join(dir, 'source.db')
 const backupPath = join(dir, 'snapshot.db')
 const restoredPath = join(dir, 'restored.db')
-copyFileSync(join(process.cwd(), 'db/custom.db'), sourcePath)
+snapshotSqlite(join(process.cwd(), 'db/custom.db'), sourcePath)
 await applyMigrations(sourcePath)
 const source = createClient({ url: `file:${sourcePath}` })
 let restored: Client | undefined

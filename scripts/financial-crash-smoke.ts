@@ -1,15 +1,16 @@
 // Real SIGKILL/reopen evidence for SQLite execution atomicity, NOT storage/HA
 // certification. Uses a disposable migrated DB and separate executor processes.
 import assert from 'node:assert/strict'
-import { copyFileSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { PrismaClient } from '@prisma/client'
 import { PrismaLibSQL } from '@prisma/adapter-libsql'
 import { applyMigrations } from './lib/migrations'
+import { snapshotSqlite } from './lib/sqlite-snapshot'
 const dir = mkdtempSync(join(tmpdir(), 'wakil-financial-crash-')), path = join(dir, 'fixture.db')
-copyFileSync(join(process.cwd(), 'db/custom.db'), path)
+snapshotSqlite(join(process.cwd(), 'db/custom.db'), path)
 await applyMigrations(path)
 const db = new PrismaClient({ adapter: new PrismaLibSQL({ url: `file:${path}` }) })
 const env = { ...process.env, NODE_ENV: 'production', DATABASE_URL: `file:${path}`, WAKIL_SAAS_ENABLED: '0', WAKIL_SCHEDULER: 'off' }
