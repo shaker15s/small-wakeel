@@ -3415,7 +3415,7 @@ async function reflectOnDraft(args: {
       console.error('[audit] trail write failed:', err)
     }
   }
-  void decisionEngine.syncSystemOnMutation({
+  await decisionEngine.syncSystemOnMutation({
     businessId: args.businessId,
     userId: args.userId,
     mutationKind: 'system_updated',
