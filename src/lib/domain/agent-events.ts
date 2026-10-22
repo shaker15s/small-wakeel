@@ -65,17 +65,23 @@ export function redactPayload(value: unknown): string {
 /** Open a turn trace and log its first row (sequence 0). */
 export async function startTrace(input: { businessId: string; conversationId?: string | null }): Promise<string> {
   const traceId = `trc_${randomUUID().replace(/-/g, '').slice(0, 24)}`
-  await db.agentEvent.create({
-    data: {
-      businessId: input.businessId,
-      traceId,
-      conversationId: input.conversationId ?? null,
-      sequence: 0,
-      type: 'turn.started',
-      actor: 'system',
-      payload: redactPayload({ conversationId: input.conversationId ?? null }),
-    },
-  })
+  // Use a direct, parameterized INSERT instead of Prisma create/RETURNING.
+  // The configured LibSQL adapter can read and execute raw SQLite statements
+  // on this table, while Prisma's generated create query produced SQLITE_IOERR
+  // in the actual CI fixture. This ledger does not need a returned row.
+  await db.$executeRawUnsafe(
+    'INSERT INTO "AgentEvent" ("id", "businessId", "traceId", "conversationId", "sequence", "type", "actor", "payload", "operationRef", "payloadHash") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    `evt_${randomUUID().replace(/-/g, '')}`,
+    input.businessId,
+    traceId,
+    input.conversationId ?? null,
+    0,
+    'turn.started',
+    'system',
+    redactPayload({ conversationId: input.conversationId ?? null }),
+    null,
+    null,
+  )
   return traceId
 }
 
@@ -106,19 +112,19 @@ export async function logAgentEvent(input: {
       where: { traceId: input.traceId, businessId: input.businessId },
       _max: { sequence: true },
     })
-    await tx.agentEvent.create({
-      data: {
-        businessId: input.businessId,
-        traceId: input.traceId,
-        conversationId: input.conversationId ?? null,
-        sequence: (seq._max.sequence ?? -1) + 1,
-        type: input.type,
-        actor: input.actor,
-        payload: redactPayload(input.payload ?? null),
-        operationRef: input.operationRef ?? null,
-        payloadHash: input.payload == null ? null : canonicalPayloadHash(input.payload),
-      },
-    })
+    await tx.$executeRawUnsafe(
+      'INSERT INTO "AgentEvent" ("id", "businessId", "traceId", "conversationId", "sequence", "type", "actor", "payload", "operationRef", "payloadHash") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      `evt_${randomUUID().replace(/-/g, '')}`,
+      input.businessId,
+      input.traceId,
+      input.conversationId ?? null,
+      (seq._max.sequence ?? -1) + 1,
+      input.type,
+      input.actor,
+      redactPayload(input.payload ?? null),
+      input.operationRef ?? null,
+      input.payload == null ? null : canonicalPayloadHash(input.payload),
+    )
   })
 }
 
