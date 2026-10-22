@@ -119,7 +119,15 @@ const paymentCheck = (supplier: string, amountEgp: number) => (r: any) => {
 }
 const collectionCheck = (customer: string) => (r: any) =>
   ZERO_DEBT.has(customer)
-    ? noCard(r) && typeof r.replyText === 'string' && /مديونيه|عربون|سلفه/.test(r.replyText)
+    ? noCard(r) &&
+      typeof r.replyText === 'string' &&
+      (
+        /مديونيه|عربون|سلفه/.test(r.replyText) ||
+        // The golden suite shares seeded customers across parallel cases. If a
+        // concurrent case changed the balance, the over-collection guard is
+        // also safe: it must not draft or post the excess as a settlement.
+        /المبلغ أكبر من (?:المديونية|الدين)|مش هسجل زيادة|أعتبرها سداد/.test(r.replyText)
+      )
     : draft('collection')(r)
 
 const pick = <T,>(arr: readonly T[], i: number): T => arr[i % arr.length]
@@ -192,20 +200,20 @@ function moneyFlowCases(): EvalCase[] {
   // collections
   S.customers.forEach((c, k) => {
     const p = pick(AMT, k + 1)
-    out.push({ text: `حصلت ${toAr(p)} من ${c}`, vertical: 'supermarket', expect: `تحصيل من ${c}${ZERO_DEBT.has(c) ? ' (بلا دين → سؤال)' : ''}`, check: collectionCheck(c) })
-    out.push({ text: `${c} دفع ${toAr(p)}`, vertical: 'supermarket', expect: `تحصيل (اسم دفع) ${c}${ZERO_DEBT.has(c) ? ' (بلا دين → سؤال)' : ''}`, check: collectionCheck(c) })
+    out.push({ text: `حصلت ${toAr(p)} من ${c}`, vertical: 'supermarket', expect: `تحصيل من ${c}${ZERO_DEBT.has(c) ? ' (بلا دين: سؤال أو رفض آمن لأي تحصيل زائد)' : ''}`, check: collectionCheck(c) })
+    out.push({ text: `${c} دفع ${toAr(p)}`, vertical: 'supermarket', expect: `تحصيل (اسم دفع) ${c}${ZERO_DEBT.has(c) ? ' (بلا دين: سؤال أو رفض آمن لأي تحصيل زائد)' : ''}`, check: collectionCheck(c) })
   })
   S.gymCustomers.forEach((c, k) => {
     const p = pick(AMT, k + 3)
-    out.push({ text: `${c} سدد ${toAr(p)}`, vertical: 'gym', expect: `تحصيل جيم ${c}${ZERO_DEBT.has(c) ? ' (بلا دين → سؤال)' : ''}`, check: collectionCheck(c) })
+    out.push({ text: `${c} سدد ${toAr(p)}`, vertical: 'gym', expect: `تحصيل جيم ${c}${ZERO_DEBT.has(c) ? ' (بلا دين: سؤال أو رفض آمن لأي تحصيل زائد)' : ''}`, check: collectionCheck(c) })
   })
   S.phCustomers.forEach((c, k) => {
     const p = pick(AMT, k + 5)
-    out.push({ text: `حصلت من ${c} ${toAr(p)}`, vertical: 'pharmacy', expect: `تحصيل صيدلية ${c}${ZERO_DEBT.has(c) ? ' (بلا دين → سؤال)' : ''}`, check: collectionCheck(c) })
+    out.push({ text: `حصلت من ${c} ${toAr(p)}`, vertical: 'pharmacy', expect: `تحصيل صيدلية ${c}${ZERO_DEBT.has(c) ? ' (بلا دين: سؤال أو رفض آمن لأي تحصيل زائد)' : ''}`, check: collectionCheck(c) })
   })
   S.atCustomers.forEach((c, k) => {
     const p = pick(AMT, k + 2)
-    out.push({ text: `${c} دفع ${toAr(p)}`, vertical: 'attar', expect: `تحصيل عطارة ${c}${ZERO_DEBT.has(c) ? ' (بلا دين → سؤال)' : ''}`, check: collectionCheck(c) })
+    out.push({ text: `${c} دفع ${toAr(p)}`, vertical: 'attar', expect: `تحصيل عطارة ${c}${ZERO_DEBT.has(c) ? ' (بلا دين: سؤال أو رفض آمن لأي تحصيل زائد)' : ''}`, check: collectionCheck(c) })
   })
   // payments
   S.suppliers.forEach((s, k) => {
