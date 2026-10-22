@@ -168,8 +168,8 @@ describe('native DSH bridge — owner-bound and draft-only', () => {
     expect(first.body.ok).toBe(true)
     expect(first.body.data?.draft?.status).toBe('AWAITING_APPROVAL')
     expect(first.body.data?.draft?.type).toBe('sale')
-    expect(first.body.data.ownerApprovalRequired).toBe(true)
-    expect(first.body.data.mutationExecuted).toBe(false)
+    expect(first.body.data?.ownerApprovalRequired).toBe(true)
+    expect(first.body.data?.mutationExecuted).toBe(false)
     expect(first.body.data?.draft?.payload.total).toBe(5_000)
     expect(first.body.data?.draft?.payload.paid).toBe(5_000)
 
