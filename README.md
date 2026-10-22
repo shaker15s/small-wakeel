@@ -22,7 +22,7 @@ Four verticals ship in the seed data — **سوبر ماركت، عطارة، ص
 
 | Concern | How Wakil answers it |
 |---|---|
-| **A model must never invent money** | Every write is a *draft* (`AWAITING_APPROVAL`) with a server-computed card. The LLM proposes; deterministic TypeScript executes (`src/lib/domain/executors.ts`). Approve is an atomic compare-and-set: an operation can execute **exactly once**, and every effect lands in a single DB transaction. |
+| **A model must never invent money** | Every write is a *draft* (`AWAITING_APPROVAL`) with a server-computed card. The LLM and staff propose; **the owner approves by default**; deterministic TypeScript executes (`src/lib/domain/executors.ts`). Cashiers/reception cannot approve. Supervisors may approve only R1/R2 if an operator explicitly enables `WAKIL_ALLOW_DELEGATED_APPROVALS=1`; R3 remains owner-only. Approval is an atomic compare-and-set: an operation executes **exactly once**, and effects land in a single DB transaction. |
 | **Verified answers** | `src/lib/agent/verify.ts` re-reads the database after a write and checks the numbers it reported (`checks[]`), so the reply can't drift from the ledger. |
 | **Arabic that Egyptians actually type** | Dialect normalisation, Arabic-Indic digits, word-numbers («نص كيلو»), broken plurals («النواقص»), unit conversion, alias matching — see `src/lib/agent/arabic.ts` and the golden eval suite. |
 | **Model outages must not stop the shop** | A fallback ladder walks the requested model → the closest-tier enabled BYO model → the built-in gateway, announces the switch, and only then drops to the deterministic rule ladder (`WAKIL_OFFLINE=1` reproduces that path in tests). |
