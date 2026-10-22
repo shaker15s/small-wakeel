@@ -66,7 +66,7 @@ export async function cashPositionEvidence(
 ): Promise<CashPositionEvidence> {
   const [business, profile, cashEntries, countEntries] = await Promise.all([
     tx.business.findUniqueOrThrow({ where: { id: businessId }, select: { openingCash: true } }),
-    tx.businessProfile.findUnique({ where: { businessId }, select: { openingCashStatedAt: true } }),
+    tx.businessProfile.findUnique({ where: { businessId }, select: { openingCashStatedAt: true, answers: true } }),
     tx.cashEntry.findMany({ where: { businessId }, select: { direction: true, amount: true, ref: true } }),
     tx.cashbookEntry.findMany({
       where: { businessId, kind: 'cash_count' },
@@ -77,11 +77,19 @@ export async function cashPositionEvidence(
     }),
   ])
 
-  // If a profile exists and its opening-cash marker is null, that explicit
-  // unknown state overrides a leftover legacy numeric value in Business.
-  const openingCashKnown = profile
-    ? profile.openingCashStatedAt !== null
-    : business.openingCash !== 0
+  // A stored numeric zero is not proof by itself. Prefer the explicit owner
+  // answer/marker; infer a nonzero legacy opening only if the owner has not
+  // explicitly skipped this question in the newer business profile.
+  const profileAnswers = profile ? countPayload(profile.answers) : {}
+  const rawOpeningAnswer = profileAnswers.openingCash
+  const openingAnswer = rawOpeningAnswer && typeof rawOpeningAnswer === 'object' && !Array.isArray(rawOpeningAnswer)
+    ? rawOpeningAnswer as Record<string, unknown>
+    : null
+  const openingWasSkipped = openingAnswer?.skipped === true || openingAnswer?.value === null
+  const openingWasAnswered = typeof openingAnswer?.value === 'number' && openingAnswer.skipped !== true
+  const openingCashKnown = profile?.openingCashStatedAt !== null && profile?.openingCashStatedAt !== undefined
+    || openingWasAnswered
+    || (!openingWasSkipped && business.openingCash !== 0)
   const activeCounts = countEntries.filter((entry) => entry.operation.reversedByRef === null)
   const currentCashKnown = openingCashKnown || activeCounts.length > 0
   const allCountRefs = countEntries.map((entry) => entry.operationRef)
