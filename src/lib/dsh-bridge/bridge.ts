@@ -269,31 +269,103 @@ async function uniquePartyId(
 
 async function normalizeDraftPayload(type: OpType, sourceValue: unknown, businessId: string): Promise<Record<string, unknown>> {
   const source = record(sourceValue, 'payload')
+
   if (type === 'sale' || type === 'purchase') {
     onlyKeys(source, ['lines', 'paidEgp', 'customerId', 'customerName', 'supplierId', 'supplierName', 'note'], type)
     if (!Array.isArray(source.lines) || source.lines.length < 1 || source.lines.length > 20) {
       throw new WakilBridgeError(400, 'مسودة البيع أو الشراء تحتاج من بند إلى 20 بندًا')
     }
-    const lines = source.lines.map((entry, index) => {
-      const line = record(entry, 'lines[' + index + ']')
+
+    // Materialize every fact that createDraft's validator would otherwise add.
+    // This makes the idempotency hash stable on retries: input and persisted
+    // payload are byte-equivalent in meaning before the domain executor runs.
+    const lines: Record<string, unknown>[] = []
+    let total = 0
+    for (let index = 0; index < source.lines.length; index++) {
+      const line = record(source.lines[index], 'lines[' + index + ']')
       onlyKeys(line, ['itemId', 'qty', 'unitPriceEgp'], 'lines[' + index + ']')
       const itemId = requiredString(line.itemId, 'lines[' + index + '].itemId', 100)
       const qty = integer(line.qty, 'lines[' + index + '].qty', 1, 1_000_000)
-      const unitPrice = line.unitPriceEgp == null ? undefined : egpToPiastres(line.unitPriceEgp, 'lines[' + index + '].unitPriceEgp')
-      return { itemId, qty, ...(unitPrice === undefined ? {} : { unitPrice }) }
-    })
-    const payload: Record<string, unknown> = { lines }
-    if (source.paidEgp !== undefined && source.paidEgp !== null) payload.paid = egpToPiastres(source.paidEgp, 'paidEgp', true)
-    if (source.note !== undefined) payload.note = requiredString(source.note, 'note', 1000)
+      const item = await db.item.findFirst({
+        where: { id: itemId, businessId },
+        select: { id: true, name: true, stockQty: true, sellPrice: true, costPrice: true },
+      })
+      if (!item) throw new WakilBridgeError(400, 'الصنف المحدد غير موجود في كتالوج النشاط الحالي')
+      if (type === 'sale') {
+        if (item.stockQty === null) {
+          throw new WakilBridgeError(422, 'رصيد مخزون «' + item.name + '» غير مسجل. سجّل الجرد أولًا قبل تجهيز مسودة بيع.')
+        }
+        if (qty > item.stockQty) {
+          throw new WakilBridgeError(422, 'الكمية المطلوبة من «' + item.name + '» أكبر من الرصيد المسجل (' + item.stockQty + '). راجع المخزون قبل تجهيز المسودة.')
+        }
+      }
+      const catalogPrice = type === 'sale' ? item.sellPrice : item.costPrice
+      if (line.unitPriceEgp == null && catalogPrice === null) {
+        throw new WakilBridgeError(422, (type === 'sale' ? 'سعر بيع ' : 'تكلفة شراء ') + '«' + item.name + '» غير مسجلة. اسأل المالك عن السعر قبل تجهيز المسودة.')
+      }
+      const unitPrice = line.unitPriceEgp == null
+        ? catalogPrice!
+        : egpToPiastres(line.unitPriceEgp, 'lines[' + index + '].unitPriceEgp')
+      if (!Number.isSafeInteger(unitPrice) || unitPrice < 1 || unitPrice > MAX_MINOR) {
+        throw new WakilBridgeError(400, 'سعر الوحدة خارج النطاق المالي المسموح')
+      }
+      const lineTotal = qty * unitPrice
+      if (!Number.isSafeInteger(lineTotal) || lineTotal < 1 || lineTotal > MAX_MINOR) {
+        throw new WakilBridgeError(400, 'إجمالي البند خارج النطاق المالي المسموح')
+      }
+      total += lineTotal
+      if (!Number.isSafeInteger(total) || total > MAX_MINOR) {
+        throw new WakilBridgeError(400, 'إجمالي العملية خارج النطاق المالي المسموح')
+      }
+      lines.push({ itemId, qty, unitPrice, total: lineTotal })
+    }
+
+    const paid = source.paidEgp == null ? total : egpToPiastres(source.paidEgp, 'paidEgp', true)
+    if (paid > total) throw new WakilBridgeError(400, 'المدفوع أكبر من إجمالي العملية')
+    const payload: Record<string, unknown> = { lines, total, paid }
+    if (source.note != null) {
+      const note = optionalString(source.note, 'note', 1000)
+      if (note) payload.note = note
+    }
     if (type === 'sale') {
       if (source.supplierId != null || source.supplierName != null) throw new WakilBridgeError(400, 'مسودة البيع لا تقبل بيانات مورد')
-      if (source.customerId != null) payload.customerId = requiredString(source.customerId, 'customerId', 100)
-      if (source.customerName != null) payload.customerName = requiredString(source.customerName, 'customerName', 100)
+      if (source.customerId != null) {
+        const customerId = requiredString(source.customerId, 'customerId', 100)
+        const customer = await db.customer.findFirst({ where: { id: customerId, businessId }, select: { id: true, name: true } })
+        if (!customer) throw new WakilBridgeError(400, 'العميل المحدد غير موجود داخل النشاط الحالي')
+        payload.customerId = customer.id
+        const customerName = optionalString(source.customerName, 'customerName', 100)
+        if (customerName && normalizeAr(customerName) !== normalizeAr(customer.name)) {
+          throw new WakilBridgeError(400, 'معرّف العميل لا يطابق اسمه؛ راجع الحساب قبل تجهيز المسودة')
+        }
+        payload.customerName = customer.name
+      } else if (source.customerName != null) {
+        payload.customerName = requiredString(source.customerName, 'customerName', 100)
+      }
     } else {
       if (source.customerId != null || source.customerName != null) throw new WakilBridgeError(400, 'مسودة الشراء لا تقبل بيانات عميل')
-      if (source.supplierId != null) payload.supplierId = requiredString(source.supplierId, 'supplierId', 100)
-      if (source.supplierName != null) payload.supplierName = requiredString(source.supplierName, 'supplierName', 100)
-      if (source.supplierName != null && source.supplierId == null) payload.newSupplier = true
+      if (source.supplierId != null) {
+        const supplierId = requiredString(source.supplierId, 'supplierId', 100)
+        const supplier = await db.supplier.findFirst({ where: { id: supplierId, businessId }, select: { id: true, name: true } })
+        if (!supplier) throw new WakilBridgeError(400, 'المورد المحدد غير موجود داخل النشاط الحالي')
+        payload.supplierId = supplier.id
+        const supplierName = optionalString(source.supplierName, 'supplierName', 100)
+        if (supplierName && normalizeAr(supplierName) !== normalizeAr(supplier.name)) {
+          throw new WakilBridgeError(400, 'معرّف المورد لا يطابق اسمه؛ راجع الحساب قبل تجهيز المسودة')
+        }
+        payload.supplierName = supplier.name
+      } else if (source.supplierName != null) {
+        payload.supplierName = requiredString(source.supplierName, 'supplierName', 100)
+        payload.newSupplier = true
+      }
+    }
+    if (paid < total) {
+      if (type === 'sale' && !payload.customerId && !payload.customerName) {
+        throw new WakilBridgeError(422, 'البيع الآجل يحتاج تحديد حساب العميل أو اسمه قبل تجهيز المسودة.')
+      }
+      if (type === 'purchase' && !payload.supplierId && !payload.supplierName) {
+        throw new WakilBridgeError(422, 'الشراء الآجل يحتاج تحديد حساب المورد أو اسمه قبل تجهيز المسودة.')
+      }
     }
     return payload
   }
@@ -321,13 +393,14 @@ async function normalizeDraftPayload(type: OpType, sourceValue: unknown, busines
   if (type === 'membership') {
     onlyKeys(source, ['totalEgp', 'paidEgp', 'customerId', 'customerName', 'months', 'plan', 'note'], type)
     const total = egpToPiastres(source.totalEgp, 'totalEgp')
-    const paid = source.paidEgp == null ? undefined : egpToPiastres(source.paidEgp, 'paidEgp', true)
+    const paid = source.paidEgp == null ? total : egpToPiastres(source.paidEgp, 'paidEgp', true)
+    if (paid > total) throw new WakilBridgeError(400, 'المدفوع أكبر من إجمالي الاشتراك')
     const customerId = optionalString(source.customerId, 'customerId', 100)
     const customerName = optionalString(source.customerName, 'customerName', 100)
     const months = source.months == null ? undefined : integer(source.months, 'months', 1, 120)
     const plan = optionalString(source.plan, 'plan', 100)
     const note = optionalString(source.note, 'note', 1000)
-    return { total, ...(paid === undefined ? {} : { paid }), ...(customerId ? { customerId } : {}), ...(customerName ? { customerName } : {}), ...(months ? { months } : {}), ...(plan ? { plan } : {}), ...(note ? { note } : {}) }
+    return { total, paid, ...(customerId ? { customerId } : {}), ...(customerName ? { customerName } : {}), ...(months ? { months } : {}), ...(plan ? { plan } : {}), ...(note ? { note } : {}) }
   }
 
   if (type === 'attendance') {
@@ -353,13 +426,57 @@ async function normalizeDraftPayload(type: OpType, sourceValue: unknown, busines
       throw new WakilBridgeError(400, 'dueOn لازم يكون تاريخًا صحيحًا بصيغة YYYY-MM-DD')
     }
     const note = source.note == null ? '' : requiredString(source.note, 'note', 1000)
-    const partyName = optionalString(source.partyName, 'partyName', 100)
-    const customerId = optionalString(source.customerId, 'customerId', 100)
-    const supplierId = optionalString(source.supplierId, 'supplierId', 100)
+    let partyName = optionalString(source.partyName, 'partyName', 100)
+    let customerId = optionalString(source.customerId, 'customerId', 100)
+    let supplierId = optionalString(source.supplierId, 'supplierId', 100)
     const expectedCash = source.expectedCashEgp == null ? undefined : egpToPiastres(source.expectedCashEgp, 'expectedCashEgp', true)
     const reason = optionalString(source.reason, 'reason', 160)
     if (kind === 'cash_count' && expectedCash === undefined) throw new WakilBridgeError(400, 'expectedCashEgp مطلوب لمقارنة عدّ الخزنة')
     if (kind !== 'cash_count' && expectedCash !== undefined) throw new WakilBridgeError(400, 'expectedCashEgp يخص عدّ الخزنة فقط')
+
+    const customerKinds = new Set(['credit_sale', 'lend', 'receive'])
+    const supplierKinds = new Set(['credit_purchase', 'cash_purchase', 'borrow', 'pay'])
+    if (customerKinds.has(kind)) {
+      if (supplierId) throw new WakilBridgeError(400, 'نوع الحركة يحتاج حساب عميل وليس موردًا')
+      if (customerId) {
+        const row = await db.customer.findFirst({ where: { id: customerId, businessId }, select: { id: true, name: true } })
+        if (!row) throw new WakilBridgeError(400, 'العميل المحدد غير موجود داخل النشاط الحالي')
+        if (partyName && normalizeAr(partyName) !== normalizeAr(row.name)) throw new WakilBridgeError(400, 'اسم العميل لا يطابق المعرف المحدد')
+        customerId = row.id
+        partyName = row.name
+      } else if (partyName) {
+        const rows = await db.customer.findMany({ where: { businessId }, select: { id: true, name: true } })
+        const found = rows.filter((row) => normalizeAr(row.name) === normalizeAr(partyName!))
+        if (found.length > 1) throw new WakilBridgeError(409, 'هناك أكثر من عميل بنفس الاسم؛ حدّد المعرف الصحيح.')
+        if (found.length === 1) {
+          customerId = found[0].id
+          partyName = found[0].name
+        } else if (kind === 'receive') {
+          throw new WakilBridgeError(400, 'العميل غير موجود للتحصيل؛ لا يمكن تسجيل تحصيل على حساب غير معروف.')
+        }
+      }
+    } else if (supplierKinds.has(kind)) {
+      if (customerId) throw new WakilBridgeError(400, 'نوع الحركة يحتاج حساب مورد وليس عميلًا')
+      if (supplierId) {
+        const row = await db.supplier.findFirst({ where: { id: supplierId, businessId }, select: { id: true, name: true } })
+        if (!row) throw new WakilBridgeError(400, 'المورد المحدد غير موجود داخل النشاط الحالي')
+        if (partyName && normalizeAr(partyName) !== normalizeAr(row.name)) throw new WakilBridgeError(400, 'اسم المورد لا يطابق المعرف المحدد')
+        supplierId = row.id
+        partyName = row.name
+      } else if (partyName) {
+        const rows = await db.supplier.findMany({ where: { businessId }, select: { id: true, name: true } })
+        const found = rows.filter((row) => normalizeAr(row.name) === normalizeAr(partyName!))
+        if (found.length > 1) throw new WakilBridgeError(409, 'هناك أكثر من مورد بنفس الاسم؛ حدّد المعرف الصحيح.')
+        if (found.length === 1) {
+          supplierId = found[0].id
+          partyName = found[0].name
+        } else if (kind === 'pay') {
+          throw new WakilBridgeError(400, 'المورد غير موجود للسداد؛ لا يمكن تسجيل سداد على حساب غير معروف.')
+        }
+      }
+    } else if (partyName || customerId || supplierId) {
+      throw new WakilBridgeError(400, 'الحركة دي لا تقبل حساب عميل أو مورد')
+    }
     return {
       kind, amount, occurredOn, dateSource: 'user_day', note,
       ...(dueOn ? { dueOn } : {}), ...(partyName ? { partyName } : {}),
