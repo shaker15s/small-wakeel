@@ -79,33 +79,61 @@ describe('financial write boundary', () => {
       { businessId: business.id, userId: owner.id, type: 'purchase' as const },
     ]) await expect(createDraft({ ...params, summary: '', payload: {}, idempotencyKey: op.idempotencyKey })).rejects.toBeInstanceOf(AuthorizationError)
   })
-  test('legacy idempotency keys without payloadHash replay only the identical recorded payload', async () => {
+  test('pre-binding legacy rows fail closed instead of guessing the replay payload', async () => {
     const legacy = await expense(7000)
-    await db.operation.update({ where: { id: legacy.id }, data: { payloadHash: null } })
-
-    const replay = await createDraft({
-      businessId: business.id, userId: owner.id, type: 'expense', summary: key(),
-      payload: { total: 7000 }, idempotencyKey: legacy.idempotencyKey,
+    await db.operation.update({
+      where: { id: legacy.id },
+      data: { payloadHash: null, requestPayloadHash: null },
     })
-    expect(replay.id).toBe(legacy.id)
-
     await expect(createDraft({
       businessId: business.id, userId: owner.id, type: 'expense', summary: key(),
-      payload: { total: 8000 }, idempotencyKey: legacy.idempotencyKey,
+      payload: { total: 7000 }, idempotencyKey: legacy.idempotencyKey,
     })).rejects.toBeInstanceOf(OperationValidationError)
     expect(await db.operation.count({ where: { idempotencyKey: legacy.idempotencyKey } })).toBe(1)
   })
 
-  test('malformed legacy payloads fail closed on idempotent replay', async () => {
+  test('legacy row with malformed approval payload cannot be replayed', async () => {
     const legacy = await expense(7000)
     await db.operation.update({
       where: { id: legacy.id },
-      data: { payloadHash: null, payload: '{not-json' },
+      data: { payloadHash: null, requestPayloadHash: null, payload: '{not-json' },
     })
     await expect(createDraft({
       businessId: business.id, userId: owner.id, type: 'expense', summary: key(),
       payload: { total: 7000 }, idempotencyKey: legacy.idempotencyKey,
     })).rejects.toBeInstanceOf(OperationValidationError)
+  })
+
+  test('same sale retry replays even when the stored draft contains server-added defaults', async () => {
+    const it = await item(business.id, 10, 100)
+    const params = {
+      businessId: business.id, userId: owner.id, type: 'sale' as const, summary: key(),
+      payload: { itemId: it.id, qty: 2, total: 200 }, idempotencyKey: key(),
+    }
+    const first = await createDraft(params)
+    const stored = JSON.parse(first.payload) as Record<string, unknown>
+    expect(stored.paid).toBe(200) // validation materializes paid=total
+    expect(first.requestPayloadHash).toMatch(/^[0-9a-f]{64}$/)
+    const replay = await createDraft(params)
+    expect(replay.id).toBe(first.id)
+    await expect(createDraft({
+      ...params,
+      payload: { itemId: it.id, qty: 2, total: 200, paid: 50 },
+    })).rejects.toBeInstanceOf(OperationValidationError)
+    expect(await db.operation.count({ where: { idempotencyKey: first.idempotencyKey } })).toBe(1)
+  })
+
+  test('stored approval hash prevents idempotency replay after payload tampering', async () => {
+    const op = await expense(7000)
+    await db.operation.update({
+      where: { id: op.id },
+      data: { payload: JSON.stringify({ total: 8000 }) },
+    })
+    await expect(createDraft({
+      businessId: business.id, userId: owner.id, type: 'expense', summary: key(),
+      payload: { total: 7000 }, idempotencyKey: op.idempotencyKey,
+    })).rejects.toBeInstanceOf(OperationValidationError)
+    expect(await db.operation.count({ where: { idempotencyKey: op.idempotencyKey } })).toBe(1)
   })
   test('a present payloadHash cannot mask a tampered stored payload during replay', async () => {
     const op = await expense(7000)

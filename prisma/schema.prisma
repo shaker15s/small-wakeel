@@ -138,6 +138,9 @@ model Operation {
   // executed bytes. payloadHash = sha256 of the canonical payload at draft
   // time; expiresAt bounds how long an approval holds. Null on pre-R71 rows.
   payloadHash String?
+  // Hash of the request payload BEFORE server-side defaults are materialized.
+  // This is distinct from payloadHash, which binds the normalized approved bytes.
+  requestPayloadHash String?
   expiresAt DateTime?
   reversalOfRef  String?
   reversedByRef  String?

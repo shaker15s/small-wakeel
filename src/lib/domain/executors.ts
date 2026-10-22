@@ -102,18 +102,27 @@ export async function createDraft(params: {
         delete (recordedPayload as Record<string, unknown>).supersedesRef
         recordedPayloadHash = canonicalPayloadHash(recordedPayload)
       } catch {
-        throw new OperationValidationError('العملية القديمة لا يمكن التحقق من حمولة مفتاح الاعتماد بتاعها — استخدم طلبًا جديدًا بدل إعادة المفتاح القديم')
+        throw new OperationValidationError('العملية القديمة لا يمكن التحقق من حمولة مفتاح الاعتماد بتاعها — أوقف إعادة الطلب وراجع حالة العملية المسجلة')
       }
-      // Verify both ends of the stored binding. For pre-R71 rows the stored
-      // hash is null, so the recomputed hash proves replay identity; if a newer
-      // row's payload was edited while its hash stayed unchanged, fail closed
-      // rather than handing the caller a draft whose recorded bytes do not
-      // match its approval binding.
-      if (existing.payloadHash != null && existing.payloadHash !== recordedPayloadHash) {
+      // The persisted payloadHash binds the normalized bytes approved/executed.
+      // A null/mismatching value cannot safely support a replay.
+      if (existing.payloadHash == null || existing.payloadHash !== recordedPayloadHash) {
         throw new OperationValidationError('حمولة المسودة المخزنة لا تطابق بصمة الاعتماد — إعادة الطلب مرفوضة لسلامة السجل')
       }
-      if (recordedPayloadHash !== requestHash) {
-        throw new OperationValidationError('مفتاح الاعتماد ده اتستخدم بالفعل لمسودة مختلفة — العملية اللي قدامك هي اللي مسجلة')
+      if (existing.requestPayloadHash != null) {
+        // New rows bind the original request separately from normalized bytes,
+        // so defaults such as paid=total do not turn a harmless retry into a
+        // false collision.
+        if (existing.requestPayloadHash !== requestHash) {
+          throw new OperationValidationError('مفتاح الاعتماد ده اتستخدم بالفعل لمسودة مختلفة — العملية اللي قدامك هي اللي مسجلة')
+        }
+      } else if (recordedPayloadHash !== requestHash) {
+        // R85 upgrade path: prior releases stored only the normalized approval
+        // hash. If the incoming representation differs, we cannot prove that
+        // server-added defaults match the original request. Fail closed and
+        // ask the caller to inspect the existing operation instead of replaying
+        // or suggesting a new key that could duplicate a financial action.
+        throw new OperationValidationError('المسودة أقدم من بصمة الطلب الأصلي؛ لا يمكن إثبات تطابق إعادة المحاولة بأمان. راجع حالة العملية المسجلة قبل أي إعادة')
       }
       return existing
     }
@@ -142,6 +151,7 @@ export async function createDraft(params: {
       payload: JSON.stringify(params.payload), idempotencyKey: params.idempotencyKey,
       conversationId: params.conversationId ?? null,
       payloadHash: boundHash,
+      requestPayloadHash: requestHash,
       expiresAt: new Date(Date.now() + DRAFT_TTL_MS),
     } })
     if (replaced) {
