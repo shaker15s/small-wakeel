@@ -43,10 +43,13 @@ async function callWakil(action, args, exec) {
   const body = { action, ...args }
   if (action === 'prepare_draft') {
     const callId = exec && exec.callId != null ? String(exec.callId) : ''
-    if (!callId) return errorResult('تعذر إنشاء مفتاح تكرار آمن لهذه المسودة؛ أعد المحاولة من جلسة DSH فعلية.')
-    const sessionId = exec.agent && exec.agent.session && exec.agent.session.id
-      ? String(exec.agent.session.id)
-      : 'session'
+    const sessionId = exec && exec.agent && exec.agent.id != null ? String(exec.agent.id) : ''
+    if (!callId || !sessionId) {
+      return errorResult('تعذر إنشاء مفتاح تكرار آمن من معرف جلسة واستدعاء DSH؛ لم يتم إرسال المسودة.')
+    }
+    // DSH's public Agent.id is the session identity. Do not use an arbitrary
+    // fallback, or identical call IDs from different sessions could collide
+    // in WAKIL's globally-unique idempotency key.
     body.requestId = createHash('sha256').update(sessionId + ':' + callId).digest('hex')
   }
 
