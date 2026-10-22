@@ -1,7 +1,7 @@
 // Synthetic restore rehearsal ONLY; does not establish production RPO/RTO.
 import { applyMigrations } from './lib/migrations'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { copyFileSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createClient, type Client } from '@libsql/client'
