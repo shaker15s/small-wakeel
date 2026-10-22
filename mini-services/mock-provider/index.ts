@@ -546,6 +546,58 @@ async function chat(req: Request) {
   const sysChars = messages.filter((m) => m.role === "system").reduce((n, m) => n + String(m.content ?? "").length, 0);
   const toolsN = Array.isArray(body.tools) ? body.tools.length : 0;
   console.log(`[mock] model=${model} msgs=${messages.length} sysChars=${sysChars} tools=${toolsN} user="${String(lastUser).slice(0, 90).replace(/\n/g, " ")}"`);
+
+  // Deterministic protocol fixture used ONLY by scripts/model-acceptance.mjs.
+  // It proves that a tool schema crosses the adapter and a native OpenAI-style
+  // tool_call comes back. It is deliberately not used to evaluate language
+  // understanding; only a live model can pass that acceptance requirement.
+  if (req.headers.get("x-wakil-acceptance-probe") === "record-sale-v1") {
+    const saleTool = (body.tools ?? []).find((candidate) => {
+      if (!candidate || typeof candidate !== "object") return false;
+      const tool = candidate as {
+        type?: string;
+        function?: { name?: string; parameters?: { properties?: Record<string, unknown> } };
+      };
+      const properties = tool.function?.parameters?.properties;
+      return tool.type === "function" &&
+        tool.function?.name === "record_sale" &&
+        !!properties &&
+        ["name", "qty", "total", "paid"].every((key) => Object.prototype.hasOwnProperty.call(properties, key));
+    });
+    if (body.stream || !saleTool) {
+      return json({ error: { message: "record-sale-v1 requires the non-streaming record_sale tool schema" } }, 422);
+    }
+    const id = uid();
+    return json({
+      id,
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [{
+        index: 0,
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: [{
+            id: "call_acceptance_record_sale",
+            type: "function",
+            function: {
+              name: "record_sale",
+              arguments: JSON.stringify({
+                name: "زيت عباد 1.5 لتر",
+                qty: 3,
+                total: 255,
+                paid: 255,
+              }),
+            },
+          }],
+        },
+        finish_reason: "tool_calls",
+      }],
+      usage: { prompt_tokens: 96, completion_tokens: 48, total_tokens: 144 },
+    });
+  }
+
   const { reasoning, content } = buildReply(model, messages);
   const id = uid();
   const created = Math.floor(Date.now() / 1000);
