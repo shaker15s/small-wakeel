@@ -25,11 +25,16 @@ async function walk(dir, out = []) {
   return out
 }
 
-const filter = process.argv[2] ?? ''
+const args = process.argv.slice(2)
+const filter = args.find((arg) => !arg.startsWith('--exclude=')) ?? ''
+const excluded = args
+  .filter((arg) => arg.startsWith('--exclude='))
+  .map((arg) => arg.slice('--exclude='.length))
+  .filter(Boolean)
 const files = (await walk(path.join(root, 'tests'))).sort()
-  .filter((file) => !filter || file.includes(filter))
+  .filter((file) => (!filter || file.includes(filter)) && !excluded.some((part) => file.includes(part)))
 
-console.log(`[isolated-bun-suite] ${files.length} test files${filter ? ` (filter: ${filter})` : ''}`)
+console.log(`[isolated-bun-suite] ${files.length} test files${filter ? ` (filter: ${filter})` : ''}${excluded.length ? `; excluded: ${excluded.join(', ')}` : ''}`)
 let passed = 0
 const failures = []
 

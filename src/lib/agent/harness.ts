@@ -3465,7 +3465,9 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   if (cashbook) return cashbook
   const v = getVertical(business.type)
   const model = await resolveModel(ctx.modelKey)
-  const modelLabel = modelLabelFor(model)
+  const offlineMode = process.env.WAKIL_OFFLINE === '1'
+  const modelLabel = offlineMode ? 'القواعد المحلية · وضع دون اتصال' : modelLabelFor(model)
+  if (offlineMode) meta.fallback = true
   // «الشفافية»: when the SELECTED model cannot be reached, the user must not
   // receive an unmarked local-engine reply as if it were the model's words.
   // Set at the first provider failure; appended to the final reply.
@@ -5063,10 +5065,11 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   // («المورد … والحساب 2000» is slots for the open request, not a new command).
   // R48: a COMPLETED credit-to-new-customer request owns the turn — it is two
   // deterministic writes, and the model (or deep research) must not take over.
-  if (!pendingWriteIntent && !creditSubs) {
-    // All user queries flow through the genuine Gemini model via runBrainTurn() first.
-    // Rule-based intent patterns are preserved strictly as an offline fallback when the LLM
-    // is unreachable or times out, never intercepting when the model is operational.
+  if (!pendingWriteIntent && !creditSubs && !offlineMode) {
+    // Normal operation uses the model-first brain loop. Explicit offline mode is
+    // different: it must enter the deterministic rule ladder directly, not call
+    // completeChat/streamChat and wait through model retry/backoff before falling
+    // back. This keeps offline evaluations truly offline and makes the label honest.
     const brainTurn = await runBrainTurn()
     if (brainTurn) return brainTurn
   }

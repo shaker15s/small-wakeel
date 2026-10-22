@@ -420,7 +420,7 @@ describe('PR-010 — the honest task box', () => {
 
 describe('PR-010 — delivery pass is idempotent under re-runs', () => {
   test('deliverPendingNotifications called twice delivers a pending row once', async () => {
-    const { conversation, task } = await makeTask()
+    const { business, conversation, task } = await makeTask()
     await db.scheduledTask.update({
       where: { id: task.id },
       data: { status: 'running', claimedAt: new Date(), leaseOwner: 'wk_live_999999', lastStep: 'executed' },
@@ -442,8 +442,10 @@ describe('PR-010 — delivery pass is idempotent under re-runs', () => {
       },
     })
 
-    expect(await deliverPendingNotifications(10)).toBe(1)
-    expect(await deliverPendingNotifications(10)).toBe(0)
+    // The test database includes seeded tasks for other businesses. Exercise
+    // this one outbox row in its own tenant, not the global worker sweep.
+    expect(await deliverPendingNotifications(10, { businessId: business.id })).toBe(1)
+    expect(await deliverPendingNotifications(10, { businessId: business.id })).toBe(0)
     expect(await db.message.count({ where: { conversationId: conversation.id } })).toBe(1)
     expect((await db.scheduledTask.findUniqueOrThrow({ where: { id: task.id } })).status).toBe('done')
   })

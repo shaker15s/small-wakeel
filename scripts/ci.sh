@@ -53,8 +53,8 @@ if [ "$MOCK_READY" -ne 1 ]; then
   printf '\\n✘ mock-provider did not become healthy on 127.0.0.1:3031\\n' >&2
   exit 1
 fi
-step "Unit + integration tests (each file isolated; disposable DB per process)"
-bun scripts/run-bun-tests-isolated.mjs
+step "Unit + integration tests (each file isolated; full golden battery runs once below)"
+bun scripts/run-bun-tests-isolated.mjs --exclude=golden-battery.test.ts
 step "Financial SIGKILL/reopen/commit-ack recovery (disposable DB)"
 bun scripts/financial-crash-smoke.ts
 step "Golden Arabic routing evals (offline; disposable DB)"

@@ -115,7 +115,7 @@ async function main() {
       await db.conversation.delete({ where: { id: conversation.id } }).catch(() => null)
     }
   }
-  const POOL = 12
+  const POOL = 6
   for (let i = 0; i < CASES.length; i += POOL) {
     const chunk = CASES.slice(i, i + POOL)
     results.push(...(await Promise.all(chunk.map(runOne))))
