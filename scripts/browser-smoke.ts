@@ -192,8 +192,43 @@ export async function browserSmoke(databaseUrl: string, key: string, boot: (orig
     await expect(page.getByLabel('رسالة إلى وكيل', { exact: true })).toHaveValue('باقي في الخزنة ٢٥٠٠')
     console.log('PASS: recorder consent/cancel UI, truthful unconfigured-ASR state, preserved draft, no automatic audio upload; live microphone/ASR NOT VERIFIED')
     // Owner explicitly reviews/approves the physical drawer count. No demo cash injected.
-    await page.getByLabel('رسالة إلى وكيل', { exact: true }).press('Enter')
-    await page.getByRole('button', { name: 'اعتماد العملية', exact: true }).click()
+    // Capture the real response + isolated tenant state if the card fails to render;
+    // this prevents a browser timeout from hiding whether parsing, drafting, or UI failed.
+    const countInput = page.getByLabel('رسالة إلى وكيل', { exact: true })
+    const countResponsePromise = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === '/api/chat' && response.request().method() === 'POST',
+    )
+    await countInput.press('Enter')
+    const countResponse = await countResponsePromise
+    try {
+      await page.getByRole('button', { name: 'اعتماد العملية', exact: true }).click()
+    } catch (error) {
+      const conv = (await sql.execute({
+        sql: 'SELECT id, title FROM Conversation WHERE businessId=? AND userId=? ORDER BY updatedAt DESC LIMIT 1',
+        args: [home.businessId, home.userId],
+      })).rows[0]
+      const diagnostic = conv ? {
+        httpStatus: countResponse.status(),
+        workflowMode: (await sql.execute({ sql: 'SELECT workflowMode FROM Business WHERE id=?', args: [home.businessId] })).rows[0]?.workflowMode,
+        profile: (await sql.execute({ sql: 'SELECT answers, openingCashStatedAt FROM BusinessProfile WHERE businessId=?', args: [home.businessId] })).rows[0] ?? null,
+        messages: (await sql.execute({
+          sql: 'SELECT role, text, card, actions FROM Message WHERE conversationId=? ORDER BY createdAt DESC LIMIT 4',
+          args: [String(conv.id)],
+        })).rows.map((r) => ({ role: r.role, text: r.text, card: r.card, actions: r.actions })),
+        operations: (await sql.execute({
+          sql: 'SELECT ref, type, status, summary, payload FROM Operation WHERE businessId=? ORDER BY createdAt DESC LIMIT 4',
+          args: [home.businessId],
+        })).rows,
+        dialogue: (await sql.execute({
+          sql: 'SELECT state, expiresAt FROM CashbookDialogue WHERE conversationId=?',
+          args: [String(conv.id)],
+        })).rows,
+        visibleActionButtons: await page.getByRole('button').allTextContents(),
+        assistantText: await page.locator('[data-message-role="assistant"]').allTextContents(),
+      } : { httpStatus: countResponse.status(), conversation: null }
+      console.error('Cash-count browser diagnostics (synthetic tenant only)', JSON.stringify(diagnostic))
+      throw error
+    }
     await expect.poll(async () => Number((await sql.execute({ sql: "SELECT COUNT(*) n FROM CashbookEntry WHERE businessId=? AND kind='cash_count'", args: [home.businessId] })).rows[0].n)).toBe(1)
     assert.equal(Number((await sql.execute({ sql: "SELECT COUNT(*) n FROM Operation WHERE businessId=? AND type='sale'", args: [home.businessId] })).rows[0].n), 0)
     console.log('PASS: real cashbook count approved in browser, persisted as unclassified reconciliation, never a sale')
