@@ -1,8 +1,18 @@
 // وكيل — the risk ladder & approval matrix.
 // R0/R1 read or self-serve; R2/R3/R4 write and need the right role. These rules
 // are the reason the owner can let staff use the agent at all.
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 import { canApprove, canDraft, computeRisk, R3_AMOUNT_THRESHOLD, RISK_META } from '../../src/lib/domain/risk'
+
+const originalStrictApprovals = process.env.WAKIL_STRICT_APPROVALS
+const originalDelegatedApprovals = process.env.WAKIL_ALLOW_DELEGATED_APPROVALS
+
+afterEach(() => {
+  if (originalStrictApprovals === undefined) delete process.env.WAKIL_STRICT_APPROVALS
+  else process.env.WAKIL_STRICT_APPROVALS = originalStrictApprovals
+  if (originalDelegatedApprovals === undefined) delete process.env.WAKIL_ALLOW_DELEGATED_APPROVALS
+  else process.env.WAKIL_ALLOW_DELEGATED_APPROVALS = originalDelegatedApprovals
+})
 
 describe('risk.computeRisk', () => {
   test('reads are R0', () => {
@@ -27,39 +37,34 @@ describe('risk.computeRisk', () => {
 })
 
 describe('risk.canApprove', () => {
-  test('owner can approve everything below R4', () => {
+  test('owner alone approves by default; staff may draft but cannot make records official', () => {
+    delete process.env.WAKIL_STRICT_APPROVALS
+    delete process.env.WAKIL_ALLOW_DELEGATED_APPROVALS
+    expect(canApprove('owner', 'R1')).toBe(true)
     expect(canApprove('owner', 'R2')).toBe(true)
     expect(canApprove('owner', 'R3')).toBe(true)
-  })
-
-  test('cashier/reception may approve routine R2 by default', () => {
-    delete process.env.WAKIL_STRICT_APPROVALS
-    expect(canApprove('cashier', 'R2')).toBe(true)
-    expect(canApprove('reception', 'R2')).toBe(true)
-  })
-
-  test('strict-approvals mode routes every write through management', () => {
-    process.env.WAKIL_STRICT_APPROVALS = '1'
+    expect(canApprove('cashier', 'R1')).toBe(false)
     expect(canApprove('cashier', 'R2')).toBe(false)
     expect(canApprove('reception', 'R2')).toBe(false)
-    expect(canApprove('supervisor', 'R2')).toBe(true)
-    expect(canApprove('owner', 'R2')).toBe(true)
+    expect(canApprove('supervisor', 'R2')).toBe(false)
+    expect(canApprove('supervisor', 'R3')).toBe(false)
+  })
+
+  test('explicit delegation allows supervisor R1/R2 only; owner-only strict mode wins', () => {
     delete process.env.WAKIL_STRICT_APPROVALS
+    process.env.WAKIL_ALLOW_DELEGATED_APPROVALS = '1'
+    expect(canApprove('supervisor', 'R1')).toBe(true)
+    expect(canApprove('supervisor', 'R2')).toBe(true)
+    expect(canApprove('supervisor', 'R3')).toBe(false)
+    expect(canApprove('cashier', 'R2')).toBe(false)
+    expect(canApprove('reception', 'R2')).toBe(false)
+    process.env.WAKIL_STRICT_APPROVALS = '1'
+    expect(canApprove('supervisor', 'R2')).toBe(false)
+    expect(canApprove('owner', 'R2')).toBe(true)
   })
 
   test('R4 is never approvable — even by the owner', () => {
     expect(canApprove('owner', 'R4')).toBe(false)
-  })
-
-  test('R3 stays management-only in both modes', () => {
-    delete process.env.WAKIL_STRICT_APPROVALS
-    expect(canApprove('cashier', 'R3')).toBe(false)
-    expect(canApprove('supervisor', 'R3')).toBe(true)
-  })
-
-  test('supervisor can approve routine writes', () => {
-    const r2 = canApprove('supervisor', 'R2')
-    expect(typeof r2).toBe('boolean')
   })
 })
 
