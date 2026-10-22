@@ -23,7 +23,7 @@ async function shop(options: { openingCashEgp?: number; omitOpeningCash?: boolea
   const conversation = await db.conversation.create({
     data: { businessId: business.id, userId: user.id, title: 'Cash balance knownness' },
   })
-  return { business, user, conversation }
+  return { business, user, conversationId: conversation.id }
 }
 
 afterAll(async () => {
@@ -83,7 +83,7 @@ test('the first approved count establishes a baseline; later count deltas stay s
   expect(firstPosition.cashIn).toBe(0)
   expect(firstPosition.cashOut).toBe(0)
   expect(firstPosition.cashCountAdjustment).toBe(0)
-  expect((await db.cashEntry.findUniqueOrThrow({ where: { ref: firstOp.ref } })).reason).toContain('أول عدّ')
+  expect((await db.cashEntry.findFirstOrThrow({ where: { ref: firstOp.ref } })).reason).toContain('أول عدّ')
 
   const second = await cashbookTurn({
     ...ctx, turnId: randomUUID(), text: 'باقي في الخزنة ٢٦٠٠', history: [],
