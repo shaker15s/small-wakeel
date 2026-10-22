@@ -4,6 +4,19 @@ import { testDb } from '../helpers/test-db'
 import { POST as bridgePost } from '@/app/api/dsh/bridge/route'
 import { egpToPiastres } from '@/lib/dsh-bridge/bridge'
 
+type BridgeResponse = {
+  ok?: boolean
+  error?: string
+  data?: {
+    business?: { id: string; name: string }
+    cashIsPhysicalCount?: boolean
+    items?: Array<{ id: string; sellPrice: { piastres: number; egp: string } }>
+    draft?: { id: string; ref?: string; status: string; type: string; payload: Record<string, unknown> }
+    ownerApprovalRequired?: boolean
+    mutationExecuted?: boolean
+  }
+}
+
 const db = await testDb()
 const bridgeToken = 'dsh-test-token-' + randomUUID() + randomUUID()
 let businessId = ''
@@ -29,7 +42,7 @@ function request(body: Record<string, unknown>, token = bridgeToken) {
 
 async function call(body: Record<string, unknown>, token = bridgeToken) {
   const response = await bridgePost(request(body, token))
-  return { status: response.status, body: await response.json() as Record<string, any> }
+  return { status: response.status, body: await response.json() as BridgeResponse }
 }
 
 beforeAll(async () => {
@@ -91,15 +104,15 @@ describe('native DSH bridge — owner-bound and draft-only', () => {
     expect(forgedTenant.status).toBe(400)
     const overview = await call({ action: 'overview' })
     expect(overview.status).toBe(200)
-    expect(overview.body.data.business.id).toBe(businessId)
-    expect(overview.body.data.business.name).toContain('DSH bridge synthetic')
-    expect(overview.body.data.cashIsPhysicalCount).toBe(false)
+    expect(overview.body.data?.business?.id).toBe(businessId)
+    expect(overview.body.data?.business?.name).toContain('DSH bridge synthetic')
+    expect(overview.body.data?.cashIsPhysicalCount).toBe(false)
 
     const catalog = await call({ action: 'catalog', query: 'Synthetic oil' })
     expect(catalog.status).toBe(200)
-    expect(catalog.body.data.items.map((item: { id: string }) => item.id)).toContain(itemId)
-    expect(catalog.body.data.items.every((item: { id: string }) => item.id === itemId)).toBe(true)
-    expect(catalog.body.data.items[0].sellPrice).toEqual({ piastres: 2_500, egp: '25.00' })
+    expect((catalog.body.data?.items ?? []).map((item) => item.id)).toContain(itemId)
+    expect((catalog.body.data?.items ?? []).every((item) => item.id === itemId)).toBe(true)
+    expect(catalog.body.data?.items?.[0]?.sellPrice).toEqual({ piastres: 2_500, egp: '25.00' })
   })
 
   test('sale tool prepares an idempotent draft and never mutates stock or cash', async () => {
@@ -118,16 +131,16 @@ describe('native DSH bridge — owner-bound and draft-only', () => {
     const first = await call(body)
     expect(first.status).toBe(200)
     expect(first.body.ok).toBe(true)
-    expect(first.body.data.draft.status).toBe('AWAITING_APPROVAL')
-    expect(first.body.data.draft.type).toBe('sale')
+    expect(first.body.data?.draft?.status).toBe('AWAITING_APPROVAL')
+    expect(first.body.data?.draft?.type).toBe('sale')
     expect(first.body.data.ownerApprovalRequired).toBe(true)
     expect(first.body.data.mutationExecuted).toBe(false)
-    expect(first.body.data.draft.payload.total).toBe(5_000)
-    expect(first.body.data.draft.payload.paid).toBe(5_000)
+    expect(first.body.data?.draft?.payload.total).toBe(5_000)
+    expect(first.body.data?.draft?.payload.paid).toBe(5_000)
 
     const retry = await call(body)
     expect(retry.status).toBe(200)
-    expect(retry.body.data.draft.id).toBe(first.body.data.draft.id)
+    expect(retry.body.data?.draft?.id).toBe(first.body.data?.draft?.id)
     expect(await db.item.findUniqueOrThrow({ where: { id: itemId } }).then((item) => item.stockQty)).toBe(50)
     expect(await db.cashEntry.count({ where: { businessId } })).toBe(0)
     expect(await db.operation.count({ where: { businessId, status: 'AWAITING_APPROVAL' } })).toBe(1)
@@ -143,7 +156,8 @@ describe('native DSH bridge — owner-bound and draft-only', () => {
       payload: { totalEgp: 12.5, reason: 'مستلزمات اختبار' },
     })
     expect(draft.status).toBe(200)
-    const opId = draft.body.data.draft.id
+    const opId = draft.body.data?.draft?.id
+    if (!opId) throw new Error('Draft endpoint returned no operation ID')
     const denied = await call({ action: 'approve', operationId: opId })
     expect(denied.status).toBe(403)
     const op = await db.operation.findUniqueOrThrow({ where: { id: opId } })
