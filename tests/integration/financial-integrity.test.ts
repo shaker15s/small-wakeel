@@ -79,6 +79,34 @@ describe('financial write boundary', () => {
       { businessId: business.id, userId: owner.id, type: 'purchase' as const },
     ]) await expect(createDraft({ ...params, summary: '', payload: {}, idempotencyKey: op.idempotencyKey })).rejects.toBeInstanceOf(AuthorizationError)
   })
+  test('legacy idempotency keys without payloadHash replay only the identical recorded payload', async () => {
+    const legacy = await expense(7000)
+    await db.operation.update({ where: { id: legacy.id }, data: { payloadHash: null } })
+
+    const replay = await createDraft({
+      businessId: business.id, userId: owner.id, type: 'expense', summary: key(),
+      payload: { total: 7000 }, idempotencyKey: legacy.idempotencyKey,
+    })
+    expect(replay.id).toBe(legacy.id)
+
+    await expect(createDraft({
+      businessId: business.id, userId: owner.id, type: 'expense', summary: key(),
+      payload: { total: 8000 }, idempotencyKey: legacy.idempotencyKey,
+    })).rejects.toBeInstanceOf(OperationValidationError)
+    expect(await db.operation.count({ where: { idempotencyKey: legacy.idempotencyKey } })).toBe(1)
+  })
+
+  test('malformed legacy payloads fail closed on idempotent replay', async () => {
+    const legacy = await expense(7000)
+    await db.operation.update({
+      where: { id: legacy.id },
+      data: { payloadHash: null, payload: '{not-json' },
+    })
+    await expect(createDraft({
+      businessId: business.id, userId: owner.id, type: 'expense', summary: key(),
+      payload: { total: 7000 }, idempotencyKey: legacy.idempotencyKey,
+    })).rejects.toBeInstanceOf(OperationValidationError)
+  })
   test('concurrent creation with one key produces one draft and one audit', async () => {
     const params = { businessId: business.id, userId: owner.id, type: 'expense' as const, summary: key(), payload: { total: 100 }, idempotencyKey: key() }
     const rows = await Promise.all([createDraft(params), createDraft(params), createDraft(params)])
