@@ -131,7 +131,7 @@ export function evaluateExpectedSaleCall(calls) {
   const qty = readNumber(args.qty)
   const total = readNumber(args.total)
   const paid = readNumber(args.paid)
-  const nameMatches = name.includes('زيت') && name.includes('عباد') && /1\\.5/.test(name)
+  const nameMatches = name.includes('زيت') && name.includes('عباد') && name.includes('1.5')
   const qtyMatches = Number.isFinite(qty) && qty === 3
   const totalMatches = Number.isFinite(total) && total === 255
   const paidMatches = Number.isFinite(paid) && paid === 255
