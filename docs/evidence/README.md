@@ -1,0 +1,21 @@
+# Release evidence required by `pilot:gate`
+
+The launch gate deliberately fails closed. **Do not create these files with guessed or placeholder values.** Each manifest must be tied to the exact release commit and backed by real retained artifacts.
+
+The gate reads these optional evidence files:
+
+- `docs/evidence/p0-p8-acceptance.json`: `targetCommitSha` plus all nine entries `P0` through `P8`. Each entry must have `status: "passed"`, an HTTPS `reportUrl`, and a SHA-256 `reportSha256`.
+- `docs/evidence/independent-security-audit.json`: `targetCommitSha`, `status: "passed"`, `independenceConfirmed: true`, external auditor name and organization, completion date, audit scope, an HTTPS report URL, and the report's SHA-256. A project-authored checklist is not an independent audit.
+- `docs/evidence/capacity-acceptance.json`: exact `targetCommitSha`, `status: "passed"`, `environmentClass: "production-like"`, test-suite/version, test date, request count, concurrency, p50/p95/p99 latency, error rate, HTTPS report URL and SHA-256.
+
+## Hosted CI evidence
+
+`pilot:gate` queries GitHub Actions for a **completed successful push run** of `.github/workflows/ci.yml` on the exact current SHA and requires the non-expired `launch-gate-<SHA>` artifact. A workflow file existing in the repository, a pull-request-only check, an unrelated successful commit, or an expired/missing artifact does not count.
+
+## What the deterministic CI proves—and what it does not
+
+The hosted workflow runs `scripts/ci.sh`: frozen dependency install, schema checks/migrations on disposable data, typecheck, lint, automated tests, financial process-kill/reopen checks, offline Arabic routing evaluations, build, local production smoke and browser checks.
+
+This is not a live-model quality test, a third-party security audit, production hosting acceptance, external mail delivery, provider integration acceptance, or a load test. Those are separate, explicitly evidenced release gates.
+
+Never place provider secrets, customer data, or raw financial records in these manifests or public CI artifacts.
