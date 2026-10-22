@@ -93,7 +93,20 @@ export async function createDraft(params: {
       if (existing.businessId !== params.businessId || existing.userId !== params.userId || existing.type !== params.type) {
         throw new AuthorizationError()
       }
-      if (existing.payloadHash != null && existing.payloadHash !== requestHash) {
+      let recordedHash = existing.payloadHash
+      if (recordedHash == null) {
+        // Pre-R71 rows have no stored hash. Recompute from their recorded JSON
+        // so legacy idempotency keys are still payload-bound; never let an old
+        // key make a different incoming financial request look like a replay.
+        try {
+          const recordedPayload = JSON.parse(existing.payload) as Record<string, unknown>
+          delete recordedPayload.supersedesRef
+          recordedHash = canonicalPayloadHash(recordedPayload)
+        } catch {
+          throw new OperationValidationError('العملية القديمة لا يمكن التحقق من حمولة مفتاح الاعتماد بتاعها — استخدم طلبًا جديدًا بدل إعادة المفتاح القديم')
+        }
+      }
+      if (recordedHash !== requestHash) {
         throw new OperationValidationError('مفتاح الاعتماد ده اتستخدم بالفعل لمسودة مختلفة — العملية اللي قدامك هي اللي مسجلة')
       }
       return existing
