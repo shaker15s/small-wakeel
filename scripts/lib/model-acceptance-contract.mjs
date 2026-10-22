@@ -1,5 +1,28 @@
 const GOOGLE_OPENAI_HOST = 'generativelanguage.googleapis.com'
 
+/**
+ * Mirror the application's authoritative record_sale contract. The unit
+ * suite compares this fixture to brainToolSchemas() so the live acceptance
+ * test cannot silently drift into testing a made-up tool shape.
+ */
+export const SALE_TOOL_ACCEPTANCE_SCHEMA = {
+  name: 'record_sale',
+  description: 'مسودة بيع صنف (كمية وسعر). «بعت …».',
+  parameters: {
+    type: 'object',
+    properties: {
+      name: { type: 'string' },
+      qty: { type: 'number' },
+      price: { type: 'number' },
+      paid: { type: 'number' },
+      total: { type: 'number' },
+      customer: { type: 'string' },
+    },
+    required: ['name', 'qty'],
+    additionalProperties: true,
+  },
+}
+
 /** Resolve an OpenAI-compatible chat-completions URL from a provider base URL. */
 export function resolveChatCompletionsUrl(base) {
   if (typeof base !== 'string' || !base.trim()) {
@@ -94,24 +117,28 @@ function normalizeDigits(value) {
     .trim()
 }
 
-/** Check the actual extracted item, quantity, and amount — not just tool name. */
+/** Check a real WAKIL record_sale call, not just the name or a made-up schema. */
 export function evaluateExpectedSaleCall(calls) {
   const call = Array.isArray(calls) ? calls.find((item) => item?.name === 'record_sale') : null
   if (!call) return { passed: false, detail: 'The model did not call record_sale.' }
 
   const args = call.args && typeof call.args === 'object' && !Array.isArray(call.args) ? call.args : {}
-  const item = normalizeDigits(args.item ?? '').toLowerCase()
-  const qtyText = normalizeDigits(args.qty ?? '')
-  const amountText = normalizeDigits(args.amount ?? '')
-  const qty = qtyText ? Number(qtyText) : Number.NaN
-  const amount = amountText ? Number(amountText) : Number.NaN
-  const itemMatches = item.includes('زيت') && item.includes('عباد') && /1\.5/.test(item)
+  const name = normalizeDigits(args.name ?? '').toLowerCase()
+  const readNumber = (value) => {
+    const normalized = normalizeDigits(value ?? '')
+    return normalized ? Number(normalized) : Number.NaN
+  }
+  const qty = readNumber(args.qty)
+  const total = readNumber(args.total)
+  const paid = readNumber(args.paid)
+  const nameMatches = name.includes('زيت') && name.includes('عباد') && /1\\.5/.test(name)
   const qtyMatches = Number.isFinite(qty) && qty === 3
-  const amountMatches = Number.isFinite(amount) && amount === 255
-  const passed = itemMatches && qtyMatches && amountMatches
+  const totalMatches = Number.isFinite(total) && total === 255
+  const paidMatches = Number.isFinite(paid) && paid === 255
+  const passed = nameMatches && qtyMatches && totalMatches && paidMatches
 
   return {
     passed,
-    detail: `item=${item || '(missing)'}; qty=${Number.isFinite(qty) ? qty : '(invalid/missing)'}; amount=${Number.isFinite(amount) ? amount : '(invalid/missing)'}; expected زيت عباد 1.5 / 3 / 255`,
+    detail: `name=${name || '(missing)'}; qty=${Number.isFinite(qty) ? qty : '(invalid/missing)'}; total=${Number.isFinite(total) ? total : '(invalid/missing)'}; paid=${Number.isFinite(paid) ? paid : '(invalid/missing)'}; expected زيت عباد 1.5 / 3 / total 255 / paid 255`,
   }
 }
