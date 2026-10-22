@@ -144,11 +144,13 @@ export async function applyMigrations(dbPath: string, migrationsDir?: string): P
         continue
       }
 
-      const statements = splitSqlStatements(content).map((sql) => ({ sql }))
-      statements.push({
-        sql: 'INSERT INTO _WakilMigration VALUES (?, ?, ?)',
-        args: [id, checksum, new Date().toISOString()],
-      })
+      const statements = [
+        ...splitSqlStatements(content).map((sql) => ({ sql })),
+        {
+          sql: 'INSERT INTO _WakilMigration VALUES (?, ?, ?)',
+          args: [id, checksum, new Date().toISOString()],
+        },
+      ]
       try {
         // The library-managed migration path uses its active client handle and
         // wraps all statements + the ledger receipt in one SQLite transaction.
