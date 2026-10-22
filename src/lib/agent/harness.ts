@@ -3333,7 +3333,7 @@ async function runMeasuredTurn(ctx: TurnContext, emit: TurnEmit): Promise<TurnRe
   } catch (err) {
     // the engine itself exploded — record the failure, then let the route's
     // catch send the SSE error (the user never sees a half-turn silently die)
-    void trackTurnUsage(ctx.business.id, ctx.user.id, meta.kind, ctx.text, {
+    await trackTurnUsage(ctx.business.id, ctx.user.id, meta.kind, ctx.text, {
       latencyMs: Date.now() - t0,
       ttftMs,
       tokens: 0,
@@ -3341,7 +3341,7 @@ async function runMeasuredTurn(ctx: TurnContext, emit: TurnEmit): Promise<TurnRe
     })
     // PR-005: the engine exploding is a traceable fact, not a silent death.
     if (meta.traceId) {
-      void safeLogAgentEvent({
+      await safeLogAgentEvent({
         businessId: ctx.business.id,
         traceId: meta.traceId,
         type: 'provider.error',
@@ -3351,21 +3351,21 @@ async function runMeasuredTurn(ctx: TurnContext, emit: TurnEmit): Promise<TurnRe
     }
     throw err
   }
-  void trackTurnUsage(ctx.business.id, ctx.user.id, meta.kind, ctx.text, {
+  await trackTurnUsage(ctx.business.id, ctx.user.id, meta.kind, ctx.text, {
     latencyMs: Date.now() - t0,
     ttftMs,
     tokens: Math.ceil(result.replyText.length / 3),
     fallback: meta.fallback || llmHealth.retried || llmHealth.fellBack,
   })
   if (result.verified && (result.verified.status === 'corrected' || result.verified.checks.length > 0)) {
-    void trackKindEvent(ctx.business.id, ctx.user.id, 'verify', result.verified.status)
+    await trackKindEvent(ctx.business.id, ctx.user.id, 'verify', result.verified.status)
   }
   result.notesJotted = meta.notesJotted
   // If the fallback ladder had to swap models mid-turn, the label the UI shows
   // must name the model that ACTUALLY answered — never claim a dead one.
   if (llmHealth.servedBy) result.modelLabel = llmHealth.servedBy
   if (meta.traceId) {
-    void safeLogAgentEvent({
+    await safeLogAgentEvent({
       businessId: ctx.business.id,
       traceId: meta.traceId,
       type: 'turn.ended',
@@ -3648,7 +3648,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           const { op: updated, outcome } = await executeOperation(pendingOp.id, user.id)
           // PR-005: the DECISION is a trace fact (who approved, what, outcome).
           if (meta.traceId) {
-            void safeLogAgentEvent({
+            await safeLogAgentEvent({
               businessId: business.id,
               traceId: meta.traceId,
               type: 'operation.decided',
@@ -3670,7 +3670,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         } else {
           const updated = await rejectOperation(pendingOp.id, user.id, 'رفض من المحادثة', 'reject')
           if (meta.traceId) {
-            void safeLogAgentEvent({
+            await safeLogAgentEvent({
               businessId: business.id,
               traceId: meta.traceId,
               type: 'operation.decided',
@@ -4258,7 +4258,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         // refused-vs-executed line is visible in the ledger, not only in chat.
         if (meta.traceId) {
           const ref = typeof result.ref === 'string' ? result.ref : null
-          void safeLogAgentEvent({
+          await safeLogAgentEvent({
             businessId: business.id,
             traceId: meta.traceId,
             type: result.ok === false ? 'tool.failed' : ref ? 'draft.created' : 'tool.executed',
@@ -4292,7 +4292,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         // PR-005: a refusal is its OWN trace fact (actor=model), distinct from
         // a tool that ran and failed.
         if (meta.traceId) {
-          void safeLogAgentEvent({
+          await safeLogAgentEvent({
             businessId: business.id,
             traceId: meta.traceId,
             type: 'tool.refused',
