@@ -219,7 +219,18 @@ test('the release gate runs and reports an HONEST verdict — no auto-GO, never 
   const reportPath = join(tmp, 'gate.json')
   const code = await new Promise<number>((res) => {
     const child = spawn(process.execPath, ['scripts/pilot-gate.mjs', '--report', reportPath], {
-      cwd: process.cwd(), env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe'],
+      cwd: process.cwd(),
+      // Make the environment claim explicit: this integration test validates
+      // the mock-only adapter path, never a live provider acceptance. CI starts
+      // the deterministic mock server before running test files.
+      env: {
+        ...process.env,
+        WAKIL_ACCEPTANCE_BASE_URL: 'http://127.0.0.1:3031/v1',
+        WAKIL_ACCEPTANCE_MODELS: 'wakil-mock-flash',
+        WAKIL_OFFLINE: '1',
+        WAKIL_SCHEDULER: 'off',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
     })
     child.on('close', res)
   })
