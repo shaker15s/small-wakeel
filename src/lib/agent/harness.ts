@@ -4250,7 +4250,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         return
       }
       executedSigs.add(sig)
-      const report = (result: Record<string, unknown>) => {
+      const report = async (result: Record<string, unknown>): Promise<void> => {
         executedResults.set(sig, result)
         if (result.ok === false && brainFailures.length === 0) brainFailures.push(GENERIC_TOOL_FAIL)
         resultsForModel.push(result)
@@ -4324,7 +4324,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           const run = await runToolPipeline(call.tool, business.id, call.args)
           if (!run.ok) {
             step.detail = run.error?.slice(0, 80) ?? 'الأداة فشلت'
-            report({ tool: call.tool, ok: false, error: run.error ?? 'فشل' })
+            await report({ tool: call.tool, ok: false, error: run.error ?? 'فشل' })
             replyParts.push(`مش قادر أجيب ${TOOL_LABEL_AR[call.tool] ?? call.tool} دلوقتي — قول للمستخدم إن في مشكلة مؤقتة.`)
             brainFailures.push(`مش قادر أجيب ${TOOL_LABEL_AR[call.tool] ?? call.tool} دلوقتي — جرّب تاني بعد شوية`)
             return
@@ -4347,7 +4347,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             })
             .join('؛ ')
           step.detail = (run.trimmed ? `${summary.slice(0, 70)}… (اتقصّرت للسياق)` : summary.slice(0, 90)) || 'رجعت ببيانات'
-          report({
+          await report({
             tool: call.tool,
             ok: true,
             ms: run.ms,
@@ -4369,7 +4369,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           const plan = normalizePlan(call.args)
           if (plan.length === 0) {
             step.detail = 'الخطة فاضية أو فيها أداة غير مسموحة'
-            report({
+            await report({
               tool: 'run_plan',
               ok: false,
               error: 'الخطة لازم تكون أدوات قراءة معروفة بس (من غير أي كتابة)',
@@ -4394,7 +4394,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           }
           if (allCards.length > 0) emit({ event: 'cards', cards: allCards })
           step.detail = `نفّذت ${toArabicNum(doneRuns.length)}/${toArabicNum(runs.length)} استعلام في خطوة واحدة`
-          report({
+          await report({
             tool: 'run_plan',
             ok: true,
             steps: runs.map((r) => ({ tool: r.tool, ok: r.ok, ms: r.ms, error: r.error, output: r.output })),
@@ -4431,7 +4431,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           // only the SUMMARY enters the parent's context — the intermediate
           // reads stay inside the sub-agent (Claude Code's summary-only return)
           step.detail = sub.summary.slice(0, 80)
-          report({
+          await report({
             tool: 'deep_dive',
             ok: true,
             rounds: sub.rounds,
@@ -4450,7 +4450,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         if (w) {
           if (!canDraft(user.role, w.opType)) {
             step.detail = `محتاجة صلاحية أعلى من ${roleTitle(user)}`
-            report({ tool: call.tool, ok: false, error: `صلاحية ${user.name} مش بتسمح بعملية ${TYPE_AR[w.opType] ?? w.opType}` })
+            await report({ tool: call.tool, ok: false, error: `صلاحية ${user.name} مش بتسمح بعملية ${TYPE_AR[w.opType] ?? w.opType}` })
             replyParts.push(`عملية ${TYPE_AR[w.opType] ?? w.opType} محتاجة صلاحية أعلى — مش من اختصاصك.`)
             return
           }
@@ -4461,7 +4461,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
               // R41: the request is HELD, not failed — a follow-up will
               // complete it. The question below REPLACES this turn's reply.
               pendingQuestionFromWrite = resolved.pendingQuestion
-              report({
+              await report({
                 tool: call.tool,
                 ok: false,
                 pending: true,
@@ -4472,7 +4472,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             // Push the SPECIFIC failure first: report() seeds a generic
             // «الإجراء لم ينفذ» line only while brainFailures is still empty.
             brainFailures.push(resolved.failMessage ?? `ناقص ${resolved.missing ?? 'بيانات'} — ${TYPE_AR[resolved.opType] ?? resolved.opType} ماتسجلتش`)
-            report({
+            await report({
               tool: call.tool,
               ok: false,
               error: `${resolved.failMessage ?? resolved.missing ?? 'ناقصة بيانات'} — العملية دي ماتسجلتش خالص، ولازم تقول للمستخدم كده بصراحة في ردك`,
@@ -4552,7 +4552,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
               replyParts.push(`وسجلت في ذاكرتي الموعد: ${memText}`)
             }
           }
-          report({ tool: call.tool, ok: true, ref: draft.ref, summary: resolved.summary, note: 'مسودة مستنية اعتماد — مبتنفذش لوحدها', ...(resolved.issues?.length ? { تنبيه: resolved.issues.join('؛ ') } : {}) })
+          await report({ tool: call.tool, ok: true, ref: draft.ref, summary: resolved.summary, note: 'مسودة مستنية اعتماد — مبتنفذش لوحدها', ...(resolved.issues?.length ? { تنبيه: resolved.issues.join('؛ ') } : {}) })
           replyParts.push(`جهزت مسودة «${TYPE_AR[resolved.opType] ?? resolved.opType}» (${draft.ref}): ${resolved.summary} — مستنية اعتمادك.`)
           // A draft can carry a caveat the owner MUST read (e.g. the amount was
           // lowered to the real debt) — it goes through the same failure guard so
@@ -4564,14 +4564,14 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         // Presentation plugins cannot execute JS/CSS, grant roles, or touch money.
         if (call.tool === 'configure_workspace') {
           const preferences = await updateWorkspacePreferences(business.id, user.id, call.args)
-          report({ tool: call.tool, ok: true, preferences })
+          await report({ tool: call.tool, ok: true, preferences })
           confirmedMutationReplies.push('حفظت إعدادات واجهتك لحسابك في المنشأة دي؛ الحسابات والصلاحيات متغيرتش.')
           await trackUsage(business.id, user.id, 'tool', call.tool)
           return
         }
         if (call.tool === 'list_plugins') {
           const plugins = await getBusinessPlugins(business.id)
-          report({ tool: call.tool, ok: true, plugins: plugins.map((p) => ({ slug: p.slug, name: p.name, installed: p.installed, active: p.active })) })
+          await report({ tool: call.tool, ok: true, plugins: plugins.map((p) => ({ slug: p.slug, name: p.name, installed: p.installed, active: p.active })) })
           return
         }
         if (call.tool === 'install_plugin') {
@@ -4580,7 +4580,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           const prompt = String(call.args.prompt ?? '').trim().slice(0, 1200)
           if (!prompt || containsMemorySecret(prompt)) throw new Error('وصف الإضافة غير صالح')
           const plugin = await synthesizePluginWithAI({ businessId: business.id, userId: user.id, prompt, preferredName: String(call.args.name ?? '').slice(0, 80) || undefined })
-          report({ tool: call.tool, ok: true, slug: plugin.slug, name: plugin.name, active: plugin.active })
+          await report({ tool: call.tool, ok: true, slug: plugin.slug, name: plugin.name, active: plugin.active })
           confirmedMutationReplies.push(`ثبّت إضافة «${plugin.name}»؛ دي خطوات تحليل معتمدة، مش كود حر ولا صلاحية جديدة.`)
           return
         }
@@ -4591,7 +4591,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           if (!plugin) throw new Error('إضافة غير مثبتة في المنشأة')
           const updated = await togglePluginActive(plugin.id, call.args.active, business.id, user.id)
           if (!updated) throw new Error('لم يتأكد تغيير الإضافة')
-          report({ tool: call.tool, ok: true, slug: updated.slug, active: updated.active })
+          await report({ tool: call.tool, ok: true, slug: updated.slug, active: updated.active })
           confirmedMutationReplies.push(`${updated.active ? 'فعّلت' : 'وقفت'} الإضافة «${updated.name}» في المنشأة دي.`)
           return
         }
@@ -4602,7 +4602,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           const result = await executePlugin({ businessId: business.id, pluginOrSlug: slug })
           allCards.push(...result.cards)
           if (result.cards.length) emit({ event: 'cards', cards: result.cards })
-          report({ tool: call.tool, ok: true, summary: result.summaryText })
+          await report({ tool: call.tool, ok: true, summary: result.summaryText })
           return
         }
         // ---- memory_save (the model's own long-term learning tool) ----
@@ -4611,12 +4611,12 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           const memText = String(call.args.text ?? '').trim().slice(0, 200)
           if (containsMemorySecret(memText)) {
             const error = 'مش هحفظ كلمات مرور أو رموز أمان في الذاكرة.'
-            report({ tool: 'memory_save', ok: false, error })
+            await report({ tool: 'memory_save', ok: false, error })
             brainFailures.push(error)
             return
           }
           if (memText.length < 3) {
-            report({ tool: 'memory_save', ok: false, error: 'نص فاضي' })
+            await report({ tool: 'memory_save', ok: false, error: 'نص فاضي' })
             return
           }
           const memNorm = normalizeAr(memText)
@@ -4635,7 +4635,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             })
           }
           step.detail = dup ? 'موجودة أصلًا — من غير تكرار' : memText.slice(0, 60)
-          report({ tool: 'memory_save', ok: true, saved: true, duplicate: dup })
+          await report({ tool: 'memory_save', ok: true, saved: true, duplicate: dup })
           replyParts.push(dup ? `دي محفوظة عندي أصلًا ✅ — «${memText}»` : `اتحفظت في ذاكرتي ✅ — «${memText}»`)
           modelSavedMemory = true
           return
@@ -4651,11 +4651,11 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             // as the deterministic path) — no retrieval of a forgotten row.
             localVectorDB.removeDocument(business.id, target.id)
             step.detail = target.text.slice(0, 60)
-            report({ tool: 'memory_forget', ok: true, forgotten: target.text.slice(0, 80) })
+            await report({ tool: 'memory_forget', ok: true, forgotten: target.text.slice(0, 80) })
             replyParts.push(`اتمسحت من ذاكرتي ✅ — «${target.text.slice(0, 100)}»`)
           } else {
             step.detail = 'ملقيتش حاجة بالشكل ده'
-            report({ tool: 'memory_forget', ok: false, error: 'ملقيتش حاجة بالشكل ده' })
+            await report({ tool: 'memory_forget', ok: false, error: 'ملقيتش حاجة بالشكل ده' })
             replyParts.push('ملقيتش في ذاكرتي حاجة بالشكل ده 🤔')
           }
           return
@@ -4676,11 +4676,11 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             emit({ event: 'cards', cards: allCards })
             brainFacts.push({ label: prettyExpr, value: valueAr })
             step.detail = `${prettyExpr} = ${valueAr}`
-            report({ tool: 'calculate', ok: true, expression: prettyExpr, value: calc.value })
+            await report({ tool: 'calculate', ok: true, expression: prettyExpr, value: calc.value })
             replyParts.push(`${prettyExpr} = ${valueAr}`)
           } else {
             step.detail = calc.error
-            report({ tool: 'calculate', ok: false, error: calc.error })
+            await report({ tool: 'calculate', ok: false, error: calc.error })
           }
           await trackUsage(business.id, user.id, 'tool', 'calculate')
           return
@@ -4689,7 +4689,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         if (call.tool === 'schedule_task') {
           await requirePermission(business.id, user.id, 'automation.manage')
           if (/اقترح|اقتراح|لا تنشئ|ماتفع[لّ]|نفكر/.test(text) || !/فكرني|ذكرني|جدول|تذكير|موافق|أكد|تاكيد|تأكيد/.test(text)) {
-            report({ tool: call.tool, ok: false, error: 'اعرض اقتراح فقط، واطلب موافقة صريحة بالموعد والتكرار قبل إنشاء مهمة' })
+            await report({ tool: call.tool, ok: false, error: 'اعرض اقتراح فقط، واطلب موافقة صريحة بالموعد والتكرار قبل إنشاء مهمة' })
             replyParts.push('ده اقتراح فقط؛ محتاج موافقتك وموعد وتكرار محددين بتوقيت القاهرة قبل التفعيل.')
             return
           }
@@ -4697,7 +4697,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           const whenLabel = String(call.args.whenLabel ?? call.args.when ?? '').trim().slice(0, 80)
           if (!title) {
             step.detail = 'عنوان المهمة فاضي'
-            report({ tool: 'schedule_task', ok: false, error: 'title مطلوب' })
+            await report({ tool: 'schedule_task', ok: false, error: 'title مطلوب' })
             return
           }
           const rawTool = String(call.args.tool ?? '').trim()
@@ -4705,7 +4705,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           if (rawTool && rawTool !== 'remind' && !READ_TOOLS.has(rawTool)) throw new Error('ممنوع جدولة أداة كتابة مالية')
           const when = resolveCairoSchedule(whenLabel)
           if (!when || when <= new Date()) {
-            report({ tool: call.tool, ok: false, error: 'حدد موعدًا مستقبليًا مفهومًا؛ لا نفترض غدًا أو وقتًا افتراضيًا' })
+            await report({ tool: call.tool, ok: false, error: 'حدد موعدًا مستقبليًا مفهومًا؛ لا نفترض غدًا أو وقتًا افتراضيًا' })
             return
           }
           const recurrence = call.args.recurrence == null ? null : String(call.args.recurrence)
@@ -4734,7 +4734,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             source: 'scheduled',
           })
           meta.notesJotted++
-          report({ tool: 'schedule_task', ok: true, task: title, when: whenLabel || whenAr })
+          await report({ tool: 'schedule_task', ok: true, task: title, when: whenLabel || whenAr })
           confirmedMutationReplies.push(`حفظت مهمة «${title}» في ${whenLabel} بتوقيت القاهرة${recurrence ? `؛ التكرار: ${recurrence}` : '؛ مرة واحدة'}. تقرير أو تذكير فقط، مش حركة فلوس.`)
           await trackUsage(business.id, user.id, 'tool', 'schedule_task')
           return
@@ -4746,7 +4746,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           const key = toneKey(raw)
           if (!key) {
             step.detail = 'نبرة مش معروفة'
-            report({ tool: 'set_persona', ok: false, error: 'اختار: ودود / رسمي / مختصر' })
+            await report({ tool: 'set_persona', ok: false, error: 'اختار: ودود / رسمي / مختصر' })
             return
           }
           await db.agentSettings.upsert({
@@ -4755,7 +4755,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             create: { businessId: business.id, vertical: business.type, tone: key },
           })
           step.detail = TONE_AR[key] ?? key
-          report({ tool: 'set_persona', ok: true, tone: key })
+          await report({ tool: 'set_persona', ok: true, tone: key })
           replyParts.push(`ظبطت نبرتي من دلوقتي ✅ — ${TONE_AR[key] ?? key}.`)
           await trackUsage(business.id, user.id, 'tool', 'set_persona')
           return
@@ -4775,7 +4775,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           for (const t of pipelineResult.completedTasks) {
             if (t.resultSummary) replyParts.push(`- **${t.agentLabel}**: ${t.resultSummary}`)
           }
-          report({
+          await report({
             tool: 'decompose_and_run_tasks',
             ok: true,
             tasksCount: subtasks.length,
@@ -4785,13 +4785,13 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           return
         }
         // ---- unknown tool ----
-        report({ tool: call.tool, ok: false, error: 'أداة غير معروفة' })
+        await report({ tool: call.tool, ok: false, error: 'أداة غير معروفة' })
         step.detail = 'أداة مش معروفة — تجاهلتها'
       } catch (err) {
         console.error('[brain] tool exec failed:', call.tool, err)
         step.detail = err instanceof AuthorizationError ? 'الصلاحية لا تسمح بالإجراء' : 'تعذّر تأكيد نتيجة الإجراء'
         brainFailures.push(err instanceof AuthorizationError ? 'صلاحيتك الحالية مش بتسمح بالإجراء ده — مغيرتش صلاحياتك.' : 'تعذّر تأكيد نتيجة الإجراء من السجل؛ راجعها قبل إعادة المحاولة.')
-        report({ tool: call.tool, ok: false, error: 'فشل تنفيذ الأداة' })
+        await report({ tool: call.tool, ok: false, error: 'فشل تنفيذ الأداة' })
       } finally {
         step.state = 'done'
         step.ms = Math.max(0, Date.now() - toolClock)
