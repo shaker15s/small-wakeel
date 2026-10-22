@@ -22,8 +22,16 @@ export async function browserSmoke(databaseUrl: string, key: string, boot: (orig
   // The application deliberately uses local SQLite concurrency=1 while WAL is disabled.
   // The browser's observer must use the same lock discipline; a wide default pool that
   // polls while the app commits can starve its writer and create a test-only P1008.
-  const sql = createClient({ url: databaseUrl, concurrency: 1, timeout: sqliteBusyTimeoutMs() })
+  let sql = createClient({ url: databaseUrl, concurrency: 1, timeout: sqliteBusyTimeoutMs() })
   await sql.execute(`PRAGMA busy_timeout=${sqliteBusyTimeoutMs()}`)
+  async function reopenSqlObserver() {
+    // End the observer's local-file connection before the app processes a
+    // command after a fixture write. With rollback-journal mode, even a
+    // test-only client must not hold a pooled connection across live writes.
+    await sql.close()
+    sql = createClient({ url: databaseUrl, concurrency: 1, timeout: sqliteBusyTimeoutMs() })
+    await sql.execute(`PRAGMA busy_timeout=${sqliteBusyTimeoutMs()}`)
+  }
   let upstream = ''
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', join(temp, 'key.pem'), '-out', join(temp, 'cert.pem'), '-days', '1', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1'], { stdio: 'ignore' })
   const proxy = Bun.serve({ port: 0, hostname: '127.0.0.1', tls: { key: readFileSync(join(temp, 'key.pem')), cert: readFileSync(join(temp, 'cert.pem')) }, async fetch(req) {
@@ -356,6 +364,9 @@ export async function browserSmoke(databaseUrl: string, key: string, boot: (orig
     assert.equal(Number((await sql.execute({ sql: "SELECT COUNT(*) n FROM CashEntry WHERE ref=?", args: [oldDraft.ref] })).rows[0].n), 0)
     const choiceA = randomUUID(), choiceB = randomUUID()
     for (const [id, phone] of [[choiceA, '01077777771'], [choiceB, '01077777772']]) await sql.execute({ sql: 'INSERT INTO Customer (id,businessId,name,phone,balance,createdAt) VALUES (?,?,?,?,?,?)', args: [id, home.businessId, 'عميل اختبار اختيار', phone, 0, Date.now()] })
+    await reopenSqlObserver()
+    const insertedChoices = await sql.execute({ sql: 'SELECT COUNT(*) n FROM Customer WHERE id IN (?,?) AND businessId=?', args: [choiceA, choiceB, home.businessId] })
+    assert.equal(Number(insertedChoices.rows[0].n), 2, 'synthetic customer choices must be committed before the live app reads them')
     await compose.fill('بعت لعميل اختبار اختيار بضاعة بمية على الحساب النهارده'); await compose.press('Enter')
     const choiceButton = page.getByRole('button', { name: /01077777772/ })
     await expect(choiceButton).toBeEnabled()
@@ -505,6 +516,6 @@ export async function browserSmoke(databaseUrl: string, key: string, boot: (orig
     // Bun may keep the stop promise pending after an aborted streaming client;
     // force-close sockets without blocking teardown of the backend process.
     void proxy.stop(true)
-    sql.close(); rmSync(temp, { recursive: true, force: true })
+    await sql.close(); rmSync(temp, { recursive: true, force: true })
   }
 }
