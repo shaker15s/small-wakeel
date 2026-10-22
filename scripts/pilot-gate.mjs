@@ -17,13 +17,14 @@
  *
  * Usage:
  *   node scripts/pilot-gate.mjs [--report out.json]
- * Exit: 0 when the report was produced (the gate ran); the GO/NO-GO outcome
- * lives in the report's `overall` field.
+ * Exit: 0 only for GO_CANDIDATE; 1 for NO-GO. `--report` is still written
+ * before exit so failed releases retain their full diagnostic report.
  */
 import { spawn } from 'node:child_process'
 import { existsSync, writeFileSync, readFileSync, readdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { hasShaBoundCiArtifact, selectSuccessfulHostedCiRun, validateCapacityEvidence, validateIndependentSecurityAudit, validateP0P8Evidence } from './lib/pilot-gate-evidence.mjs'
 import { execSync } from 'node:child_process'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -79,37 +80,90 @@ function fileEvidence(...paths) {
   return { found, missing }
 }
 
+async function hostedCiEvidenceForSha(sha) {
+  if (!/^[a-f0-9]{40}$/i.test(sha) || sha === 'unknown') {
+    return { met: false, evidence: ['Current Git SHA is unavailable; hosted CI cannot be bound to this run.'] }
+  }
+  try {
+    const response = await fetch(`https://api.github.com/repos/shaker15s/small-wakeel/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=100`, {
+      headers: {
+        accept: 'application/vnd.github+json',
+        'x-github-api-version': '2022-11-28',
+        'user-agent': 'wakil-pilot-gate',
+      },
+    })
+    if (!response.ok) throw new Error(`GitHub Actions API returned HTTP ${response.status}`)
+    const payload = await response.json()
+    const run = selectSuccessfulHostedCiRun(payload.workflow_runs, sha)
+    if (!run) {
+      return { met: false, evidence: [`No completed successful push run of .github/workflows/ci.yml found for exact SHA ${sha}.`] }
+    }
+    const artifactsResponse = await fetch(`https://api.github.com/repos/shaker15s/small-wakeel/actions/runs/${run.id}/artifacts?per_page=100`, {
+      headers: {
+        accept: 'application/vnd.github+json',
+        'x-github-api-version': '2022-11-28',
+        'user-agent': 'wakil-pilot-gate',
+      },
+    })
+    if (!artifactsResponse.ok) throw new Error(`GitHub artifact API returned HTTP ${artifactsResponse.status}`)
+    const artifacts = await artifactsResponse.json()
+    if (!hasShaBoundCiArtifact(artifacts.artifacts, sha)) {
+      return { met: false, evidence: [`CI run succeeded (${run.html_url}) but its non-expired launch-gate-${sha} log artifact is absent.`] }
+    }
+    return {
+      met: true,
+      evidence: [
+        `successful exact-SHA hosted CI: ${run.html_url}`,
+        `non-expired SHA-bound artifact: launch-gate-${sha}`,
+      ],
+    }
+  } catch (error) {
+    return { met: false, evidence: [`Hosted CI evidence could not be verified independently: ${error instanceof Error ? error.message : String(error)}`] }
+  }
+}
+
+function readEvidenceJson(relativePath, validator, sha) {
+  const fullPath = join(root, relativePath)
+  if (!existsSync(fullPath)) return { met: false, evidence: [`MISSING: ${relativePath}`] }
+  try {
+    const evidence = JSON.parse(readFileSync(fullPath, 'utf8'))
+    const met = validator(evidence, sha)
+    return {
+      met,
+      evidence: met
+        ? [`validated ${relativePath} for exact SHA ${sha}`]
+        : [`${relativePath} exists but its claims are incomplete, malformed or not bound to exact SHA ${sha}`],
+    }
+  } catch (error) {
+    return { met: false, evidence: [`${relativePath} could not be parsed: ${error instanceof Error ? error.message : String(error)}`] }
+  }
+}
+
 // --- the 8 gate items (plan §13) -------------------------------------------
 const items = []
 
-// 1. P0–P8 closed with PERSISTENT (committed) evidence
+// 1. P0–P8 requires an exact-SHA evidence manifest, not merely two docs files.
 {
-  const ev = fileEvidence(
-    'docs/LAUNCH_VERIFICATION_2026-10-17.md',
-    'docs/SAAS_VERIFICATION_2026-10-18.md',
+  const ev = readEvidenceJson(
+    'docs/evidence/p0-p8-acceptance.json',
+    validateP0P8Evidence,
+    sha,
   )
-  const docs = ev.found
-  const committed = git('ls-files', 'docs')?.split('\n').filter(Boolean).length ?? 0
   items.push({
     id: '1_p0_p8_evidence',
-    requirement: 'P0–P8 مغلقة بأدلة دائمة (committed verification artifacts on this SHA)',
-    status: docs.length >= 2 ? 'met' : 'not_evidenced',
-    evidence: [
-      `committed docs files: ${committed}`,
-      ...docs.map((d) => `present: ${d}`),
-      ...ev.missing.map((d) => `MISSING: ${d}`),
-      'per-stage evidence is recorded in these verification docs + each PR commit (R70–R84 gates)',
-    ],
+    requirement: 'P0–P8 have exact-SHA manifests and a linked, hashed report for every gate',
+    status: ev.met ? 'met' : 'not_evidenced',
+    evidence: ev.evidence,
   })
 }
 
 // 2. the 10 sectors pass their acceptance tests
 {
-  const results = await runBattery(['tests/unit/sector-contracts.test.ts'])
+  const results = await runBattery(['tests/unit/sector-contracts.test.ts', 'tests/integration/core-sale-across-sectors.test.ts'])
   const allOk = results.every((r) => r.ok)
   items.push({
     id: '2_sectors_acceptance',
-    requirement: 'القطاعات العشرة اجتازت اختبارات القبول الخاصة بها',
+    requirement: 'القطاعات العشرة اجتازت عقد التعريف وسيناريو بيع مالي حقيقي بالاعتماد والتحقق',
     status: allOk ? 'met' : 'not_met',
     evidence: results.map((r) => `${r.ok ? 'PASS' : 'FAIL'} ${r.file}${r.ok ? '' : ' — ' + r.tail}`),
   })
@@ -174,62 +228,64 @@ const items = []
   })
 }
 
-// 6. hosted CI + artifacts tied to SHA + backup/restore/secret-rotation drills
+// 6. Hosted CI is met only after GitHub confirms a successful run on this SHA
+// and the run retains its uniquely SHA-bound artifact.
 {
-  const workflows = existsSync(join(root, '.github/workflows')) ? readdirSync(join(root, '.github/workflows')) : []
-  const staged = existsSync(join(root, 'docs/ci/github-actions.yml'))
-  const backupDrill = existsSync(join(root, 'scripts/backup-drill.ts'))
-  const rotate = existsSync(join(root, 'scripts/rotate-provider-secrets.ts'))
+  const ev = await hostedCiEvidenceForSha(sha)
   items.push({
     id: '6_ci_hosted',
-    requirement: 'CI مستضاف + artifacts مرتبطة بـ SHA + نسخ/استعادة/تدوير أسرار ناجحة على بيئة مشابهة للإنتاج',
-    status: workflows.length > 0 ? 'met' : 'not_met',
-    evidence: [
-      `.github/workflows: ${workflows.length > 0 ? workflows.join(', ') : 'ABSENT — the workflow exists only staged at docs/ci/github-actions.yml (PR-002 blocked on hosted CI)'}`,
-      `workflow staged in docs: ${staged}`,
-      `backup-drill script: ${backupDrill ? 'present' : 'MISSING'}`,
-      `rotate-provider-secrets script: ${rotate ? 'present' : 'MISSING'}`,
-      'hosted runs on THIS SHA: not verifiable from this environment',
-    ],
+    requirement: 'Successful hosted CI on this exact SHA with an unexpired, SHA-bound test artifact',
+    status: ev.met ? 'met' : 'not_met',
+    evidence: ev.evidence,
   })
 }
 
-// 7. independent security audit + documented privacy/terms/support/operations/monitoring
+// 7. An independent audit must have a report, auditor identity, scope and exact-SHA binding.
 {
-  const ev = fileEvidence('docs/SECURITY.md', 'docs/OPERATIONS.md', 'docs/RUNTIMES.md')
+  const docs = fileEvidence('docs/SECURITY.md', 'docs/OPERATIONS.md', 'docs/RUNTIMES.md')
+  const ev = readEvidenceJson(
+    'docs/evidence/independent-security-audit.json',
+    validateIndependentSecurityAudit,
+    sha,
+  )
   const privacy = existsSync(join(root, 'docs/PRIVACY.md')) || existsSync(join(root, 'PRIVACY.md'))
   const terms = existsSync(join(root, 'docs/TERMS.md')) || existsSync(join(root, 'TERMS.md'))
-  const audit = execSync('git log --oneline -200', { cwd: root, encoding: 'utf8' }).toLowerCase().includes('independent audit')
-  const missing = []
-  if (!privacy) missing.push('privacy policy (PRIVACY.md)')
-  if (!terms) missing.push('terms of service (TERMS.md)')
-  if (!audit) missing.push('independent security audit (no committed audit artifact)')
+  const missing = [
+    ...docs.missing.map((file) => `MISSING: ${file}`),
+    ...(!privacy ? ['MISSING: privacy policy (PRIVACY.md)'] : []),
+    ...(!terms ? ['MISSING: terms of service (TERMS.md)'] : []),
+    ...ev.evidence,
+  ]
   items.push({
     id: '7_security_audit_docs',
-    requirement: 'تدقيق أمني مستقل + خصوصية وشروط ودعم وتشغيل ومراقبة موثقة',
-    status: missing.length === 0 ? 'met' : 'not_met',
+    requirement: 'Independent security audit + privacy/terms/support/operations/monitoring evidence',
+    status: ev.met && docs.missing.length === 0 && privacy && terms ? 'met' : 'not_met',
     evidence: [
-      ...ev.found.map((d) => `present: ${d}`),
-      ...missing.map((m) => `MISSING: ${m}`),
+      ...docs.found.map((file) => `present: ${file}`),
+      ...missing,
     ],
   })
 }
 
-// 8. unit cost + capacity known, usage limits, rollback, incident plan
+// 8. Capacity is met only with commit-bound measurements from a production-like run.
 {
   const registry = existsSync(join(root, 'src/lib/agent/model-registry.ts'))
   const ratelimit = existsSync(join(root, 'src/lib/security/rateLimit.ts'))
   const rollbackDocs = execSync('git grep -l -i "rollback" -- docs/ | head -5', { cwd: root, encoding: 'utf8' }).trim().split('\n').filter(Boolean)
-  const capacity = existsSync(join(root, 'docs/CAPACITY.md'))
+  const ev = readEvidenceJson(
+    'docs/evidence/capacity-acceptance.json',
+    validateCapacityEvidence,
+    sha,
+  )
   items.push({
     id: '8_cost_capacity_rollback',
-    requirement: 'تكلفة الوحدة وسعة التشغيل معروفتان + حدود استخدام + تراجع (rollback) + خطة حوادث',
-    status: registry && ratelimit && capacity && rollbackDocs.length > 0 ? 'met' : 'not_met',
+    requirement: 'Model pricing, usage limits, rollback docs and SHA-bound capacity measurements',
+    status: registry && ratelimit && rollbackDocs.length > 0 && ev.met ? 'met' : 'not_met',
     evidence: [
       `model-registry pricing data: ${registry ? 'present' : 'MISSING'}`,
       `usage limits (rateLimit): ${ratelimit ? 'present' : 'MISSING'}`,
-      `rollback documented in: ${rollbackDocs.length > 0 ? rollbackDocs.join(', ') : 'nowhere'}`,
-      `capacity/load evidence (docs/CAPACITY.md): ${capacity ? 'present' : 'MISSING — capacity is NOT measured yet; a load test on a prod-like env is required'}`,
+      `rollback documented in: ${rollbackDocs.length > 0 ? rollbackDocs.join(', ') : 'MISSING'}`,
+      ...ev.evidence,
     ],
   })
 }
@@ -255,5 +311,5 @@ const reportIdx = process.argv.indexOf('--report')
 if (reportIdx > 0) writeFileSync(process.argv[reportIdx + 1], JSON.stringify(report, null, 2))
 console.log(JSON.stringify(report, null, 2))
 try { rmSync(tmp, { recursive: true, force: true }) } catch { /* best effort */ }
-// the gate RAN successfully; its verdict is in the report
-process.exit(0)
+// Never return a successful process status for a NO-GO release gate.
+process.exitCode = overall === 'GO_CANDIDATE' ? 0 : 1
