@@ -69,14 +69,21 @@ export async function financialHttpSmoke(params: {
     assert.equal(await ledgerCount(expense.ref), 1)
     assert.equal((await decide(expense)).status, 409)
 
-    const sale = await fixture('sale', { itemId, qty: 2, total: 200, paid: 100, customerId }, cashier)
-    const approved = await decide(sale, cashier)
+    // The launch policy now requires the owner to approve every formal
+    // business-record mutation. A cashier's approval attempt must leave the
+    // owner-authored sale draft untouched; the owner then approves it once.
+    const sale = await fixture('sale', { itemId, qty: 2, total: 200, paid: 100, customerId })
+    assert.equal((await decide(sale, cashier)).status, 403)
+    assert.equal((await current(sale.id)).status, 'AWAITING_APPROVAL')
+    assert.equal(await stock(itemId), 10)
+    assert.equal(await ledgerCount(sale.ref), 0)
+    const approved = await decide(sale, owner)
     assert.equal(approved.status, 200)
     assert.equal((await approved.json() as { outcome: { ok: boolean } }).outcome.ok, true)
     assert.equal(await stock(itemId), 8)
     assert.equal(await balance(customerId), 1100)
     assert.equal(await ledgerCount(sale.ref), 1)
-    assert.equal((await decide(sale, cashier)).status, 409)
+    assert.equal((await decide(sale, owner)).status, 409)
     assert.equal(await stock(itemId), 8)
 
     const purchase = await fixture('purchase', { itemId, qty: 3, total: 180, paid: 80, supplierId })
