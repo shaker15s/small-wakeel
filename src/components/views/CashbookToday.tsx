@@ -49,10 +49,10 @@ export default function CashbookToday({ businessId, userId, onNavigate }: ViewPr
       <div aria-hidden className="pointer-events-none absolute -left-16 -top-20 size-72 rounded-full bg-emerald-400/15 blur-3xl" />
       <div className="relative grid min-w-0 grid-cols-1 gap-8 md:grid-cols-2">
         <div className="min-w-0"><span className="inline-flex items-center gap-2 rounded-full border border-white/15 px-3 py-1 text-xs text-emerald-100"><span className="size-1.5 rounded-full bg-emerald-300" />من الدفتر الحقيقي</span>
-          <p className="mt-6 flex items-center gap-2 text-sm text-slate-300"><Wallet className="size-4" />{data?.cash == null ? "رصيد الخزنة غير معروف" : "المسجل في الخزنة دلوقتي"}</p>
+          <p className="mt-6 flex items-center gap-2 text-sm text-slate-300"><Wallet className="size-4" />{data && data.cash == null ? "رصيد الخزنة غير معروف" : "المسجل في الخزنة دلوقتي"}</p>
           <p className={`mt-2 break-words text-4xl font-bold tracking-tight sm:text-5xl ${data?.cash != null && data.cash < 0 ? 'text-red-300' : ''}`} aria-live="polite">{isPending ? 'بنفتح الدفتر…' : !data ? '—' : data.cash == null ? 'غير محدد' : egp(data.cash)}</p>
           <p className="mt-4 max-w-sm text-xs leading-6 text-slate-300">مش لازم تسجل كل بيعة. عدّ اللي في الدرج وسجّل الديون والمصاريف. فرق العد مش دليل مبيعات أو مكسب.</p>
-          {data?.cash == null && <p className="mt-2 max-w-sm text-xs leading-6 text-amber-200">لسه مفيش رصيد افتتاحي مُصرّح به ولا عدّ فعلي معتمد. الرقم مش صفر؛ الرصيد غير معروف. اعمل عدّ فعلي واعتمد المسودة عشان نثبت الرصيد.</p>}
+          {data && data.cash == null && <p className="mt-2 max-w-sm text-xs leading-6 text-amber-200">لسه مفيش رصيد افتتاحي مُصرّح به ولا عدّ فعلي معتمد. الرقم مش صفر؛ الرصيد غير معروف. اعمل عدّ فعلي واعتمد المسودة عشان نثبت الرصيد.</p>}
           {data?.cash != null && data.cash < 0 && <p role="alert" className="mt-2 text-sm text-red-300">الرصيد القديم بالسالب؛ راجع الحركات وعدّ الخزنة. مش هنسمح بخروج كاش يزيد المشكلة.</p>}
         </div>
         <form onSubmit={e => { e.preventDefault(); if (/^\d+(?:\.\d{1,2})?$/.test(count)) ask(`باقي في الخزنة ${count}`) }} className="min-w-0 self-end rounded-2xl border border-white/15 bg-white/5 p-5 backdrop-blur">
