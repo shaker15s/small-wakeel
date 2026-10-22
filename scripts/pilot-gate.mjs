@@ -20,15 +20,62 @@
  * Exit: 0 only for GO_CANDIDATE; 1 for NO-GO. `--report` is still written
  * before exit so failed releases retain their full diagnostic report.
  */
-import { spawn } from 'node:child_process'
-import { existsSync, writeFileSync, readFileSync, readdirSync, mkdtempSync, rmSync } from 'node:fs'
-import { join, resolve, dirname } from 'node:path'
+import { spawn, spawnSync } from 'node:child_process'
+import { copyFileSync, existsSync, writeFileSync, readFileSync, readdirSync, mkdtempSync, rmSync, statSync } from 'node:fs'
+import { join, resolve, dirname, sep } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { hasShaBoundCiArtifact, reportsMatchHashes, selectSuccessfulHostedCiRun, validateCapacityEvidence, validateIndependentSecurityAudit, validateP0P8Evidence } from './lib/pilot-gate-evidence.mjs'
 import { execSync } from 'node:child_process'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const tmp = mkdtempSync(join(root, '.pilot-gate-'))
+
+// The release gate runs write-capable financial tests. Never inherit an
+// operator's DATABASE_URL: create a private, marked copy of the checked-in
+// synthetic fixture and fail closed if that copy cannot be prepared.
+const tmp = mkdtempSync(join(tmpdir(), 'wakil-test-'))
+const pilotDbPath = join(tmp, 'custom.db')
+const pilotMarkerPath = join(tmp, '.wakil-disposable-test-db')
+const pilotSeedPath = join(root, 'db', 'custom.db')
+const pilotDbUrl = `file:${pilotDbPath}`
+const PILOT_DB_INITIALIZING = 'WAKIL-DISPOSABLE-SQLITE-INITIALIZING-V1'
+const PILOT_DB_READY = 'WAKIL-DISPOSABLE-SQLITE-READY-V1'
+let cleaned = false
+function cleanup() {
+  if (cleaned) return
+  cleaned = true
+  try { rmSync(tmp, { recursive: true, force: true }) } catch { /* best effort OS-temp cleanup */ }
+}
+process.on('exit', cleanup)
+
+if (!existsSync(pilotSeedPath)) {
+  throw new Error('pilot:gate refuses to run: the checked-in synthetic SQLite fixture is missing')
+}
+for (const suffix of ['-wal', '-shm']) {
+  const sidecar = pilotSeedPath + suffix
+  if (existsSync(sidecar) && statSync(sidecar).size > 0) {
+    throw new Error(`pilot:gate refuses to copy a seed with a non-empty ${suffix} sidecar; stop fixture writers and retry`)
+  }
+}
+writeFileSync(pilotMarkerPath, PILOT_DB_INITIALIZING + '\\n', { flag: 'wx' })
+copyFileSync(pilotSeedPath, pilotDbPath)
+const pilotEnv = {
+  ...process.env,
+  DATABASE_URL: pilotDbUrl,
+  WAKIL_OFFLINE: '1',
+  WAKIL_SCHEDULER: 'off',
+}
+const migration = spawnSync('bun', [join(root, 'scripts/migrate.ts')], {
+  cwd: root,
+  env: pilotEnv,
+  encoding: 'utf8',
+  stdio: ['ignore', 'pipe', 'pipe'],
+})
+if (migration.error || migration.status !== 0) {
+  const detail = [migration.error?.message, migration.stdout, migration.stderr].filter(Boolean).join('\\n').slice(-3000)
+  throw new Error(`pilot:gate refuses to run without a migrated disposable DB: ${detail || `migration exit ${migration.status}`}`)
+}
+writeFileSync(pilotMarkerPath, PILOT_DB_READY + '\\n', { flag: 'w' })
 
 function git(...args) {
   try { return execSync(`git ${args.join(' ')}`, { cwd: root, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim() }
@@ -56,7 +103,7 @@ function runTestFile(file) {
         join(root, 'tests/helpers/preload.ts'),
         join(root, 'tests/node/bun-test-shim.ts'),
       ],
-      { cwd: root, env: { ...process.env, FORCE_COLOR: '0' }, stdio: ['ignore', 'pipe', 'pipe'] },
+      { cwd: root, env: { ...pilotEnv, FORCE_COLOR: '0' }, stdio: ['ignore', 'pipe', 'pipe'] },
     )
     let out = ''
     child.stdout.on('data', (d) => (out += d))
@@ -178,7 +225,9 @@ const items = []
 // 3. model:acceptance + required Live tests — LIVE, from a real environment
 {
   const reportPath = join(tmp, 'model-acceptance.json')
-  const child = spawn(process.execPath, ['scripts/model-acceptance.mjs', '--report', reportPath], { cwd: root, env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe'] })
+  // Model acceptance is explicitly configured; its network probe is separate
+  // from app tests and never receives a database handle.
+  const child = spawn(process.execPath, ['scripts/model-acceptance.mjs', '--report', reportPath], { cwd: root, env: { ...pilotEnv }, stdio: ['ignore', 'pipe', 'pipe'] })
   const modelExitCode = await new Promise((resolveExit) => child.on('close', resolveExit))
   let live = false
   let env = 'unreachable'
@@ -327,6 +376,6 @@ const report = {
 const reportIdx = process.argv.indexOf('--report')
 if (reportIdx > 0) writeFileSync(process.argv[reportIdx + 1], JSON.stringify(report, null, 2))
 console.log(JSON.stringify(report, null, 2))
-try { rmSync(tmp, { recursive: true, force: true }) } catch { /* best effort */ }
+cleanup()
 // Never return a successful process status for a NO-GO release gate.
 process.exitCode = overall === 'GO_CANDIDATE' ? 0 : 1
