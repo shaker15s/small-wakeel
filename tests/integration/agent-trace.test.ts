@@ -78,6 +78,37 @@ describe('redaction — the ledger is readable, never a secret dump', () => {
 })
 
 describe('trace lifecycle — start to finish is reconstructable', () => {
+  test('Prisma can read the fixture integrity before touching the event ledger', async () => {
+    const integrity = await db.$queryRawUnsafe('PRAGMA integrity_check') as { integrity_check: string }[]
+    expect(integrity).toEqual([{ integrity_check: 'ok' }])
+    const foreignKeys = await db.$queryRawUnsafe('PRAGMA foreign_key_check') as unknown[]
+    expect(foreignKeys).toHaveLength(0)
+  })
+
+  test('the configured Prisma adapter can insert and read a disposable AgentEvent row', async () => {
+    const id = `diag_${randomUUID().replace(/-/g, '')}`
+    const traceId = `trc_diag_${randomUUID().replace(/-/g, '')}`
+    await db.$executeRawUnsafe(
+      'INSERT INTO "AgentEvent" ("id", "businessId", "traceId", "conversationId", "sequence", "type", "actor", "payload", "operationRef", "payloadHash", "createdAt") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      id,
+      business.id,
+      traceId,
+      conv.id,
+      0,
+      'turn.started',
+      'system',
+      '{"diagnostic":true}',
+      null,
+      null,
+      new Date().toISOString(),
+    )
+    const rows = await db.$queryRawUnsafe(
+      'SELECT "id", "sequence", "type" FROM "AgentEvent" WHERE "id" = ?',
+      id,
+    ) as { id: string; sequence: number; type: string }[]
+    expect(rows).toEqual([{ id, sequence: 0, type: 'turn.started' }])
+    await db.$executeRawUnsafe('DELETE FROM "AgentEvent" WHERE "id" = ?', id)
+  })
   test('a turn trace carries ordered, typed rows', async () => {
     const traceId = await events.startTrace({ businessId: business.id, conversationId: conv.id })
     expect(traceId).toMatch(/^trc_/)
