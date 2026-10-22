@@ -91,7 +91,7 @@ describe('PR-010 — crash after claim, before execute', () => {
     })
 
     // A plain run does NOT touch it (it is not claimable while leased)…
-    const first = await runDueTasks(10)
+    const first = await runDueTasks(10, { businessId: task.businessId })
     expect(first.due).toBe(0)
     expect((await db.scheduledTask.findUniqueOrThrow({ where: { id: task.id } })).status).toBe('running')
 
@@ -101,7 +101,7 @@ describe('PR-010 — crash after claim, before execute', () => {
     expect(requeued.status).toBe('pending')
     expect(requeued.leaseOwner).toBeNull()
 
-    await runDueTasks(10)
+    await runDueTasks(10, { businessId: task.businessId })
     const done = await db.scheduledTask.findUniqueOrThrow({ where: { id: task.id } })
     expect(done.status).toBe('done')
 
@@ -109,7 +109,7 @@ describe('PR-010 — crash after claim, before execute', () => {
     expect(count).toBe(1)
 
     // And forever after: nothing re-fires, nothing duplicates.
-    const third = await runDueTasks(10)
+    const third = await runDueTasks(10, { businessId: task.businessId })
     expect(third.due).toBe(0)
     expect(await db.message.count({ where: { conversationId: conversation.id, text: { contains: task.title } } })).toBe(1)
   })
@@ -143,7 +143,7 @@ describe('PR-010 — crash after execute commit, before delivery', () => {
     })
 
     await requeueStuckTasks()
-    await runDueTasks(10)
+    await runDueTasks(10, { businessId: task.businessId })
 
     const done = await db.scheduledTask.findUniqueOrThrow({ where: { id: task.id } })
     expect(done.status).toBe('done')
@@ -158,7 +158,7 @@ describe('PR-010 — two workers, one task', () => {
   test('two concurrent runDueTasks calls execute the same due task exactly once', async () => {
     const { conversation, task } = await makeTask()
 
-    await Promise.all([runDueTasks(10), runDueTasks(10)])
+    await Promise.all([runDueTasks(10, { businessId: task.businessId }), runDueTasks(10, { businessId: task.businessId })])
 
     const done = await db.scheduledTask.findUniqueOrThrow({ where: { id: task.id } })
     expect(done.status).toBe('done')
@@ -172,7 +172,7 @@ describe('PR-010 — bounded retry budget and honest failure', () => {
     const { conversation, task } = await makeTask({ tool: 'record_sale' }) // a money WRITE — hooks may never run it
 
     // Attempt 1 → RETRY_WAIT with backoff in the future.
-    const s1 = await runDueTasks(10)
+    const s1 = await runDueTasks(10, { businessId: task.businessId })
     expect(s1.failed).toBe(1)
     let t = await db.scheduledTask.findUniqueOrThrow({ where: { id: task.id } })
     expect(t.status).toBe('retry_wait')
@@ -181,18 +181,18 @@ describe('PR-010 — bounded retry budget and honest failure', () => {
     expect(t.nextRetryAt!.getTime()).toBeGreaterThan(Date.now())
 
     // Backoff not elapsed → not picked up.
-    expect((await runDueTasks(10)).due).toBe(0)
+    expect((await runDueTasks(10, { businessId: task.businessId })).due).toBe(0)
 
     // Attempt 2 → RETRY_WAIT again (longer backoff).
     await db.scheduledTask.update({ where: { id: task.id }, data: { nextRetryAt: minutesAgo(1) } })
-    await runDueTasks(10)
+    await runDueTasks(10, { businessId: task.businessId })
     t = await db.scheduledTask.findUniqueOrThrow({ where: { id: task.id } })
     expect(t.status).toBe('retry_wait')
     expect(t.attempts).toBe(2)
 
     // Attempt 3 → budget exhausted → FAILED with the real reason.
     await db.scheduledTask.update({ where: { id: task.id }, data: { nextRetryAt: minutesAgo(1) } })
-    await runDueTasks(10)
+    await runDueTasks(10, { businessId: task.businessId })
     t = await db.scheduledTask.findUniqueOrThrow({ where: { id: task.id } })
     expect(t.status).toBe('failed')
     expect(t.attempts).toBe(3)
@@ -204,7 +204,7 @@ describe('PR-010 — bounded retry budget and honest failure', () => {
     expect(await db.message.count({ where: { conversationId: conversation.id } })).toBe(0)
 
     // And it stays failed — no silent resurrection on later sweeps.
-    expect((await runDueTasks(10)).due).toBe(0)
+    expect((await runDueTasks(10, { businessId: task.businessId })).due).toBe(0)
   })
 })
 
@@ -250,7 +250,7 @@ describe('PR-010 — crash mid-delivery: no duplicate message', () => {
     // Recovery + next sweep: task re-queued, outbox re-delivered…
     await requeueStuckTasks()
     await requeueStuckNotifications()
-    await runDueTasks(10)
+    await runDueTasks(10, { businessId: task.businessId })
 
     const done = await db.scheduledTask.findUniqueOrThrow({ where: { id: task.id } })
     expect(done.status).toBe('done')
@@ -265,7 +265,7 @@ describe('PR-010 — recurring firings get distinct generations', () => {
   test('a daily reminder reschedules, and its legitimate second firing delivers again', async () => {
     const { conversation, task } = await makeTask({ recurrence: 'daily' })
 
-    const first = await runDueTasks(10)
+    const first = await runDueTasks(10, { businessId: task.businessId })
     expect(first.delivered).toBeGreaterThanOrEqual(1)
     let t = await db.scheduledTask.findUniqueOrThrow({ where: { id: task.id } })
     expect(t.status).toBe('pending')
@@ -276,7 +276,7 @@ describe('PR-010 — recurring firings get distinct generations', () => {
     // Second firing (push the slot into the past): a NEW generation — new
     // outbox row, new message id, legitimately a second delivery.
     await db.scheduledTask.update({ where: { id: task.id }, data: { scheduledFor: minutesAgo(1) } })
-    await runDueTasks(10)
+    await runDueTasks(10, { businessId: task.businessId })
     t = await db.scheduledTask.findUniqueOrThrow({ where: { id: task.id } })
     expect(t.executionCount).toBe(2)
     expect(await db.taskNotification.count({ where: { taskId: task.id } })).toBe(2)
