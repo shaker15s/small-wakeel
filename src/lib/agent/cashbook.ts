@@ -48,8 +48,12 @@ export async function cashbookTurn(ctx: { business: Business; user: User; text: 
   // `workflowMode` enables the focused ledger workflow and restock helpers; it is
   // not a permission boundary and must not hide safe draft creation from a new shop.
   let parsed = parseCashbook(text)
-  if (business.workflowMode !== 'cashbook' && !startsCashbookRequest(text, parsed)) return null
   const correction = parseFinancialCorrection(text)
+  // Outside the focused ledger workflow, intercept only a structurally parsed
+  // financial instruction or an explicit correction. An ambiguous phrase must
+  // fall through to the general employee/model pipeline instead of hijacking
+  // ordinary sector-specific requests.
+  if (business.workflowMode !== 'cashbook' && (!parsed || parsed === 'ambiguous') && !correction) return null
   if (correction) {
     const edited = await pendingCashbookCorrection(ctx, correction)
     if (edited?.replyText) return finish(edited.replyText)
