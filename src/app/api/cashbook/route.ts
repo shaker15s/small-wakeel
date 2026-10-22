@@ -5,6 +5,7 @@ import { serializeOp } from '../_lib/serialize'
 import { guard } from '../_lib/guard'
 import { serverError } from '../_lib/http'
 import { cashPositionEvidence } from '@/lib/domain/cashbook'
+import { cairoIsoDay } from '../_lib/dates'
 
 function expectedCashKnownFromPayload(raw: string): boolean | null {
   try {
@@ -16,7 +17,6 @@ function expectedCashKnownFromPayload(raw: string): boolean | null {
     return null
   }
 }
-import { cairoIsoDay } from '../_lib/dates'
 export const dynamic = 'force-dynamic'
 export async function GET(req: NextRequest) {
   try {
