@@ -76,6 +76,10 @@ export async function createDraft(params: {
   idempotencyKey: string
   replaceDraftRef?: string
 }): Promise<Operation> {
+  // validateOperationPayload materializes defaults into the payload. Work on a
+  // private clone so the caller's request remains immutable and a retry with
+  // the same object hashes the same original request bytes.
+  params = { ...params, payload: structuredClone(params.payload) }
   return db.$transaction(async (tx) => {
     const user = await requireBusinessUser(params.businessId, params.userId, tx)
     if (!canDraft(user.role, params.type)) throw new AuthorizationError()
@@ -232,6 +236,13 @@ export async function executeOperation(opId: string, decidedBy: string, reason?:
         if (outcome.ok) await recordLegacyDebtEffects(tx, op.businessId, op.ref, op.type as OpType, payload)
         if (outcome.ok) outcome.checks.push(...await verifyAccounting())
         if (!outcome.ok || outcome.checks.some((check) => !check.pass)) throw new FailedVerification(outcome)
+        // The pilot gate relies on this explicit actor-bound approval receipt.
+        // Keep it in the same transaction as SUCCEEDED + verification audit, so
+        // a committed success can never exist without its human-approval proof.
+        await audit(op.businessId, decidedBy, 'operation.approved', op.ref, {
+          risk: validatedRisk,
+          reasonRecorded: Boolean(decisionReason),
+        }, tx)
         const updated = await tx.operation.update({ where: { id: opId }, data: {
           status: 'SUCCEEDED', risk: validatedRisk, payload: JSON.stringify(payload), result: JSON.stringify(outcome), executedAt: new Date(),
         } })

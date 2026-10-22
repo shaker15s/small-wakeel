@@ -110,7 +110,9 @@ describe('financial write boundary', () => {
       businessId: business.id, userId: owner.id, type: 'sale' as const, summary: key(),
       payload: { itemId: it.id, qty: 2, total: 200 }, idempotencyKey: key(),
     }
+    const originalRequestPayload = structuredClone(params.payload)
     const first = await createDraft(params)
+    expect(params.payload).toEqual(originalRequestPayload) // the draft validator must not mutate caller-owned input
     const stored = JSON.parse(first.payload) as Record<string, unknown>
     expect(stored.paid).toBe(200) // validation materializes paid=total
     expect(first.requestPayloadHash).toMatch(/^[0-9a-f]{64}$/)
@@ -171,6 +173,19 @@ describe('financial write boundary', () => {
       expect((await db.operation.findUniqueOrThrow({ where: { id: op.id } })).status).toBe('AWAITING_APPROVAL')
     }
   })
+  test('a successful approval writes actor-bound approval and success audit rows', async () => {
+    const op = await expense(100)
+    const result = await executeOperation(op.id, owner.id)
+    expect(result.op.status).toBe('SUCCEEDED')
+    expect(result.outcome.ok).toBe(true)
+    const events = await db.auditEvent.findMany({
+      where: { businessId: business.id, ref: op.ref },
+      select: { actor: true, action: true },
+    })
+    expect(events.some((event) => event.action === 'operation.approved' && event.actor === owner.id)).toBe(true)
+    expect(events.some((event) => event.action === 'operation.succeeded' && event.actor === owner.id)).toBe(true)
+  })
+
   test('direct approval/rejection checks both role and tenant without touching reason/status', async () => {
     const op = await expense()
     for (const user of [cashier, outsider]) {

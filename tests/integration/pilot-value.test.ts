@@ -59,13 +59,15 @@ beforeAll(async () => {
       { businessId, conversationId: c2, userId, kind: 'purchase_new_item', question: 'من المزوّد؟', status: 'resolved', expiresAt: at(999_000) },
     ],
   })
-  // operations: one approved+succeeded (fine), one SUCCEEDED WITHOUT approval
-  // (a release blocker the report must surface), one awaiting approval
+  // operations: one approved+succeeded (fine), one SUCCEEDED expense without
+  // approval, one SUCCEEDED reversal without approval, and one pending draft.
+  // Both unapproved successes are release blockers; reversals are not exempt.
   await db.operation.createMany({
     data: [
       { id: 'op1', ref: 'WKL-9001', businessId, userId, type: 'sale', status: 'SUCCEEDED', risk: 'R2', summary: 'بيع معتمد', payload: '{}', idempotencyKey: 'k1', createdAt: at(100_000) },
       { id: 'op2', ref: 'WKL-9002', businessId, userId, type: 'expense', status: 'SUCCEEDED', risk: 'R2', summary: 'مصروف بلا اعتماد (خطأ مقصود في البذرة)', payload: '{}', idempotencyKey: 'k2', createdAt: at(101_000) },
-      { id: 'op3', ref: 'WKL-9003', businessId, userId, type: 'purchase', status: 'AWAITING_APPROVAL', risk: 'R2', summary: 'بانتظار الاعتماد', payload: '{}', idempotencyKey: 'k3', createdAt: at(102_000) },
+      { id: 'op3', ref: 'WKL-9003', businessId, userId, type: 'reversal', status: 'SUCCEEDED', risk: 'R3', summary: 'عكس بلا اعتماد (خطأ مقصود في البذرة)', payload: '{}', idempotencyKey: 'k4', createdAt: at(101_500) },
+      { id: 'op4', ref: 'WKL-9004', businessId, userId, type: 'purchase', status: 'AWAITING_APPROVAL', risk: 'R2', summary: 'بانتظار الاعتماد', payload: '{}', idempotencyKey: 'k3', createdAt: at(102_000) },
     ],
   })
   await db.auditEvent.createMany({
@@ -118,10 +120,10 @@ test('the value report measures what the ledgers hold — and says «غير مس
   expect(r.clarifications.resolved).toBe(1)
 
   // financial safety: the unapproved SUCCEEDED op MUST be surfaced
-  expect(r.operations.total).toBe(3)
-  expect(r.operations.byStatus.SUCCEEDED).toBe(2)
+  expect(r.operations.total).toBe(4)
+  expect(r.operations.byStatus.SUCCEEDED).toBe(3)
   expect(r.operations.byStatus.AWAITING_APPROVAL).toBe(1)
-  expect(r.operations.succeededWithoutApproval).toBe(1)
+  expect(r.operations.succeededWithoutApproval).toBe(2)
 
   // stuck work + fallbacks
   expect(r.stuckTasks.count).toBe(2)

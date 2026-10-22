@@ -93,7 +93,9 @@ function turnDurations(events: AgentEvent[]): number[] {
  * an approval row is the proof of a human decision.)
  */
 async function succeededWithoutApproval(businessId: string, ops: Operation[]): Promise<number> {
-  const succeeded = ops.filter((o) => o.status === 'SUCCEEDED' && o.type !== 'reversal')
+  // Reversals are formal financial operations too; do not exempt them from
+  // the same proof-of-approval requirement as sales, expenses or payments.
+  const succeeded = ops.filter((o) => o.status === 'SUCCEEDED')
   if (succeeded.length === 0) return 0
   const refs = [...new Set(succeeded.map((o) => o.ref))]
   const approved = await db.auditEvent.findMany({
