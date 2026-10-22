@@ -27,6 +27,24 @@ afterAll(async () => {
   if (business) await db.business.delete({ where: { id: business.id } })
 })
 
+test('ambiguous finance-like wording in inventory mode falls through to the general employee', async () => {
+  const shop = business!
+  const user = owner!
+  expect(shop.workflowMode).toBe('inventory')
+  const conversation = await db.conversation.create({
+    data: { businessId: shop.id, userId: user.id, title: 'Ambiguous finance falls through' },
+  })
+  const result = await cashbookTurn({
+    business: shop,
+    user,
+    conversationId: conversation.id,
+    turnId: randomUUID(),
+    text: 'دفعت ٧٥ لمحمد تاجر الجملة',
+    history: [],
+  }, () => {})
+  expect(result).toBeNull()
+})
+
 test('a clear drawer count drafts from general mode and mutates the ledger only after approval', async () => {
   const shop = business!
   const user = owner!
