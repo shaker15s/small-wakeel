@@ -67,6 +67,13 @@ export function isLiveAcceptanceEndpoint(base, apiKey, models = []) {
   }
 }
 
+/** Fail before network I/O if an API key would be sent to a non-live endpoint. */
+export function assertSafeAcceptanceCredentialTarget(base, apiKey, models = []) {
+  if (apiKey && !isLiveAcceptanceEndpoint(base, apiKey, models)) {
+    throw new Error('Refusing to send WAKIL_ACCEPTANCE_API_KEY to a non-HTTPS, private, or mock endpoint')
+  }
+}
+
 function normalizeDigits(value) {
   return String(value)
     .replace(/[٠-٩]/g, (digit) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit)))
