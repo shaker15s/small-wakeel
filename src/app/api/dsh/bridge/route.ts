@@ -17,6 +17,44 @@ function fail(status: number, error: string) {
   return NextResponse.json({ ok: false, error }, { status, headers: { 'Cache-Control': 'no-store' } })
 }
 
+const MAX_BODY_BYTES = 64 * 1024
+
+async function readBoundedBody(req: Request): Promise<string> {
+  const declared = req.headers.get('content-length')
+  if (declared !== null && /^\d+$/.test(declared) && Number(declared) > MAX_BODY_BYTES) {
+    throw new WakilBridgeError(413, 'حجم طلب DSH أكبر من المسموح.')
+  }
+  const reader = req.body?.getReader()
+  if (!reader) return ''
+  const chunks: Uint8Array[] = []
+  let size = 0
+  try {
+    for (;;) {
+      const next = await reader.read()
+      if (next.done) break
+      size += next.value.byteLength
+      if (size > MAX_BODY_BYTES) {
+        await reader.cancel().catch(() => undefined)
+        throw new WakilBridgeError(413, 'حجم طلب DSH أكبر من المسموح.')
+      }
+      chunks.push(next.value)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  const bytes = new Uint8Array(size)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch {
+    throw new WakilBridgeError(400, 'ترميز نص طلب DSH غير صالح.')
+  }
+}
+
 /**
  * Private server-to-server bridge for the local DeepSeek Harness profile.
  *
@@ -44,8 +82,7 @@ export async function POST(req: Request) {
       return fail(401, 'بيانات دخول ربط DSH غير صالحة.')
     }
 
-    const bodyText = await req.text()
-    if (bodyText.length > 64 * 1024) return fail(413, 'حجم طلب DSH أكبر من المسموح.')
+    const bodyText = await readBoundedBody(req)
     let body: unknown
     try { body = JSON.parse(bodyText) } catch { return fail(400, 'طلب JSON غير صالح.') }
     if (!body || typeof body !== 'object' || Array.isArray(body)) return fail(400, 'الطلب لازم يكون كائن JSON.')
