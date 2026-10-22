@@ -4334,7 +4334,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           emit({ event: 'cards', cards: allCards })
           usedTools.push(call.tool)
           brainFacts.push(...factsFromCards(subCards))
-          meta.notesJotted += jotFactsFromCards(
+          meta.notesJotted += await jotFactsFromCards(
             { businessId: business.id, userId: user.id, conversationId: ctx.conversationId },
             subCards,
           )
@@ -4386,7 +4386,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             usedTools.push(r.tool)
             for (const c of r.cards) allCards.push(c)
             brainFacts.push(...factsFromCards(r.cards))
-            meta.notesJotted += jotFactsFromCards(
+            meta.notesJotted += await jotFactsFromCards(
               { businessId: business.id, userId: user.id, conversationId: ctx.conversationId },
               r.cards,
             )
@@ -4519,7 +4519,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             emit({ event: 'card', card: draftCard })
           }
           brainFacts.push(...[...resolved.card.fields, ...resolved.card.effects].map((f) => ({ label: f.label, value: f.value })))
-          void jotNote({
+          await jotNote({
             businessId: business.id,
             userId: user.id,
             conversationId: ctx.conversationId,
@@ -4725,7 +4725,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             },
           })
           step.detail = `${title} — ${whenLabel || whenAr}`
-          void jotNote({
+          await jotNote({
             businessId: business.id,
             userId: user.id,
             conversationId: ctx.conversationId,
@@ -4876,7 +4876,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         // ---- context pressure, the CHEAP layer first (dsh compaction listener):
         // older tool results are digested instead of re-sent whole to the model.
         const { kept, budget } = budgetToolHistory(resultsForModel, 3)
-        if (budget.compressed) void logContextPressure(business.id, user.id, { ...budget, rounds })
+        if (budget.compressed) await logContextPressure(business.id, user.id, { ...budget, rounds })
         convo.push({
           role: 'user',
           content: `نتايج الأدوات (JSON):\n${
@@ -5265,7 +5265,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         usedTools.push(sub.tool)
         // R15: ground-truth facts + scratchpad jot («ورقة وقلم»)
         turnFacts.push(...factsFromCards(subCards))
-        meta.notesJotted += jotFactsFromCards(
+        meta.notesJotted += await jotFactsFromCards(
           { businessId: business.id, userId: user.id, conversationId: ctx.conversationId },
           subCards,
         )
@@ -5336,7 +5336,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         turnFacts.push(
           ...[...resolved.card.fields, ...resolved.card.effects].map((f) => ({ label: f.label, value: f.value })),
         )
-        void jotNote({
+        await jotNote({
           businessId: business.id,
           userId: user.id,
           conversationId: ctx.conversationId,
@@ -5363,7 +5363,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         .slice(4)
         .map((s) => s.sourceText.slice(0, 60))
         .join('؛ ')
-      void jotNote({
+      await jotNote({
         businessId: business.id,
         userId: user.id,
         conversationId: ctx.conversationId,
@@ -5398,7 +5398,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     done(IDX.verify, 'الأرقام جاية من قاعدة البيانات مباشرة')
     // R15: ground-truth facts + scratchpad jot («ورقة وقلم»)
     turnFacts.push(...factsFromCards(cards))
-    meta.notesJotted += jotFactsFromCards(
+    meta.notesJotted += await jotFactsFromCards(
       { businessId: business.id, userId: user.id, conversationId: ctx.conversationId },
       cards,
     )
@@ -5448,7 +5448,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         questionMode = true
         // R15: an ambiguous request lands on the paper as a HYPOTHESIS — the
         // employee notes what he THINKS the user wants before asking
-        void jotNote({
+        await jotNote({
           businessId: business.id,
           userId: user.id,
           conversationId: ctx.conversationId,
@@ -5522,7 +5522,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         turnFacts.push(
           ...[...resolved.card.fields, ...resolved.card.effects].map((f) => ({ label: f.label, value: f.value })),
         )
-        void jotNote({
+        await jotNote({
           businessId: business.id,
           userId: user.id,
           conversationId: ctx.conversationId,
