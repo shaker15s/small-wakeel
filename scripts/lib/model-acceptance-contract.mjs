@@ -26,7 +26,7 @@ export function resolveChatCompletionsUrl(base) {
 }
 
 function isPrivateOrLocalHost(rawHostname) {
-  const host = String(rawHostname).toLowerCase().replace(/^\[|\]$/g, '')
+  const host = String(rawHostname).toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '')
   if (
     host === 'localhost' ||
     host.endsWith('.localhost') ||
@@ -35,6 +35,18 @@ function isPrivateOrLocalHost(rawHostname) {
     host === '::1' ||
     (host.includes(':') && (host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe80:')))
   ) return true
+
+  // URLs may normalize an IPv4-mapped IPv6 loopback literal into hex words.
+  // Unwrap both dotted and hexadecimal forms before deciding it is public.
+  const mappedDotted = host.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/)
+  if (mappedDotted) return isPrivateOrLocalHost(mappedDotted[1])
+  const mappedHex = host.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/)
+  if (mappedHex) {
+    const high = Number.parseInt(mappedHex[1], 16)
+    const low = Number.parseInt(mappedHex[2], 16)
+    const ipv4 = [(high >> 8) & 255, high & 255, (low >> 8) & 255, low & 255].join('.')
+    return isPrivateOrLocalHost(ipv4)
+  }
 
   const parts = host.split('.')
   if (parts.length !== 4 || parts.some((part) => !/^\d{1,3}$/.test(part) || Number(part) > 255)) return false
