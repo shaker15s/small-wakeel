@@ -5,6 +5,7 @@ import { testDb } from '../helpers/test-db'
 import { createDraft, executeOperation, rejectOperation } from '@/lib/domain/executors'
 import { AuthorizationError } from '@/lib/security/permissions'
 import { OperationValidationError } from '@/lib/domain/errors'
+import { runAgentTurn } from '@/lib/agent/harness'
 
 let db: Awaited<ReturnType<typeof testDb>>
 let business: Business
@@ -40,6 +41,28 @@ afterAll(async () => {
 })
 
 describe('financial write boundary', () => {
+  test('collecting from a known zero-balance customer asks about an advance/loan and creates no draft', async () => {
+    const customer = await db.customer.create({
+      data: { businessId: business.id, name: `عميل بلا مديونية ${randomUUID().slice(0, 8)}`, balance: 0 },
+    })
+    const conversation = await db.conversation.create({
+      data: { businessId: business.id, userId: owner.id, title: key() },
+    })
+
+    const result = await runAgentTurn({
+      business,
+      user: owner,
+      conversationId: conversation.id,
+      modelKey: null,
+      text: `حصلت من ${customer.name} ١٨٠`,
+      history: [],
+    }, () => {})
+
+    expect(result.replyText).toMatch(/عربون ولا سلفة/)
+    expect(await db.operation.count({ where: { conversationId: conversation.id } })).toBe(0)
+    expect((await db.customer.findUniqueOrThrow({ where: { id: customer.id } })).balance).toBe(0)
+  })
+
   test('draft creation checks live membership, type permissions and conversation ownership', async () => {
     const conversation = await db.conversation.create({ data: { businessId: business.id, userId: cashier.id, title: 'private' } })
     const params = { businessId: business.id, userId: owner.id, type: 'expense' as const, summary: key(), payload: { total: 100 }, idempotencyKey: key() }
