@@ -59,5 +59,11 @@ skills/
 
 # Local CI reports
 .ci-results/
+
+# Owner/operator-only release evidence: intentionally untracked and bound to an
+# already-fixed release SHA. Committing these files would change that SHA.
+docs/evidence/p0-p8-acceptance.json
+docs/evidence/independent-security-audit.json
+docs/evidence/capacity-acceptance.json
 bin/
 tests/node/.mocks/
