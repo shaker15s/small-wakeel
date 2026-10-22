@@ -33,9 +33,7 @@ function isPrivateOrLocalHost(rawHostname) {
     host.endsWith('.local') ||
     host === '::' ||
     host === '::1' ||
-    host.startsWith('fc') ||
-    host.startsWith('fd') ||
-    host.startsWith('fe80:')
+    (host.includes(':') && (host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe80:')))
   ) return true
 
   const parts = host.split('.')
@@ -84,8 +82,10 @@ export function evaluateExpectedSaleCall(calls) {
 
   const args = call.args && typeof call.args === 'object' && !Array.isArray(call.args) ? call.args : {}
   const item = normalizeDigits(args.item ?? '').toLowerCase()
-  const qty = Number(normalizeDigits(args.qty ?? ''))
-  const amount = Number(normalizeDigits(args.amount ?? ''))
+  const qtyText = normalizeDigits(args.qty ?? '')
+  const amountText = normalizeDigits(args.amount ?? '')
+  const qty = qtyText ? Number(qtyText) : Number.NaN
+  const amount = amountText ? Number(amountText) : Number.NaN
   const itemMatches = item.includes('زيت') && item.includes('عباد') && /1\.5/.test(item)
   const qtyMatches = Number.isFinite(qty) && qty === 3
   const amountMatches = Number.isFinite(amount) && amount === 255
