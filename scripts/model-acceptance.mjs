@@ -131,7 +131,7 @@ async function runModel(model) {
   try {
     const r = await chat(model, [
       { role: 'system', content: 'استخدم الأدوات المتاحة عند الطلب. رد بأداة tool_calls أو نية واضحة.' },
-      { role: 'user', content: 'سجل بيع 3 علب من زيت عباد 1.5 لتر؛ إجمالي الفاتورة 255 جنيه والمدفوع 255 جنيه.' },
+      { role: 'user', content: 'سجل بيع 3 علب من زيت عباد 1.5 لتر بسعر 85 جنيه للعلبة؛ إجمالي الفاتورة 255 جنيه والمدفوع 255 جنيه.' },
     ], { tools: [TOOL, READ_TOOL], ...(isMockEndpoint ? { acceptanceProbe: 'record-sale-v1' } : {}) })
     const parsed = safeJson(r.raw)
     const calls = extractToolCalls(parsed)
