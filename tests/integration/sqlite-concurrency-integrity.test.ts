@@ -6,7 +6,6 @@ import { logAgentEvent, startTrace } from '@/lib/domain/agent-events'
 import { testDb } from '../helpers/test-db'
 
 let db: PrismaClient
-let businessId: string | undefined
 const createdBusinessIds: string[] = []
 
 beforeAll(async () => {
@@ -26,7 +25,6 @@ describe('local SQLite write concurrency and integrity', () => {
       name: `sqlite-integrity-${randomUUID()}`,
       type: 'supermarket',
     })
-    businessId = created.id
     createdBusinessIds.push(created.id)
     const business = await db.business.findUniqueOrThrow({ where: { id: created.id } })
     const user = await db.user.findUniqueOrThrow({ where: { id: created.users[0].id } })
