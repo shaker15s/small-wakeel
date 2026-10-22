@@ -362,10 +362,10 @@ function brainReply(rawText: string, model: string, messages: Msg[] = []): strin
     // than historical { item, amount } fields. The probe deliberately uses a
     // known item and explicit invoice/paid totals so the adapter test is exact.
     if (d.opType === "sale") {
-      const product = text.match(/(زيت\\s+عباد\\s+1[.٫]5(?:\\s+لتر)?)/);
-      const totalMatch = text.match(/(?:إجمالي(?:\\s+الفاتورة)?|المجموع|بـ|بسعر|بمبلغ)\\s*(?:هو\\s*)?([\\d٠-٩][\\d٠-٩.,]*)/);
-      const paidMatch = text.match(/(?:المدفوع|مدفوع)\\s*(?:هو\\s*)?([\\d٠-٩][\\d٠-٩.,]*)/);
-      const qtyMatch = text.match(/([\\d٠-٩]+)\\s*(?:علب?|علبة)/);
+      const product = text.match(/(زيت\s+عباد\s+1[.٫]5(?:\s+لتر)?)/);
+      const totalMatch = text.match(/(?:إجمالي(?:\s+الفاتورة)?|المجموع|بـ|بسعر|بمبلغ)\s*(?:هو\s*)?([\d٠-٩][\d٠-٩.,]*)/);
+      const paidMatch = text.match(/(?:المدفوع|مدفوع)\s*(?:هو\s*)?([\d٠-٩][\d٠-٩.,]*)/);
+      const qtyMatch = text.match(/([\d٠-٩]+)\s*(?:علب?|علبة)/);
       const total = totalMatch ? toNum(totalMatch[1]) : d.amount;
       const paid = paidMatch ? toNum(paidMatch[1]) : total;
       const qty = qtyMatch ? toNum(qtyMatch[1]) : d.qty;
