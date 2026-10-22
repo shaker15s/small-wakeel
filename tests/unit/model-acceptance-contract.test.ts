@@ -15,6 +15,13 @@ describe('live model acceptance contract', () => {
       .toBe('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions')
   })
 
+  test('rejects query strings and fragments so API keys cannot be placed in the URL', () => {
+    expect(() => resolveChatCompletionsUrl('https://api.example.com/v1?key=secret')).toThrow(/query strings/)
+    expect(() => resolveChatCompletionsUrl('https://api.example.com/v1#debug')).toThrow(/fragments/)
+    expect(isLiveAcceptanceEndpoint('https://api.example.com/v1?key=secret', 'secret', ['model-x'])).toBe(false)
+    expect(isLiveAcceptanceEndpoint('https://api.example.com/v1#debug', 'secret', ['model-x'])).toBe(false)
+  })
+
   test('does not duplicate an already-complete endpoint', () => {
     expect(resolveChatCompletionsUrl('https://api.example.com/v1/chat/completions'))
       .toBe('https://api.example.com/v1/chat/completions')
@@ -37,6 +44,11 @@ describe('live model acceptance contract', () => {
     expect(isLiveAcceptanceEndpoint('http://api.example.com/v1', 'secret', ['model-x'])).toBe(false)
     expect(isLiveAcceptanceEndpoint('http://127.0.0.1:3031/v1', 'secret', ['model-x'])).toBe(false)
     expect(isLiveAcceptanceEndpoint('https://192.168.1.20/v1', 'secret', ['model-x'])).toBe(false)
+    expect(isLiveAcceptanceEndpoint('https://192.0.2.10/v1', 'secret', ['model-x'])).toBe(false)
+    expect(isLiveAcceptanceEndpoint('https://api.internal/v1', 'secret', ['model-x'])).toBe(false)
+    expect(isLiveAcceptanceEndpoint('https://[fe90::1]/v1', 'secret', ['model-x'])).toBe(false)
+    expect(isLiveAcceptanceEndpoint('https://[ff02::1]/v1', 'secret', ['model-x'])).toBe(false)
+    expect(isLiveAcceptanceEndpoint('https://[2001:db8::1]/v1', 'secret', ['model-x'])).toBe(false)
     expect(isLiveAcceptanceEndpoint('https://[::ffff:7f00:1]/v1', 'secret', ['model-x'])).toBe(false)
     expect(isLiveAcceptanceEndpoint('https://localhost./v1', 'secret', ['model-x'])).toBe(false)
     expect(isLiveAcceptanceEndpoint('https://api.example.com/v1', 'secret', ['mock-model'])).toBe(false)
@@ -45,6 +57,9 @@ describe('live model acceptance contract', () => {
   test('blocks credential transmission to insecure/private/mock endpoints before network access', () => {
     expect(() => assertSafeAcceptanceCredentialTarget('http://127.0.0.1:3031/v1', 'secret', ['model-x'])).toThrow(/Refusing to send/)
     expect(() => assertSafeAcceptanceCredentialTarget('https://192.168.1.10/v1', 'secret', ['model-x'])).toThrow(/Refusing to send/)
+    expect(() => assertSafeAcceptanceCredentialTarget('https://[fe90::1]/v1', 'secret', ['model-x'])).toThrow(/Refusing to send/)
+    expect(() => assertSafeAcceptanceCredentialTarget('https://api.internal/v1', 'secret', ['model-x'])).toThrow(/Refusing to send/)
+    expect(() => assertSafeAcceptanceCredentialTarget('https://api.example.com/v1?key=secret', 'secret', ['model-x'])).toThrow(/Refusing to send/)
     expect(() => assertSafeAcceptanceCredentialTarget('https://api.example.com/v1', 'secret', ['mock-model'])).toThrow(/Refusing to send/)
     expect(() => assertSafeAcceptanceCredentialTarget('https://generativelanguage.googleapis.com/v1beta', 'secret', ['gemini-3.8-flash'])).not.toThrow()
     expect(() => assertSafeAcceptanceCredentialTarget('http://127.0.0.1:3031/v1', '', ['mock-model'])).not.toThrow()

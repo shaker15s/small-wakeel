@@ -1,3 +1,5 @@
+import ipaddr from 'ipaddr.js'
+
 const GOOGLE_OPENAI_HOST = 'generativelanguage.googleapis.com'
 
 /** True only for an explicit mock model or a loopback test endpoint. */
@@ -42,11 +44,10 @@ export function resolveChatCompletionsUrl(base) {
   }
 
   const url = new URL(base.trim())
-  if (url.username || url.password) {
-    throw new Error('API base URL must not contain embedded credentials')
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error('API base URL must not contain credentials, query strings, or fragments')
   }
 
-  url.hash = ''
   const path = url.pathname.replace(/\/+$/, '')
 
   if (url.hostname.toLowerCase() === GOOGLE_OPENAI_HOST && path === '/v1beta') {
@@ -61,38 +62,27 @@ export function resolveChatCompletionsUrl(base) {
 }
 
 function isPrivateOrLocalHost(rawHostname) {
-  const host = String(rawHostname).toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '')
-  if (
-    host === 'localhost' ||
-    host.endsWith('.localhost') ||
-    host.endsWith('.local') ||
-    host === '::' ||
-    host === '::1' ||
-    (host.includes(':') && (host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe80:')))
-  ) return true
+  const host = String(rawHostname)
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.$/, '')
 
-  // URLs may normalize an IPv4-mapped IPv6 loopback literal into hex words.
-  // Unwrap both dotted and hexadecimal forms before deciding it is public.
-  const mappedDotted = host.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/)
-  if (mappedDotted) return isPrivateOrLocalHost(mappedDotted[1])
-  const mappedHex = host.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/)
-  if (mappedHex) {
-    const high = Number.parseInt(mappedHex[1], 16)
-    const low = Number.parseInt(mappedHex[2], 16)
-    const ipv4 = [(high >> 8) & 255, high & 255, (low >> 8) & 255, low & 255].join('.')
-    return isPrivateOrLocalHost(ipv4)
+  const nonPublicSuffixes = [
+    'localhost', 'local', 'internal', 'intranet', 'lan', 'home', 'home.arpa',
+    'test', 'invalid',
+  ]
+  if (nonPublicSuffixes.some((suffix) => host === suffix || host.endsWith(`.${suffix}`))) return true
+
+  // Use the same IP-range classifier as the server-side provider transport.
+  // Do not enumerate only common RFC1918 ranges: link-local IPv6 (fe80::/10),
+  // multicast, documentation, reserved, and IPv4-mapped IPv6 must fail too.
+  try {
+    return ipaddr.process(host).range() !== 'unicast'
+  } catch {
+    // Hostnames are not IP literals. Reject single-label names; a provider must
+    // be configured with a real public DNS name rather than an internal alias.
+    return !host.includes('.')
   }
-
-  const parts = host.split('.')
-  if (parts.length !== 4 || parts.some((part) => !/^\d{1,3}$/.test(part) || Number(part) > 255)) return false
-  const [a, b] = parts.map(Number)
-  return a === 0 || a === 10 || a === 127 ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 100 && b >= 64 && b <= 127) ||
-    (a === 198 && (b === 18 || b === 19)) ||
-    a >= 224
 }
 
 /**
@@ -106,7 +96,7 @@ export function isLiveAcceptanceEndpoint(base, apiKey, models = []) {
 
   try {
     const url = new URL(base)
-    if (url.protocol !== 'https:' || url.username || url.password) return false
+    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) return false
     if (!url.hostname || isPrivateOrLocalHost(url.hostname)) return false
     return true
   } catch {
