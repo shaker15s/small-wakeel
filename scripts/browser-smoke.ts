@@ -102,6 +102,28 @@ export async function browserSmoke(databaseUrl: string, key: string, boot: (orig
     }
     await expect(page.getByRole('status').filter({ hasText: 'تم تأكيد البريد' })).toBeVisible()
     await page.getByRole('button', { name: 'الرجوع إلى وكيل', exact: true }).click()
+
+    // The real first-run journey now has four stages, including the persisted
+    // owner interview. Drive the actual flow instead of waiting for the last
+    // stage title immediately after returning from email verification.
+    await expect(page.getByRole('heading', { name: 'معرفك — أنا «وكيل»', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'شوفه شغال', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'أول محادثة هتبقى كده', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'زبطني على شغلك', exact: true }).click()
+
+    // Required facts are answered/skipped through the real API state machine.
+    // Unknown opening cash must remain unknown, not become a synthetic zero.
+    await expect(page.getByText('دلوقتي بتسجل البيع والشراء والتحصيل إزاي؟', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'ورقة وقلم', exact: true }).click()
+    await expect(page.getByText('إيه الوحدات اللي بتتداول في شغلك؟ (اختار اللي يناسبك)', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'قطعة', exact: true }).click()
+    await page.getByRole('button', { name: /تأكيد الاختيار/ }).click()
+    await expect(page.getByText(/الخزنة بدأت بكام/)).toBeVisible()
+    await page.getByRole('button', { name: /تخطي — هتفضل/ }).click()
+    await expect(page.getByRole('button', { name: 'راجعت الملف — أكد وأكمل', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'راجعت الملف — أكد وأكمل', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'كمل للإعدادات', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'كمل للإعدادات', exact: true }).click()
     await expect(page.getByRole('heading', { name: 'وكيل على مقاس شغلك', exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'لون indigo', exact: true }).click()
     await page.getByLabel('الخزنة والسيولة', { exact: true }).check()
@@ -110,6 +132,11 @@ export async function browserSmoke(databaseUrl: string, key: string, boot: (orig
     await expect.poll(async () => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--analytics-accent').trim())).toBe('#4f46e5')
     const savedProfile = JSON.parse(String((await sql.execute({ sql: 'SELECT config FROM WorkspacePreference WHERE businessId=? AND userId=?', args: [home.businessId, home.userId] })).rows[0].config))
     assert.equal(savedProfile.onboardingComplete, true); assert.equal(savedProfile.accent, 'indigo')
+    const profileRow = (await sql.execute({ sql: 'SELECT answers, openingCashStatedAt FROM BusinessProfile WHERE businessId=?', args: [home.businessId] })).rows[0]
+    const profileAnswers = JSON.parse(String(profileRow.answers))
+    assert.equal(profileRow.openingCashStatedAt, null, 'skipping opening cash must not write a fake zero')
+    assert.equal(profileAnswers.openingCash.skipped, true)
+    assert.equal(profileAnswers.openingCash.value, null)
     for (const table of ['Item', 'Customer', 'Supplier', 'Operation', 'CashEntry']) assert.equal(Number((await sql.execute({ sql: `SELECT COUNT(*) n FROM ${table} WHERE businessId=?`, args: [home.businessId] })).rows[0].n), 0)
     await page.getByRole('button', { name: 'تفكير أعمق', exact: true }).click()
     await expect.poll(async () => JSON.parse(String((await sql.execute({ sql: 'SELECT config FROM WorkspacePreference WHERE businessId=? AND userId=?', args: [home.businessId, home.userId] })).rows[0].config)).responseMode).toBe('deep')
