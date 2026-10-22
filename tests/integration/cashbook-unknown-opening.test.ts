@@ -9,6 +9,7 @@ import { cashbookTurn } from '@/lib/agent/cashbook'
 import { executeOperation } from '@/lib/domain/executors'
 import { GET as getCashbook } from '@/app/api/cashbook/route'
 import { runReadTool } from '@/lib/agent/tools'
+import { getSnapshot } from '@/lib/agent/memory'
 import { cairoIsoDay } from '@/app/api/_lib/dates'
 
 const db = await testDb()
@@ -41,6 +42,7 @@ test('a schema-default zero is unknown; an explicitly stated zero is known', asy
   expect(before.currentCashKnown).toBe(false)
   expect(before.cash).toBeNull()
   expect(before.ledgerCash).toBe(0)
+  expect((await getSnapshot(blank.business)).cash).toBeNull()
 
   const positionCard = await runReadTool('get_cash_position', blank.business.id)
   expect(JSON.stringify(positionCard)).toContain('غير مسجل من صاحب المحل')
@@ -96,6 +98,7 @@ test('the first approved count establishes a baseline; later count deltas stay s
   expect(firstPosition.openingCashKnown).toBe(false)
   expect(firstPosition.currentCashKnown).toBe(true)
   expect(firstPosition.cash).toBe(250000)
+  expect((await getSnapshot(ctx.business)).cash).toBe(250000)
   expect(firstPosition.cashIn).toBe(0)
   expect(firstPosition.cashOut).toBe(0)
   expect(firstPosition.cashCountAdjustment).toBe(0)
