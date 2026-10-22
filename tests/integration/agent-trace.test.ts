@@ -152,6 +152,12 @@ describe('live wiring — a real turn writes its trace', () => {
     const types = rows.map((r: any) => r.type)
     expect(types[0]).toBe('turn.started')
     expect(types).toContain('turn.ended')
+    // Verify integrity after the full turn, including its concurrent business,
+    // telemetry and agent-event writes—not just after fixture setup.
+    const integrityAfterTurn = await db.$queryRawUnsafe('PRAGMA integrity_check') as { integrity_check: string }[]
+    expect(integrityAfterTurn).toEqual([{ integrity_check: 'ok' }])
+    const foreignKeysAfterTurn = await db.$queryRawUnsafe('PRAGMA foreign_key_check') as unknown[]
+    expect(foreignKeysAfterTurn).toHaveLength(0)
     // sequences strictly ordered
     const seqs = rows.map((r: any) => r.sequence)
     expect(seqs.every((s: number, i: number) => i === 0 || s > seqs[i - 1])).toBe(true)
