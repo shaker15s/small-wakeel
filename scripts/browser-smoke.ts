@@ -11,6 +11,7 @@ import { brotliDecompressSync } from 'node:zlib'
 import { chromium as playwright, expect as baseExpect, type Page } from '@playwright/test'
 import chromium from '@sparticuz/chromium'
 import { createClient } from '@libsql/client'
+import { sqliteBusyTimeoutMs } from '../src/lib/db-config'
 import { totp } from '../src/lib/saas/crypto'
 
 const expect = baseExpect.configure({ timeout: 15_000 })
@@ -18,8 +19,19 @@ const expect = baseExpect.configure({ timeout: 15_000 })
 type Identity = { csrfToken: string; membershipId: string; account: { verified: boolean; mfaEnabled: boolean }; memberships: { id: string; businessId: string; userId: string; role: string }[] }
 export async function browserSmoke(databaseUrl: string, key: string, boot: (origin: string) => Promise<string>) {
   const temp = mkdtempSync(join(tmpdir(), 'wakil-browser-'))
-  const sql = createClient({ url: databaseUrl })
-  await sql.execute('PRAGMA busy_timeout=10000')
+  // The application deliberately uses local SQLite concurrency=1 while WAL is disabled.
+  // The browser's observer must use the same lock discipline; a wide default pool that
+  // polls while the app commits can starve its writer and create a test-only P1008.
+  let sql = createClient({ url: databaseUrl, concurrency: 1, timeout: sqliteBusyTimeoutMs() })
+  await sql.execute(`PRAGMA busy_timeout=${sqliteBusyTimeoutMs()}`)
+  async function reopenSqlObserver() {
+    // End the observer's local-file connection before the app processes a
+    // command after a fixture write. With rollback-journal mode, even a
+    // test-only client must not hold a pooled connection across live writes.
+    await sql.close()
+    sql = createClient({ url: databaseUrl, concurrency: 1, timeout: sqliteBusyTimeoutMs() })
+    await sql.execute(`PRAGMA busy_timeout=${sqliteBusyTimeoutMs()}`)
+  }
   let upstream = ''
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', join(temp, 'key.pem'), '-out', join(temp, 'cert.pem'), '-days', '1', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1'], { stdio: 'ignore' })
   const proxy = Bun.serve({ port: 0, hostname: '127.0.0.1', tls: { key: readFileSync(join(temp, 'key.pem')), cert: readFileSync(join(temp, 'cert.pem')) }, async fetch(req) {
@@ -62,6 +74,39 @@ export async function browserSmoke(databaseUrl: string, key: string, boot: (orig
     await expect(page.getByRole('heading', { name: 'حسابك ومساحة شغلك', exact: true })).toBeVisible()
   }
   const panel = (page: Page) => page.locator('section[aria-labelledby="account-heading"]')
+
+  /**
+   * Each actor and newly-created workspace has its own preference onboarding.
+   * The BusinessProfile interview is tenant-scoped: an invited staff member
+   * reuses the owner's confirmed profile, but a newly created blank workspace
+   * must answer its own required questions before its preferences can be saved.
+   */
+  async function finishFirstRun(page: Page, profileAlreadyConfirmed: boolean) {
+    await expect(page.getByRole('heading', { name: 'معرفك — أنا «وكيل»', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'شوفه شغال', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'أول محادثة هتبقى كده', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'زبطني على شغلك', exact: true }).click()
+
+    if (profileAlreadyConfirmed) {
+      await expect(page.getByRole('button', { name: 'كمل للإعدادات', exact: true })).toBeVisible()
+    } else {
+      await expect(page.getByText('دلوقتي بتسجل البيع والشراء والتحصيل إزاي؟', { exact: true })).toBeVisible()
+      await page.getByRole('button', { name: 'ورقة وقلم', exact: true }).click()
+      await expect(page.getByText('إيه الوحدات اللي بتتداول في شغلك؟ (اختار اللي يناسبك)', { exact: true })).toBeVisible()
+      await page.getByRole('button', { name: 'قطعة', exact: true }).click()
+      await page.getByRole('button', { name: /تأكيد الاختيار/ }).click()
+      await expect(page.getByText(/الخزنة بدأت بكام/)).toBeVisible()
+      await page.getByRole('button', { name: /تخطي — هتفضل/ }).click()
+      await expect(page.getByRole('button', { name: 'راجعت الملف — أكد وأكمل', exact: true })).toBeVisible()
+      await page.getByRole('button', { name: 'راجعت الملف — أكد وأكمل', exact: true }).click()
+      await expect(page.getByRole('button', { name: 'كمل للإعدادات', exact: true })).toBeVisible()
+    }
+
+    await page.getByRole('button', { name: 'كمل للإعدادات', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'وكيل على مقاس شغلك', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'احفظ وابدأ ببياناتي الحقيقية', exact: true }).click()
+    await expect(page.getByLabel('رسالة إلى وكيل', { exact: true })).toBeVisible()
+  }
   try {
     upstream = await boot(origin)
     // Chromium's npm payload includes NSS libraries; unpack locally instead of
@@ -102,6 +147,28 @@ export async function browserSmoke(databaseUrl: string, key: string, boot: (orig
     }
     await expect(page.getByRole('status').filter({ hasText: 'تم تأكيد البريد' })).toBeVisible()
     await page.getByRole('button', { name: 'الرجوع إلى وكيل', exact: true }).click()
+
+    // The real first-run journey now has four stages, including the persisted
+    // owner interview. Drive the actual flow instead of waiting for the last
+    // stage title immediately after returning from email verification.
+    await expect(page.getByRole('heading', { name: 'معرفك — أنا «وكيل»', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'شوفه شغال', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'أول محادثة هتبقى كده', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'زبطني على شغلك', exact: true }).click()
+
+    // Required facts are answered/skipped through the real API state machine.
+    // Unknown opening cash must remain unknown, not become a synthetic zero.
+    await expect(page.getByText('دلوقتي بتسجل البيع والشراء والتحصيل إزاي؟', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'ورقة وقلم', exact: true }).click()
+    await expect(page.getByText('إيه الوحدات اللي بتتداول في شغلك؟ (اختار اللي يناسبك)', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'قطعة', exact: true }).click()
+    await page.getByRole('button', { name: /تأكيد الاختيار/ }).click()
+    await expect(page.getByText(/الخزنة بدأت بكام/)).toBeVisible()
+    await page.getByRole('button', { name: /تخطي — هتفضل/ }).click()
+    await expect(page.getByRole('button', { name: 'راجعت الملف — أكد وأكمل', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'راجعت الملف — أكد وأكمل', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'كمل للإعدادات', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'كمل للإعدادات', exact: true }).click()
     await expect(page.getByRole('heading', { name: 'وكيل على مقاس شغلك', exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'لون indigo', exact: true }).click()
     await page.getByLabel('الخزنة والسيولة', { exact: true }).check()
@@ -110,6 +177,11 @@ export async function browserSmoke(databaseUrl: string, key: string, boot: (orig
     await expect.poll(async () => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--analytics-accent').trim())).toBe('#4f46e5')
     const savedProfile = JSON.parse(String((await sql.execute({ sql: 'SELECT config FROM WorkspacePreference WHERE businessId=? AND userId=?', args: [home.businessId, home.userId] })).rows[0].config))
     assert.equal(savedProfile.onboardingComplete, true); assert.equal(savedProfile.accent, 'indigo')
+    const profileRow = (await sql.execute({ sql: 'SELECT answers, openingCashStatedAt FROM BusinessProfile WHERE businessId=?', args: [home.businessId] })).rows[0]
+    const profileAnswers = JSON.parse(String(profileRow.answers))
+    assert.equal(profileRow.openingCashStatedAt, null, 'skipping opening cash must not write a fake zero')
+    assert.equal(profileAnswers.openingCash.skipped, true)
+    assert.equal(profileAnswers.openingCash.value, null)
     for (const table of ['Item', 'Customer', 'Supplier', 'Operation', 'CashEntry']) assert.equal(Number((await sql.execute({ sql: `SELECT COUNT(*) n FROM ${table} WHERE businessId=?`, args: [home.businessId] })).rows[0].n), 0)
     await page.getByRole('button', { name: 'تفكير أعمق', exact: true }).click()
     await expect.poll(async () => JSON.parse(String((await sql.execute({ sql: 'SELECT config FROM WorkspacePreference WHERE businessId=? AND userId=?', args: [home.businessId, home.userId] })).rows[0].config)).responseMode).toBe('deep')
@@ -165,8 +237,43 @@ export async function browserSmoke(databaseUrl: string, key: string, boot: (orig
     await expect(page.getByLabel('رسالة إلى وكيل', { exact: true })).toHaveValue('باقي في الخزنة ٢٥٠٠')
     console.log('PASS: recorder consent/cancel UI, truthful unconfigured-ASR state, preserved draft, no automatic audio upload; live microphone/ASR NOT VERIFIED')
     // Owner explicitly reviews/approves the physical drawer count. No demo cash injected.
-    await page.getByLabel('رسالة إلى وكيل', { exact: true }).press('Enter')
-    await page.getByRole('button', { name: 'اعتماد العملية', exact: true }).click()
+    // Capture the real response + isolated tenant state if the card fails to render;
+    // this prevents a browser timeout from hiding whether parsing, drafting, or UI failed.
+    const countInput = page.getByLabel('رسالة إلى وكيل', { exact: true })
+    const countResponsePromise = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === '/api/chat' && response.request().method() === 'POST',
+    )
+    await countInput.press('Enter')
+    const countResponse = await countResponsePromise
+    try {
+      await page.getByRole('button', { name: /اعتماد العملية/ }).click()
+    } catch (error) {
+      const conv = (await sql.execute({
+        sql: 'SELECT id, title FROM Conversation WHERE businessId=? AND userId=? ORDER BY updatedAt DESC LIMIT 1',
+        args: [home.businessId, home.userId],
+      })).rows[0]
+      const diagnostic = conv ? {
+        httpStatus: countResponse.status(),
+        workflowMode: (await sql.execute({ sql: 'SELECT workflowMode FROM Business WHERE id=?', args: [home.businessId] })).rows[0]?.workflowMode,
+        profile: (await sql.execute({ sql: 'SELECT answers, openingCashStatedAt FROM BusinessProfile WHERE businessId=?', args: [home.businessId] })).rows[0] ?? null,
+        messages: (await sql.execute({
+          sql: 'SELECT role, text, card, actions FROM Message WHERE conversationId=? ORDER BY createdAt DESC LIMIT 4',
+          args: [String(conv.id)],
+        })).rows.map((r) => ({ role: r.role, text: r.text, card: r.card, actions: r.actions })),
+        operations: (await sql.execute({
+          sql: 'SELECT ref, type, status, summary, payload FROM Operation WHERE businessId=? ORDER BY createdAt DESC LIMIT 4',
+          args: [home.businessId],
+        })).rows,
+        dialogue: (await sql.execute({
+          sql: 'SELECT state, expiresAt FROM CashbookDialogue WHERE conversationId=?',
+          args: [String(conv.id)],
+        })).rows,
+        visibleActionButtons: await page.getByRole('button').allTextContents(),
+        assistantText: await page.locator('[data-message-role="assistant"]').allTextContents(),
+      } : { httpStatus: countResponse.status(), conversation: null }
+      console.error('Cash-count browser diagnostics (synthetic tenant only)', JSON.stringify(diagnostic))
+      throw error
+    }
     await expect.poll(async () => Number((await sql.execute({ sql: "SELECT COUNT(*) n FROM CashbookEntry WHERE businessId=? AND kind='cash_count'", args: [home.businessId] })).rows[0].n)).toBe(1)
     assert.equal(Number((await sql.execute({ sql: "SELECT COUNT(*) n FROM Operation WHERE businessId=? AND type='sale'", args: [home.businessId] })).rows[0].n), 0)
     console.log('PASS: real cashbook count approved in browser, persisted as unclassified reconciliation, never a sale')
@@ -176,7 +283,7 @@ export async function browserSmoke(databaseUrl: string, key: string, boot: (orig
     await page.getByLabel('رسالة إلى وكيل', { exact: true }).fill('ضيف مصروف ٣٣ جنيه بند صيانة')
     await page.getByLabel('رسالة إلى وكيل', { exact: true }).press('Enter')
     await page.getByLabel('رسالة إلى وكيل', { exact: true }).press('Enter')
-    await page.getByRole('button', { name: 'اعتماد العملية', exact: true }).click()
+    await page.getByRole('button', { name: /اعتماد العملية/ }).click()
     await expect.poll(async () => Number((await sql.execute({ sql: "SELECT COUNT(*) n FROM Operation WHERE businessId=? AND status='SUCCEEDED'", args: [home.businessId] })).rows[0].n)).toBe(2)
     const op = (await sql.execute({ sql: "SELECT id,ref FROM Operation WHERE businessId=? AND (type='expense' OR json_extract(payload,'$.kind')='expense')", args: [home.businessId] })).rows[0]
     assert.equal(Number((await sql.execute({ sql: 'SELECT COUNT(*) n FROM CashEntry WHERE ref=?', args: [op.ref] })).rows[0].n), 1)
@@ -222,7 +329,7 @@ export async function browserSmoke(databaseUrl: string, key: string, boot: (orig
     await expect(page.getByLabel('عدّ الخزنة / قفل اليوم', { exact: true })).toBeVisible()
     assert.equal(await page.evaluate(async () => { const r = await fetch('/api/cashbook'); return (await r.json()).cash }), 246700)
     await page.locator('details').filter({ hasText: 'راجع العملية' }).first().locator('summary').click()
-    await page.getByRole('button', { name: 'اعتماد العملية', exact: true }).click()
+    await page.getByRole('button', { name: /اعتماد العملية/ }).click()
     await expect.poll(async () => Number((await sql.execute({ sql: "SELECT COUNT(*) n FROM Operation WHERE businessId=? AND status='SUCCEEDED'", args: [home.businessId] })).rows[0].n)).toBe(3)
     await expect(page.locator('details').filter({ hasText: 'راجع العملية' })).toHaveCount(0)
     const closeNotice = page.getByRole('button', { name: 'إغلاق التنبيه', exact: true })
@@ -246,24 +353,27 @@ export async function browserSmoke(databaseUrl: string, key: string, boot: (orig
     const compose = page.getByLabel('رسالة إلى وكيل', { exact: true })
     await expect(compose).toBeVisible()
     await compose.fill('بعت لمريم بضاعة بمية على الحساب امبارح وهيسدد بكرة'); await compose.press('Enter')
-    await expect(page.getByRole('button', { name: 'اعتماد العملية', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: /اعتماد العملية/ })).toBeVisible()
     const oldDraft = (await sql.execute({ sql: "SELECT id,ref FROM Operation WHERE businessId=? AND status='AWAITING_APPROVAL' AND json_extract(payload,'$.partyName')='مريم'", args: [home.businessId] })).rows[0]
     assert.ok(oldDraft)
     await compose.fill('المبلغ مش مية هو مية وعشرين'); await compose.press('Enter')
     await expect.poll(async () => String((await sql.execute({ sql: 'SELECT status FROM Operation WHERE id=?', args: [oldDraft.id] })).rows[0].status)).toBe('CANCELLED')
-    await expect(page.getByRole('button', { name: 'اعتماد العملية', exact: true })).toHaveCount(1)
-    await page.getByRole('button', { name: 'اعتماد العملية', exact: true }).click()
+    await expect(page.getByRole('button', { name: /اعتماد العملية/ })).toHaveCount(1)
+    await page.getByRole('button', { name: /اعتماد العملية/ }).click()
     await expect.poll(async () => Number((await sql.execute({ sql: "SELECT balance FROM Customer WHERE businessId=? AND name='مريم'", args: [home.businessId] })).rows[0]?.balance)).toBe(12000)
     assert.equal(Number((await sql.execute({ sql: "SELECT COUNT(*) n FROM CashEntry WHERE ref=?", args: [oldDraft.ref] })).rows[0].n), 0)
     const choiceA = randomUUID(), choiceB = randomUUID()
     for (const [id, phone] of [[choiceA, '01077777771'], [choiceB, '01077777772']]) await sql.execute({ sql: 'INSERT INTO Customer (id,businessId,name,phone,balance,createdAt) VALUES (?,?,?,?,?,?)', args: [id, home.businessId, 'عميل اختبار اختيار', phone, 0, Date.now()] })
+    await reopenSqlObserver()
+    const insertedChoices = await sql.execute({ sql: 'SELECT COUNT(*) n FROM Customer WHERE id IN (?,?) AND businessId=?', args: [choiceA, choiceB, home.businessId] })
+    assert.equal(Number(insertedChoices.rows[0].n), 2, 'synthetic customer choices must be committed before the live app reads them')
     await compose.fill('بعت لعميل اختبار اختيار بضاعة بمية على الحساب النهارده'); await compose.press('Enter')
     const choiceButton = page.getByRole('button', { name: /01077777772/ })
     await expect(choiceButton).toBeEnabled()
     await choiceButton.click()
-    await expect(page.getByRole('button', { name: 'اعتماد العملية', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: /اعتماد العملية/ })).toBeVisible()
     await expect(choiceButton).toBeDisabled()
-    await page.getByRole('button', { name: 'اعتماد العملية', exact: true }).click()
+    await page.getByRole('button', { name: /اعتماد العملية/ }).click()
     await expect.poll(async () => Number((await sql.execute({ sql: 'SELECT balance FROM Customer WHERE id=?', args: [choiceB] })).rows[0].balance)).toBe(10000)
     assert.equal(Number((await sql.execute({ sql: 'SELECT balance FROM Customer WHERE id=?', args: [choiceA] })).rows[0].balance), 0)
     assert.equal(await page.evaluate(async () => { const r = await fetch('/api/cashbook'); return (await r.json()).cash }), 245000)
@@ -332,8 +442,7 @@ export async function browserSmoke(databaseUrl: string, key: string, boot: (orig
     await staff.getByLabel('تأكيد كلمة المرور', { exact: true }).fill(password)
     const [staffSignup] = await Promise.all([staff.waitForResponse((r) => r.url().endsWith('/api/auth/register') && r.request().method() === 'POST'), staff.getByRole('button', { name: 'إنشاء حساب والانضمام للفريق', exact: true }).click()])
     assert.equal(staffSignup.status(), 200)
-    await staff.getByRole('button', { name: 'احفظ وابدأ ببياناتي الحقيقية', exact: true }).click()
-    await expect(staff.getByLabel('رسالة إلى وكيل', { exact: true })).toBeVisible()
+    await finishFirstRun(staff, true)
     await expect.poll(async () => staff.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--analytics-accent').trim())).toBe('#b45309')
     const employee = await identity(staff)
     assert.equal(employee.memberships.length, 1); assert.equal(employee.memberships[0].role, 'cashier'); assert.equal(employee.account.verified, true)
@@ -345,8 +454,7 @@ export async function browserSmoke(databaseUrl: string, key: string, boot: (orig
     await page.getByText('إنشاء منشأة أخرى', { exact: true }).click()
     await panel(page).getByLabel('اسم المنشأة الجديدة').fill('Browser second workspace')
     await panel(page).getByRole('button', { name: 'إنشاء مساحة فارغة', exact: true }).click()
-    await page.getByRole('button', { name: 'احفظ وابدأ ببياناتي الحقيقية', exact: true }).click()
-    await expect(page.getByLabel('رسالة إلى وكيل', { exact: true })).toBeVisible()
+    await finishFirstRun(page, false)
     const second = await identity(page)
     assert.equal(second.memberships.length, 2); assert.notEqual(second.membershipId, home.id)
     const secondBusiness = second.memberships.find((m) => m.id === second.membershipId)!.businessId
@@ -408,6 +516,6 @@ export async function browserSmoke(databaseUrl: string, key: string, boot: (orig
     // Bun may keep the stop promise pending after an aborted streaming client;
     // force-close sockets without blocking teardown of the backend process.
     void proxy.stop(true)
-    sql.close(); rmSync(temp, { recursive: true, force: true })
+    await sql.close(); rmSync(temp, { recursive: true, force: true })
   }
 }

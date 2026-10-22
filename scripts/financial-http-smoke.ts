@@ -69,14 +69,21 @@ export async function financialHttpSmoke(params: {
     assert.equal(await ledgerCount(expense.ref), 1)
     assert.equal((await decide(expense)).status, 409)
 
-    const sale = await fixture('sale', { itemId, qty: 2, total: 200, paid: 100, customerId }, cashier)
-    const approved = await decide(sale, cashier)
+    // The launch policy now requires the owner to approve every formal
+    // business-record mutation. A cashier's approval attempt must leave the
+    // owner-authored sale draft untouched; the owner then approves it once.
+    const sale = await fixture('sale', { itemId, qty: 2, total: 200, paid: 100, customerId })
+    assert.equal((await decide(sale, cashier)).status, 403)
+    assert.equal((await current(sale.id)).status, 'AWAITING_APPROVAL')
+    assert.equal(await stock(itemId), 10)
+    assert.equal(await ledgerCount(sale.ref), 0)
+    const approved = await decide(sale, owner)
     assert.equal(approved.status, 200)
     assert.equal((await approved.json() as { outcome: { ok: boolean } }).outcome.ok, true)
     assert.equal(await stock(itemId), 8)
     assert.equal(await balance(customerId), 1100)
     assert.equal(await ledgerCount(sale.ref), 1)
-    assert.equal((await decide(sale, cashier)).status, 409)
+    assert.equal((await decide(sale, owner)).status, 409)
     assert.equal(await stock(itemId), 8)
 
     const purchase = await fixture('purchase', { itemId, qty: 3, total: 180, paid: 80, supplierId })
@@ -193,11 +200,33 @@ export async function financialHttpSmoke(params: {
     assert.ok(conversationId && draftId, 'Arabic chat must emit a real persisted draft')
     assert.equal(conversationId, fixtureConversation)
     const chatOp = await current(draftId)
+    const chatPayload = JSON.parse(String(chatOp.payload)) as Record<string, unknown>
     assert.equal(chatOp.status, 'AWAITING_APPROVAL')
-    assert.equal(JSON.parse(String(chatOp.payload)).total, 3300)
+    assert.equal(
+      chatOp.type,
+      'cashbook',
+      `Arabic shop-expense phrase must use the cashbook contract: type=${String(chatOp.type)}; summary=${String(chatOp.summary)}; payload=${JSON.stringify(chatPayload)}`,
+    )
+    assert.equal(
+      chatPayload.kind,
+      'expense',
+      `Arabic shop-expense phrase produced the wrong cashbook movement: ${JSON.stringify(chatPayload)}`,
+    )
+    assert.equal(
+      chatPayload.amount,
+      3300,
+      `Arabic expense amount was not stored as canonical piastres: type=${String(chatOp.type)}; payload=${JSON.stringify(chatPayload)}`,
+    )
+    assert.equal(chatPayload.reason, 'صيانة', `expense reason was not preserved: ${JSON.stringify(chatPayload)}`)
     assert.equal(await ledgerCount(String(chatOp.ref)), 0)
+    assert.equal(Number((await row('SELECT COUNT(*) AS n FROM CashbookEntry WHERE operationRef = ?', [chatOp.ref])).n), 0)
     await succeeded({ id: draftId }, 'HTTP smoke approval')
     assert.equal(await ledgerCount(String(chatOp.ref)), 1)
+    const cashbookEntry = await row('SELECT kind, amount, cashDelta, dateSource FROM CashbookEntry WHERE operationRef = ?', [chatOp.ref])
+    assert.equal(cashbookEntry.kind, 'expense')
+    assert.equal(Number(cashbookEntry.amount), 3300)
+    assert.equal(Number(cashbookEntry.cashDelta), -3300)
+    assert.equal(cashbookEntry.dateSource, 'assumed_today')
     const replay = await post('/api/chat', owner, { ...chatBody, conversationId })
     assert.equal(replay.status, 200)
     assert.match(await replay.text(), /"replayed":true/)

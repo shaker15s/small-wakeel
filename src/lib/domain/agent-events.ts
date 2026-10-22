@@ -65,17 +65,22 @@ export function redactPayload(value: unknown): string {
 /** Open a turn trace and log its first row (sequence 0). */
 export async function startTrace(input: { businessId: string; conversationId?: string | null }): Promise<string> {
   const traceId = `trc_${randomUUID().replace(/-/g, '').slice(0, 24)}`
-  await db.agentEvent.create({
-    data: {
-      businessId: input.businessId,
-      traceId,
-      conversationId: input.conversationId ?? null,
-      sequence: 0,
-      type: 'turn.started',
-      actor: 'system',
-      payload: redactPayload({ conversationId: input.conversationId ?? null }),
-    },
-  })
+  // The append-only table is accessed through parameterized SQL rather
+  // than Prisma's generated RETURNING path. The latter triggered SQLITE_IOERR
+  // in the real LibSQL adapter test; no returned model instance is needed.
+  await db.$executeRawUnsafe(
+    'INSERT INTO "AgentEvent" ("id", "businessId", "traceId", "conversationId", "sequence", "type", "actor", "payload", "operationRef", "payloadHash") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    `evt_${randomUUID().replace(/-/g, '')}`,
+    input.businessId,
+    traceId,
+    input.conversationId ?? null,
+    0,
+    'turn.started',
+    'system',
+    redactPayload({ conversationId: input.conversationId ?? null }),
+    null,
+    null,
+  )
   return traceId
 }
 
@@ -101,25 +106,23 @@ export async function logAgentEvent(input: {
   payload?: unknown
   operationRef?: string | null
 }): Promise<void> {
-  await db.$transaction(async (tx) => {
-    const seq = await tx.agentEvent.aggregate({
-      where: { traceId: input.traceId, businessId: input.businessId },
-      _max: { sequence: true },
-    })
-    await tx.agentEvent.create({
-      data: {
-        businessId: input.businessId,
-        traceId: input.traceId,
-        conversationId: input.conversationId ?? null,
-        sequence: (seq._max.sequence ?? -1) + 1,
-        type: input.type,
-        actor: input.actor,
-        payload: redactPayload(input.payload ?? null),
-        operationRef: input.operationRef ?? null,
-        payloadHash: input.payload == null ? null : canonicalPayloadHash(input.payload),
-      },
-    })
-  })
+  // A single INSERT…SELECT computes the next sequence and appends the row
+  // in one SQLite statement. It avoids Prisma's aggregate/create RETURNING
+  // path and prevents a read-then-write gap between concurrent appenders.
+  await db.$executeRawUnsafe(
+    'INSERT INTO "AgentEvent" ("id", "businessId", "traceId", "conversationId", "sequence", "type", "actor", "payload", "operationRef", "payloadHash") SELECT ?, ?, ?, ?, COALESCE(MAX("sequence"), -1) + 1, ?, ?, ?, ?, ? FROM "AgentEvent" WHERE "businessId" = ? AND "traceId" = ?',
+    `evt_${randomUUID().replace(/-/g, '')}`,
+    input.businessId,
+    input.traceId,
+    input.conversationId ?? null,
+    input.type,
+    input.actor,
+    redactPayload(input.payload ?? null),
+    input.operationRef ?? null,
+    input.payload == null ? null : canonicalPayloadHash(input.payload),
+    input.businessId,
+    input.traceId,
+  )
 }
 
 /** Safe wrapper for harness wiring: trace problems are swallowed + logged,
@@ -135,20 +138,40 @@ export async function safeLogAgentEvent(input: Parameters<typeof logAgentEvent>[
 /** Reconstruct a turn: all rows of a trace, in sequence order,
  *  scoped to the tenant that owns it. */
 export async function reconstructTurn(input: { businessId: string; traceId: string }) {
-  return db.agentEvent.findMany({
-    where: { businessId: input.businessId, traceId: input.traceId },
-    orderBy: [{ sequence: 'asc' }, { createdAt: 'asc' }],
-  })
+  type Row = {
+    id: string
+    businessId: string
+    traceId: string
+    conversationId: string | null
+    sequence: number
+    type: AgentEventType
+    actor: AgentEventActor
+    payload: string | null
+    operationRef: string | null
+    payloadHash: string | null
+    createdAt: Date | string
+  }
+  const rows = await db.$queryRawUnsafe<Row[]>(
+    'SELECT "id", "businessId", "traceId", "conversationId", "sequence", "type", "actor", "payload", "operationRef", "payloadHash", "createdAt" FROM "AgentEvent" WHERE "businessId" = ? AND "traceId" = ? ORDER BY "sequence" ASC, "createdAt" ASC',
+    input.businessId,
+    input.traceId,
+  )
+  return rows.map((row) => ({ ...row, createdAt: new Date(row.createdAt) }))
 }
 
 /** Recent traces of a tenant (newest first) — the dashboard entry point. */
 export async function listRecentTraces(input: { businessId: string; limit?: number }) {
   const limit = Math.min(Math.max(input.limit ?? 20, 1), 100)
-  const rows = await db.agentEvent.findMany({
-    where: { businessId: input.businessId, type: 'turn.started' },
-    orderBy: { createdAt: 'desc' },
-    take: limit,
-  })
+  const rows = await db.$queryRawUnsafe<Array<{
+    traceId: string
+    conversationId: string | null
+    createdAt: Date | string
+  }>>(
+    'SELECT "traceId", "conversationId", "createdAt" FROM "AgentEvent" WHERE "businessId" = ? AND "type" = ? ORDER BY "createdAt" DESC LIMIT ?',
+    input.businessId,
+    'turn.started',
+    limit,
+  )
   return rows.map((r) => ({
     traceId: r.traceId,
     conversationId: r.conversationId,

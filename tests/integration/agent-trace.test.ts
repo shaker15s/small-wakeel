@@ -78,6 +78,13 @@ describe('redaction — the ledger is readable, never a secret dump', () => {
 })
 
 describe('trace lifecycle — start to finish is reconstructable', () => {
+  test('Prisma can read the fixture integrity before touching the event ledger', async () => {
+    const integrity = await db.$queryRawUnsafe('PRAGMA integrity_check') as { integrity_check: string }[]
+    expect(integrity).toEqual([{ integrity_check: 'ok' }])
+    const foreignKeys = await db.$queryRawUnsafe('PRAGMA foreign_key_check') as unknown[]
+    expect(foreignKeys).toHaveLength(0)
+  })
+
   test('a turn trace carries ordered, typed rows', async () => {
     const traceId = await events.startTrace({ businessId: business.id, conversationId: conv.id })
     expect(traceId).toMatch(/^trc_/)
@@ -145,8 +152,31 @@ describe('live wiring — a real turn writes its trace', () => {
     const types = rows.map((r: any) => r.type)
     expect(types[0]).toBe('turn.started')
     expect(types).toContain('turn.ended')
+    // Verify integrity after the full turn, including its concurrent business,
+    // telemetry and agent-event writes—not just after fixture setup.
+    const integrityAfterTurn = await db.$queryRawUnsafe('PRAGMA integrity_check') as { integrity_check: string }[]
+    expect(integrityAfterTurn).toEqual([{ integrity_check: 'ok' }])
+    const foreignKeysAfterTurn = await db.$queryRawUnsafe('PRAGMA foreign_key_check') as unknown[]
+    expect(foreignKeysAfterTurn).toHaveLength(0)
     // sequences strictly ordered
     const seqs = rows.map((r: any) => r.sequence)
     expect(seqs.every((s: number, i: number) => i === 0 || s > seqs[i - 1])).toBe(true)
+  })
+
+  test('scratchpad fact writes finish before the helper resolves', async () => {
+    const scratchpad = await import('../../src/lib/agent/scratchpad')
+    const before = await db.agentNote.count({ where: { conversationId: conv.id, kind: 'fact' } })
+    const written = await scratchpad.jotFactsFromCards(
+      { businessId: business.id, userId: owner.id, conversationId: conv.id },
+      [{
+        kind: 'kv',
+        title: 'اختبار تسجيل حقيقة',
+        rows: [{ label: 'رصيد الخزنة', value: '١٠٠ جنيه' }],
+      }] as any,
+    )
+    expect(written).toBe(1)
+    expect(await db.agentNote.count({ where: { conversationId: conv.id, kind: 'fact' } })).toBe(before + 1)
+    const integrity = await db.$queryRawUnsafe('PRAGMA integrity_check') as { integrity_check: string }[]
+    expect(integrity).toEqual([{ integrity_check: 'ok' }])
   })
 })

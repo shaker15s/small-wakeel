@@ -36,6 +36,11 @@ const ids: string[] = []
 
 beforeAll(async () => {
   db = await testDb()
+  // The test DB is copied from the developer seed, which intentionally contains
+  // example reminders. Remove that demo queue from this disposable test copy so
+  // global worker sweeps measure only tasks created by this proof matrix.
+  await db.taskNotification.deleteMany()
+  await db.scheduledTask.deleteMany()
 })
 
 afterAll(async () => {
@@ -45,6 +50,13 @@ afterAll(async () => {
 async function shop() {
   const created = await createNewBusinessWithDefaults({ name: `durable-runner-${randomUUID()}`, type: 'supermarket' })
   ids.push(created.id)
+
+  // createNewBusinessWithDefaults creates demo tasks as part of onboarding.
+  // This acceptance suite must control its own due queue so a pre-seeded task
+  // cannot change runDueTasks().due or execute alongside the crash scenario.
+  await db.taskNotification.deleteMany({ where: { businessId: created.id } })
+  await db.scheduledTask.deleteMany({ where: { businessId: created.id } })
+
   return {
     business: await db.business.findUniqueOrThrow({ where: { id: created.id } }),
     user: await db.user.findUniqueOrThrow({ where: { id: created.users[0].id } }),
@@ -86,7 +98,7 @@ describe('PR-010 — crash after claim, before execute', () => {
     })
 
     // A plain run does NOT touch it (it is not claimable while leased)…
-    const first = await runDueTasks(10)
+    const first = await runDueTasks(10, { businessId: task.businessId })
     expect(first.due).toBe(0)
     expect((await db.scheduledTask.findUniqueOrThrow({ where: { id: task.id } })).status).toBe('running')
 
@@ -96,7 +108,7 @@ describe('PR-010 — crash after claim, before execute', () => {
     expect(requeued.status).toBe('pending')
     expect(requeued.leaseOwner).toBeNull()
 
-    await runDueTasks(10)
+    await runDueTasks(10, { businessId: task.businessId })
     const done = await db.scheduledTask.findUniqueOrThrow({ where: { id: task.id } })
     expect(done.status).toBe('done')
 
@@ -104,7 +116,7 @@ describe('PR-010 — crash after claim, before execute', () => {
     expect(count).toBe(1)
 
     // And forever after: nothing re-fires, nothing duplicates.
-    const third = await runDueTasks(10)
+    const third = await runDueTasks(10, { businessId: task.businessId })
     expect(third.due).toBe(0)
     expect(await db.message.count({ where: { conversationId: conversation.id, text: { contains: task.title } } })).toBe(1)
   })
@@ -138,7 +150,7 @@ describe('PR-010 — crash after execute commit, before delivery', () => {
     })
 
     await requeueStuckTasks()
-    await runDueTasks(10)
+    await runDueTasks(10, { businessId: task.businessId })
 
     const done = await db.scheduledTask.findUniqueOrThrow({ where: { id: task.id } })
     expect(done.status).toBe('done')
@@ -153,7 +165,7 @@ describe('PR-010 — two workers, one task', () => {
   test('two concurrent runDueTasks calls execute the same due task exactly once', async () => {
     const { conversation, task } = await makeTask()
 
-    await Promise.all([runDueTasks(10), runDueTasks(10)])
+    await Promise.all([runDueTasks(10, { businessId: task.businessId }), runDueTasks(10, { businessId: task.businessId })])
 
     const done = await db.scheduledTask.findUniqueOrThrow({ where: { id: task.id } })
     expect(done.status).toBe('done')
@@ -162,12 +174,88 @@ describe('PR-010 — two workers, one task', () => {
   })
 })
 
+describe('PR-010 — business-scoped task maintenance', () => {
+  test('recovery and notification delivery never touch another business when a scope is supplied', async () => {
+    const own = await makeTask()
+    const foreignPending = await makeTask()
+    const foreignSending = await makeTask()
+
+    // Simulate a foreign task that committed an outbox row before its worker
+    // died. The task itself is leased/running; the pending row is ready to
+    // deliver, but it must not be delivered by a tick scoped to `own`.
+    await db.scheduledTask.update({
+      where: { id: foreignPending.task.id },
+      data: { status: 'running', claimedAt: minutesAgo(11), leaseOwner: 'wk_foreign_pending', lastStep: 'executed' },
+    })
+    const pendingMessageId = `msg_scope_${foreignPending.task.id}`
+    const pendingRowId = `tn_scope_pending_${foreignPending.task.id}`
+    await db.taskNotification.create({
+      data: {
+        id: pendingRowId,
+        taskId: foreignPending.task.id,
+        businessId: foreignPending.business.id,
+        userId: foreignPending.user.id,
+        conversationId: foreignPending.conversation.id,
+        payload: JSON.stringify({
+          messageId: pendingMessageId,
+          text: 'Synthetic foreign reminder — must remain pending',
+          detail: 'scoped maintenance test',
+          result: 'scoped maintenance test',
+        }),
+        status: 'pending',
+      },
+    })
+
+    // A second foreign business has a stuck delivery. A scoped recovery must
+    // leave both its sending row and task lease untouched.
+    await db.scheduledTask.update({
+      where: { id: foreignSending.task.id },
+      data: { status: 'running', claimedAt: minutesAgo(11), leaseOwner: 'wk_foreign_sending', lastStep: 'executed' },
+    })
+    const sendingRowId = `tn_scope_sending_${foreignSending.task.id}`
+    await db.taskNotification.create({
+      data: {
+        id: sendingRowId,
+        taskId: foreignSending.task.id,
+        businessId: foreignSending.business.id,
+        userId: foreignSending.user.id,
+        conversationId: foreignSending.conversation.id,
+        payload: JSON.stringify({
+          messageId: `msg_scope_sending_${foreignSending.task.id}`,
+          text: 'Synthetic foreign stuck delivery',
+          detail: 'scoped maintenance test',
+          result: 'scoped maintenance test',
+        }),
+        status: 'sending',
+        claimedAt: minutesAgo(6),
+        claimedBy: 'wk_foreign_dead',
+        attempts: 1,
+      },
+    })
+
+    expect(await requeueStuckTasks(undefined, { businessId: own.business.id })).toBe(0)
+    expect(await requeueStuckNotifications(undefined, { businessId: own.business.id })).toBe(0)
+    expect((await db.scheduledTask.findUniqueOrThrow({ where: { id: foreignPending.task.id } })).status).toBe('running')
+    expect((await db.taskNotification.findUniqueOrThrow({ where: { id: pendingRowId } })).status).toBe('pending')
+    expect((await db.taskNotification.findUniqueOrThrow({ where: { id: sendingRowId } })).status).toBe('sending')
+
+    await runDueTasks(10, { businessId: own.business.id })
+
+    expect((await db.scheduledTask.findUniqueOrThrow({ where: { id: foreignPending.task.id } })).status).toBe('running')
+    expect((await db.scheduledTask.findUniqueOrThrow({ where: { id: foreignSending.task.id } })).status).toBe('running')
+    expect((await db.taskNotification.findUniqueOrThrow({ where: { id: pendingRowId } })).status).toBe('pending')
+    expect((await db.taskNotification.findUniqueOrThrow({ where: { id: sendingRowId } })).status).toBe('sending')
+    expect(await db.message.findUnique({ where: { id: pendingMessageId } })).toBeNull()
+    expect(await db.message.findUnique({ where: { id: `msg_scope_sending_${foreignSending.task.id}` } })).toBeNull()
+  })
+})
+
 describe('PR-010 — bounded retry budget and honest failure', () => {
   test('an unschedulable tool retries within budget, then fails with the real reason', async () => {
     const { conversation, task } = await makeTask({ tool: 'record_sale' }) // a money WRITE — hooks may never run it
 
     // Attempt 1 → RETRY_WAIT with backoff in the future.
-    const s1 = await runDueTasks(10)
+    const s1 = await runDueTasks(10, { businessId: task.businessId })
     expect(s1.failed).toBe(1)
     let t = await db.scheduledTask.findUniqueOrThrow({ where: { id: task.id } })
     expect(t.status).toBe('retry_wait')
@@ -176,18 +264,18 @@ describe('PR-010 — bounded retry budget and honest failure', () => {
     expect(t.nextRetryAt!.getTime()).toBeGreaterThan(Date.now())
 
     // Backoff not elapsed → not picked up.
-    expect((await runDueTasks(10)).due).toBe(0)
+    expect((await runDueTasks(10, { businessId: task.businessId })).due).toBe(0)
 
     // Attempt 2 → RETRY_WAIT again (longer backoff).
     await db.scheduledTask.update({ where: { id: task.id }, data: { nextRetryAt: minutesAgo(1) } })
-    await runDueTasks(10)
+    await runDueTasks(10, { businessId: task.businessId })
     t = await db.scheduledTask.findUniqueOrThrow({ where: { id: task.id } })
     expect(t.status).toBe('retry_wait')
     expect(t.attempts).toBe(2)
 
     // Attempt 3 → budget exhausted → FAILED with the real reason.
     await db.scheduledTask.update({ where: { id: task.id }, data: { nextRetryAt: minutesAgo(1) } })
-    await runDueTasks(10)
+    await runDueTasks(10, { businessId: task.businessId })
     t = await db.scheduledTask.findUniqueOrThrow({ where: { id: task.id } })
     expect(t.status).toBe('failed')
     expect(t.attempts).toBe(3)
@@ -199,7 +287,7 @@ describe('PR-010 — bounded retry budget and honest failure', () => {
     expect(await db.message.count({ where: { conversationId: conversation.id } })).toBe(0)
 
     // And it stays failed — no silent resurrection on later sweeps.
-    expect((await runDueTasks(10)).due).toBe(0)
+    expect((await runDueTasks(10, { businessId: task.businessId })).due).toBe(0)
   })
 })
 
@@ -245,7 +333,7 @@ describe('PR-010 — crash mid-delivery: no duplicate message', () => {
     // Recovery + next sweep: task re-queued, outbox re-delivered…
     await requeueStuckTasks()
     await requeueStuckNotifications()
-    await runDueTasks(10)
+    await runDueTasks(10, { businessId: task.businessId })
 
     const done = await db.scheduledTask.findUniqueOrThrow({ where: { id: task.id } })
     expect(done.status).toBe('done')
@@ -260,7 +348,7 @@ describe('PR-010 — recurring firings get distinct generations', () => {
   test('a daily reminder reschedules, and its legitimate second firing delivers again', async () => {
     const { conversation, task } = await makeTask({ recurrence: 'daily' })
 
-    const first = await runDueTasks(10)
+    const first = await runDueTasks(10, { businessId: task.businessId })
     expect(first.delivered).toBeGreaterThanOrEqual(1)
     let t = await db.scheduledTask.findUniqueOrThrow({ where: { id: task.id } })
     expect(t.status).toBe('pending')
@@ -271,7 +359,7 @@ describe('PR-010 — recurring firings get distinct generations', () => {
     // Second firing (push the slot into the past): a NEW generation — new
     // outbox row, new message id, legitimately a second delivery.
     await db.scheduledTask.update({ where: { id: task.id }, data: { scheduledFor: minutesAgo(1) } })
-    await runDueTasks(10)
+    await runDueTasks(10, { businessId: task.businessId })
     t = await db.scheduledTask.findUniqueOrThrow({ where: { id: task.id } })
     expect(t.executionCount).toBe(2)
     expect(await db.taskNotification.count({ where: { taskId: task.id } })).toBe(2)
@@ -332,7 +420,7 @@ describe('PR-010 — the honest task box', () => {
 
 describe('PR-010 — delivery pass is idempotent under re-runs', () => {
   test('deliverPendingNotifications called twice delivers a pending row once', async () => {
-    const { conversation, task } = await makeTask()
+    const { business, conversation, task } = await makeTask()
     await db.scheduledTask.update({
       where: { id: task.id },
       data: { status: 'running', claimedAt: new Date(), leaseOwner: 'wk_live_999999', lastStep: 'executed' },
@@ -354,8 +442,10 @@ describe('PR-010 — delivery pass is idempotent under re-runs', () => {
       },
     })
 
-    expect(await deliverPendingNotifications(10)).toBe(1)
-    expect(await deliverPendingNotifications(10)).toBe(0)
+    // The test database includes seeded tasks for other businesses. Exercise
+    // this one outbox row in its own tenant, not the global worker sweep.
+    expect(await deliverPendingNotifications(10, { businessId: business.id })).toBe(1)
+    expect(await deliverPendingNotifications(10, { businessId: business.id })).toBe(0)
     expect(await db.message.count({ where: { conversationId: conversation.id } })).toBe(1)
     expect((await db.scheduledTask.findUniqueOrThrow({ where: { id: task.id } })).status).toBe('done')
   })

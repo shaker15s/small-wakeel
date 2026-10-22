@@ -5,17 +5,34 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 FAST=0
 [ "${1:-}" = "--fast" ] && FAST=1
-export DATABASE_URL="${DATABASE_URL:-file:./db/custom.db}"
+# CI must never snapshot a DATABASE_URL inherited from a developer or a
+# connected service. Use only the checked-in synthetic fixture as the source.
+SOURCE_DATABASE_PATH="$PWD/db/custom.db"
+if [ ! -f "$SOURCE_DATABASE_PATH" ] || [ -L "$SOURCE_DATABASE_PATH" ] ||
+   ! git ls-files --error-unmatch -- db/custom.db >/dev/null 2>&1 ||
+   ! git diff --quiet HEAD -- db/custom.db ||
+   ! git diff --cached --quiet HEAD -- db/custom.db; then
+  printf '✘ Refusing CI: db/custom.db must be the unchanged, tracked synthetic fixture (not a symlink or local business DB).\\n' >&2
+  exit 1
+fi
+export DATABASE_URL="file:./db/custom.db"
 export NEXT_TELEMETRY_DISABLED=1
 export WAKIL_OFFLINE=1
 step() { printf '\n▶ %s\n' "$1"; }
 step "Frozen install + engine-free Prisma client"
 bun install --frozen-lockfile
-step "Versioned migrations on disposable schema-check copy"
-SOURCE_DATABASE_URL="$DATABASE_URL"
+step "Versioned migrations on disposable synthetic schema-check copy"
 CI_DB_DIR=$(mktemp -d)
-trap 'rm -rf "$CI_DB_DIR"' EXIT
-cp "${SOURCE_DATABASE_URL#file:}" "$CI_DB_DIR/gate.db"
+MOCK_PROVIDER_PID=''
+cleanup() {
+  if [ -n "$MOCK_PROVIDER_PID" ]; then
+    kill "$MOCK_PROVIDER_PID" 2>/dev/null || true
+    wait "$MOCK_PROVIDER_PID" 2>/dev/null || true
+  fi
+  rm -rf "$CI_DB_DIR"
+}
+trap cleanup EXIT
+bun scripts/create-synthetic-db-fixture.ts --output "$CI_DB_DIR/gate.db"
 export DATABASE_URL="file:$CI_DB_DIR/gate.db"
 bun scripts/migrate.ts
 step "Schema drift (read only, migrated copy)"
@@ -28,8 +45,25 @@ step "Typecheck"
 bun run typecheck
 step "Lint (app-owned code, not vendored CLI-Anything)"
 bun run lint
-step "Unit + integration tests (disposable DB)"
-bun test
+step "Start deterministic local mock provider for protocol and speech tests"
+bun mini-services/mock-provider/index.ts >"$CI_DB_DIR/mock-provider.log" 2>&1 &
+MOCK_PROVIDER_PID=$!
+MOCK_READY=0
+for _ in $(seq 1 40); do
+  if curl -fsS --max-time 1 http://127.0.0.1:3031/health | grep -q '"ok":true'; then
+    MOCK_READY=1
+    break
+  fi
+  if ! kill -0 "$MOCK_PROVIDER_PID" 2>/dev/null; then break; fi
+  sleep 0.25
+done
+if [ "$MOCK_READY" -ne 1 ]; then
+  cat "$CI_DB_DIR/mock-provider.log"
+  printf '\\n✘ mock-provider did not become healthy on 127.0.0.1:3031\\n' >&2
+  exit 1
+fi
+step "Unit + integration tests (each file isolated; full golden battery runs once below)"
+bun scripts/run-bun-tests-isolated.mjs --exclude=golden-battery.test.ts
 step "Financial SIGKILL/reopen/commit-ack recovery (disposable DB)"
 bun scripts/financial-crash-smoke.ts
 step "Golden Arabic routing evals (offline; disposable DB)"

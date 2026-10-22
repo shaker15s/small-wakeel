@@ -76,6 +76,10 @@ export async function createDraft(params: {
   idempotencyKey: string
   replaceDraftRef?: string
 }): Promise<Operation> {
+  // validateOperationPayload materializes defaults into the payload. Work on a
+  // private clone so the caller's request remains immutable and a retry with
+  // the same object hashes the same original request bytes.
+  params = { ...params, payload: structuredClone(params.payload) }
   return db.$transaction(async (tx) => {
     const user = await requireBusinessUser(params.businessId, params.userId, tx)
     if (!canDraft(user.role, params.type)) throw new AuthorizationError()
@@ -93,8 +97,36 @@ export async function createDraft(params: {
       if (existing.businessId !== params.businessId || existing.userId !== params.userId || existing.type !== params.type) {
         throw new AuthorizationError()
       }
-      if (existing.payloadHash != null && existing.payloadHash !== requestHash) {
-        throw new OperationValidationError('مفتاح الاعتماد ده اتستخدم بالفعل لمسودة مختلفة — العملية اللي قدامك هي اللي مسجلة')
+      let recordedPayloadHash: string
+      try {
+        const recordedPayload: unknown = JSON.parse(existing.payload)
+        if (!recordedPayload || typeof recordedPayload !== 'object' || Array.isArray(recordedPayload)) {
+          throw new Error('Stored operation payload is not an object')
+        }
+        delete (recordedPayload as Record<string, unknown>).supersedesRef
+        recordedPayloadHash = canonicalPayloadHash(recordedPayload)
+      } catch {
+        throw new OperationValidationError('العملية القديمة لا يمكن التحقق من حمولة مفتاح الاعتماد بتاعها — أوقف إعادة الطلب وراجع حالة العملية المسجلة')
+      }
+      // The persisted payloadHash binds the normalized bytes approved/executed.
+      // A null/mismatching value cannot safely support a replay.
+      if (existing.payloadHash == null || existing.payloadHash !== recordedPayloadHash) {
+        throw new OperationValidationError('حمولة المسودة المخزنة لا تطابق بصمة الاعتماد — إعادة الطلب مرفوضة لسلامة السجل')
+      }
+      if (existing.requestPayloadHash != null) {
+        // New rows bind the original request separately from normalized bytes,
+        // so defaults such as paid=total do not turn a harmless retry into a
+        // false collision.
+        if (existing.requestPayloadHash !== requestHash) {
+          throw new OperationValidationError('مفتاح الاعتماد ده اتستخدم بالفعل لمسودة مختلفة — العملية اللي قدامك هي اللي مسجلة')
+        }
+      } else if (recordedPayloadHash !== requestHash) {
+        // R85 upgrade path: prior releases stored only the normalized approval
+        // hash. If the incoming representation differs, we cannot prove that
+        // server-added defaults match the original request. Fail closed and
+        // ask the caller to inspect the existing operation instead of replaying
+        // or suggesting a new key that could duplicate a financial action.
+        throw new OperationValidationError('المسودة أقدم من بصمة الطلب الأصلي؛ لا يمكن إثبات تطابق إعادة المحاولة بأمان. راجع حالة العملية المسجلة قبل أي إعادة')
       }
       return existing
     }
@@ -123,6 +155,7 @@ export async function createDraft(params: {
       payload: JSON.stringify(params.payload), idempotencyKey: params.idempotencyKey,
       conversationId: params.conversationId ?? null,
       payloadHash: boundHash,
+      requestPayloadHash: requestHash,
       expiresAt: new Date(Date.now() + DRAFT_TTL_MS),
     } })
     if (replaced) {
@@ -203,6 +236,13 @@ export async function executeOperation(opId: string, decidedBy: string, reason?:
         if (outcome.ok) await recordLegacyDebtEffects(tx, op.businessId, op.ref, op.type as OpType, payload)
         if (outcome.ok) outcome.checks.push(...await verifyAccounting())
         if (!outcome.ok || outcome.checks.some((check) => !check.pass)) throw new FailedVerification(outcome)
+        // The pilot gate relies on this explicit actor-bound approval receipt.
+        // Keep it in the same transaction as SUCCEEDED + verification audit, so
+        // a committed success can never exist without its human-approval proof.
+        await audit(op.businessId, decidedBy, 'operation.approved', op.ref, {
+          risk: validatedRisk,
+          reasonRecorded: Boolean(decisionReason),
+        }, tx)
         const updated = await tx.operation.update({ where: { id: opId }, data: {
           status: 'SUCCEEDED', risk: validatedRisk, payload: JSON.stringify(payload), result: JSON.stringify(outcome), executedAt: new Date(),
         } })

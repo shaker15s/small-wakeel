@@ -25,7 +25,7 @@ export async function register(): Promise<void> {
   //    (a ledger lookup per migration, sub-millisecond).
   if (process.env.NODE_ENV !== 'production' && process.env.WAKIL_AUTO_MIGRATE !== '0') {
     try {
-      const { databaseUrl } = await import('@/lib/db')
+      const { databaseUrl } = await import('@/lib/db-url')
       const url = databaseUrl()
       if (url.startsWith('file:')) {
         const filePart = url.slice('file:'.length)

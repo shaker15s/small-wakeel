@@ -73,6 +73,20 @@ function allowedDevOrigins(): string[] {
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  // Maintenance CLIs are built separately and keep @libsql/client external.
+  // Since the web app no longer imports that package directly, Next's tracer
+  // can omit it from standalone/node_modules even though the maintenance
+  // bundles need it at runtime. Include its package tree in standalone output
+  // so packaged migrate/db-snapshot jobs do not fail with MODULE_NOT_FOUND.
+  outputFileTracingIncludes: {
+    "/*": [
+      "./node_modules/@libsql/client/**/*",
+      "./node_modules/@libsql/core/**/*",
+      "./node_modules/@libsql/hrana-client/**/*",
+      "./node_modules/@libsql/isomorphic-ws/**/*",
+      "./node_modules/libsql/**/*",
+    ],
+  },
   // Hosted-preview support: without this, Next 16 refuses HMR/dev-asset loads
   // coming from the sandbox proxy host and the live preview misbehaves.
   ...(isDev ? { allowedDevOrigins: allowedDevOrigins() } : {}),

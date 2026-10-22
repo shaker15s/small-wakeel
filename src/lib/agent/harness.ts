@@ -1,4 +1,5 @@
 import { cashbookTurn } from './cashbook'
+import { cashPositionEvidence } from '@/lib/domain/cashbook'
 import { resolveCairoSchedule } from '@/lib/tasks/cairo-time'
 import { getWorkspacePreferences, updateWorkspacePreferences } from '@/lib/workspace-preferences'
 import { executePlugin, getActivePlugins, getBusinessPlugins, pluginsPromptSection, synthesizePluginWithAI, togglePluginActive } from './plugin-harness'
@@ -3332,7 +3333,7 @@ async function runMeasuredTurn(ctx: TurnContext, emit: TurnEmit): Promise<TurnRe
   } catch (err) {
     // the engine itself exploded — record the failure, then let the route's
     // catch send the SSE error (the user never sees a half-turn silently die)
-    void trackTurnUsage(ctx.business.id, ctx.user.id, meta.kind, ctx.text, {
+    await trackTurnUsage(ctx.business.id, ctx.user.id, meta.kind, ctx.text, {
       latencyMs: Date.now() - t0,
       ttftMs,
       tokens: 0,
@@ -3340,7 +3341,7 @@ async function runMeasuredTurn(ctx: TurnContext, emit: TurnEmit): Promise<TurnRe
     })
     // PR-005: the engine exploding is a traceable fact, not a silent death.
     if (meta.traceId) {
-      void safeLogAgentEvent({
+      await safeLogAgentEvent({
         businessId: ctx.business.id,
         traceId: meta.traceId,
         type: 'provider.error',
@@ -3350,21 +3351,21 @@ async function runMeasuredTurn(ctx: TurnContext, emit: TurnEmit): Promise<TurnRe
     }
     throw err
   }
-  void trackTurnUsage(ctx.business.id, ctx.user.id, meta.kind, ctx.text, {
+  await trackTurnUsage(ctx.business.id, ctx.user.id, meta.kind, ctx.text, {
     latencyMs: Date.now() - t0,
     ttftMs,
     tokens: Math.ceil(result.replyText.length / 3),
     fallback: meta.fallback || llmHealth.retried || llmHealth.fellBack,
   })
   if (result.verified && (result.verified.status === 'corrected' || result.verified.checks.length > 0)) {
-    void trackKindEvent(ctx.business.id, ctx.user.id, 'verify', result.verified.status)
+    await trackKindEvent(ctx.business.id, ctx.user.id, 'verify', result.verified.status)
   }
   result.notesJotted = meta.notesJotted
   // If the fallback ladder had to swap models mid-turn, the label the UI shows
   // must name the model that ACTUALLY answered — never claim a dead one.
   if (llmHealth.servedBy) result.modelLabel = llmHealth.servedBy
   if (meta.traceId) {
-    void safeLogAgentEvent({
+    await safeLogAgentEvent({
       businessId: ctx.business.id,
       traceId: meta.traceId,
       type: 'turn.ended',
@@ -3414,13 +3415,9 @@ async function reflectOnDraft(args: {
       console.error('[audit] trail write failed:', err)
     }
   }
-  void decisionEngine.syncSystemOnMutation({
-    businessId: args.businessId,
-    userId: args.userId,
-    mutationKind: 'system_updated',
-    mutationType: args.type,
-    detail: args.summary,
-  }).catch(() => null)
+  // A draft is only a proposal, not a business/system mutation. Do not
+  // append a system_updated audit event or refresh memory/plugin state until
+  // the relevant mutation is actually approved and executed.
   const danger = result.findings.some((f) => f.severity === 'danger')
   return { findings: result.findings, confidence: result.confidence, risk: danger ? 'R3' : undefined, ms: result.ms }
 }
@@ -3464,7 +3461,12 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   if (cashbook) return cashbook
   const v = getVertical(business.type)
   const model = await resolveModel(ctx.modelKey)
-  const modelLabel = modelLabelFor(model)
+  // Offline networking and deterministic-only evaluation are separate modes:
+  // integration tests may inject a synthetic model while still forbidding real
+  // network access; only the golden evaluator skips the model loop entirely.
+  const deterministicEvalMode = process.env.WAKIL_DETERMINISTIC_EVAL === '1'
+  const modelLabel = deterministicEvalMode ? 'القواعد المحلية · تقييم حتمي' : modelLabelFor(model)
+  if (deterministicEvalMode) meta.fallback = true
   // «الشفافية»: when the SELECTED model cannot be reached, the user must not
   // receive an unmarked local-engine reply as if it were the model's words.
   // Set at the first provider failure; appended to the final reply.
@@ -3642,7 +3644,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           const { op: updated, outcome } = await executeOperation(pendingOp.id, user.id)
           // PR-005: the DECISION is a trace fact (who approved, what, outcome).
           if (meta.traceId) {
-            void safeLogAgentEvent({
+            await safeLogAgentEvent({
               businessId: business.id,
               traceId: meta.traceId,
               type: 'operation.decided',
@@ -3664,7 +3666,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         } else {
           const updated = await rejectOperation(pendingOp.id, user.id, 'رفض من المحادثة', 'reject')
           if (meta.traceId) {
-            void safeLogAgentEvent({
+            await safeLogAgentEvent({
               businessId: business.id,
               traceId: meta.traceId,
               type: 'operation.decided',
@@ -3735,15 +3737,14 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     // shortage line, and any draft waiting on the owner's approval.
     const today = startOfCairoDay(0)
     const yesterdayFrom = startOfCairoDay(1)
-    const [salesYesterday, cashEntries, pendingOps] = await Promise.all([
+    const [salesYesterday, cashPosition, pendingOps] = await Promise.all([
       db.operation.findMany({
         where: { businessId: business.id, status: 'SUCCEEDED', type: { in: ['sale', 'membership'] }, createdAt: { gte: yesterdayFrom, lt: today } },
       }),
-      db.cashEntry.findMany({ where: { businessId: business.id }, select: { direction: true, amount: true } }),
+      db.$transaction(tx => cashPositionEvidence(tx, business.id)),
       db.operation.findMany({ where: { businessId: business.id, status: 'AWAITING_APPROVAL' } }),
     ])
     const ySales = salesYesterday.reduce((s2, o) => s2 + opMoney(o.payload), 0)
-    const cash = business.openingCash + cashEntries.reduce((s2, e) => s2 + (e.direction === 'in' ? e.amount : -e.amount), 0)
     const lowStock = items.filter((i) => i.stockQty != null && i.lowStockThreshold != null && i.stockQty <= i.lowStockThreshold).length
     replyText += ' وشلتلك نظرة النهارده تحت 👇'
     done(IDX.reply)
@@ -3761,7 +3762,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           title: 'نظرة سريعة على الشغل',
           rows: [
             { label: 'بعت امبارح', value: egp(ySales) },
-            { label: 'كاش في الخزنة', value: egp(cash) },
+            { label: 'كاش في الخزنة', value: cashPosition.cash == null ? 'غير معروف — محتاج رصيد بداية أو عدّ فعلي' : egp(cashPosition.cash) },
             { label: 'أصناف على حدود النقص', value: fmtQty(lowStock) },
             ...(pendingOps.length > 0 ? [{ label: 'مسودات مستنية اعتماد', value: fmtQty(pendingOps.length) }] : []),
           ],
@@ -4245,7 +4246,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         return
       }
       executedSigs.add(sig)
-      const report = (result: Record<string, unknown>) => {
+      const report = async (result: Record<string, unknown>): Promise<void> => {
         executedResults.set(sig, result)
         if (result.ok === false && brainFailures.length === 0) brainFailures.push(GENERIC_TOOL_FAIL)
         resultsForModel.push(result)
@@ -4253,7 +4254,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         // refused-vs-executed line is visible in the ledger, not only in chat.
         if (meta.traceId) {
           const ref = typeof result.ref === 'string' ? result.ref : null
-          void safeLogAgentEvent({
+          await safeLogAgentEvent({
             businessId: business.id,
             traceId: meta.traceId,
             type: result.ok === false ? 'tool.failed' : ref ? 'draft.created' : 'tool.executed',
@@ -4287,7 +4288,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         // PR-005: a refusal is its OWN trace fact (actor=model), distinct from
         // a tool that ran and failed.
         if (meta.traceId) {
-          void safeLogAgentEvent({
+          await safeLogAgentEvent({
             businessId: business.id,
             traceId: meta.traceId,
             type: 'tool.refused',
@@ -4319,7 +4320,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           const run = await runToolPipeline(call.tool, business.id, call.args)
           if (!run.ok) {
             step.detail = run.error?.slice(0, 80) ?? 'الأداة فشلت'
-            report({ tool: call.tool, ok: false, error: run.error ?? 'فشل' })
+            await report({ tool: call.tool, ok: false, error: run.error ?? 'فشل' })
             replyParts.push(`مش قادر أجيب ${TOOL_LABEL_AR[call.tool] ?? call.tool} دلوقتي — قول للمستخدم إن في مشكلة مؤقتة.`)
             brainFailures.push(`مش قادر أجيب ${TOOL_LABEL_AR[call.tool] ?? call.tool} دلوقتي — جرّب تاني بعد شوية`)
             return
@@ -4329,7 +4330,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           emit({ event: 'cards', cards: allCards })
           usedTools.push(call.tool)
           brainFacts.push(...factsFromCards(subCards))
-          meta.notesJotted += jotFactsFromCards(
+          meta.notesJotted += await jotFactsFromCards(
             { businessId: business.id, userId: user.id, conversationId: ctx.conversationId },
             subCards,
           )
@@ -4342,7 +4343,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             })
             .join('؛ ')
           step.detail = (run.trimmed ? `${summary.slice(0, 70)}… (اتقصّرت للسياق)` : summary.slice(0, 90)) || 'رجعت ببيانات'
-          report({
+          await report({
             tool: call.tool,
             ok: true,
             ms: run.ms,
@@ -4364,7 +4365,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           const plan = normalizePlan(call.args)
           if (plan.length === 0) {
             step.detail = 'الخطة فاضية أو فيها أداة غير مسموحة'
-            report({
+            await report({
               tool: 'run_plan',
               ok: false,
               error: 'الخطة لازم تكون أدوات قراءة معروفة بس (من غير أي كتابة)',
@@ -4381,7 +4382,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             usedTools.push(r.tool)
             for (const c of r.cards) allCards.push(c)
             brainFacts.push(...factsFromCards(r.cards))
-            meta.notesJotted += jotFactsFromCards(
+            meta.notesJotted += await jotFactsFromCards(
               { businessId: business.id, userId: user.id, conversationId: ctx.conversationId },
               r.cards,
             )
@@ -4389,7 +4390,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           }
           if (allCards.length > 0) emit({ event: 'cards', cards: allCards })
           step.detail = `نفّذت ${toArabicNum(doneRuns.length)}/${toArabicNum(runs.length)} استعلام في خطوة واحدة`
-          report({
+          await report({
             tool: 'run_plan',
             ok: true,
             steps: runs.map((r) => ({ tool: r.tool, ok: r.ok, ms: r.ms, error: r.error, output: r.output })),
@@ -4407,7 +4408,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             question,
             context: [
               `النشاط: ${business.name} (${business.type})`,
-              `الخزنة: ${egp(snapshot?.cash ?? 0)}`,
+              `الخزنة: ${snapshot?.cash == null ? 'غير معروف — رصيد البداية لم يتسجل ولا يوجد عدّ فعلي' : egp(snapshot.cash)}`,
               `مبيعات النهاردة: ${egp(snapshot?.salesToday ?? 0)}`,
             ].join(' — '),
             complete: (messages) => completeChat(model, messages),
@@ -4426,7 +4427,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           // only the SUMMARY enters the parent's context — the intermediate
           // reads stay inside the sub-agent (Claude Code's summary-only return)
           step.detail = sub.summary.slice(0, 80)
-          report({
+          await report({
             tool: 'deep_dive',
             ok: true,
             rounds: sub.rounds,
@@ -4445,7 +4446,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         if (w) {
           if (!canDraft(user.role, w.opType)) {
             step.detail = `محتاجة صلاحية أعلى من ${roleTitle(user)}`
-            report({ tool: call.tool, ok: false, error: `صلاحية ${user.name} مش بتسمح بعملية ${TYPE_AR[w.opType] ?? w.opType}` })
+            await report({ tool: call.tool, ok: false, error: `صلاحية ${user.name} مش بتسمح بعملية ${TYPE_AR[w.opType] ?? w.opType}` })
             replyParts.push(`عملية ${TYPE_AR[w.opType] ?? w.opType} محتاجة صلاحية أعلى — مش من اختصاصك.`)
             return
           }
@@ -4456,7 +4457,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
               // R41: the request is HELD, not failed — a follow-up will
               // complete it. The question below REPLACES this turn's reply.
               pendingQuestionFromWrite = resolved.pendingQuestion
-              report({
+              await report({
                 tool: call.tool,
                 ok: false,
                 pending: true,
@@ -4467,7 +4468,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             // Push the SPECIFIC failure first: report() seeds a generic
             // «الإجراء لم ينفذ» line only while brainFailures is still empty.
             brainFailures.push(resolved.failMessage ?? `ناقص ${resolved.missing ?? 'بيانات'} — ${TYPE_AR[resolved.opType] ?? resolved.opType} ماتسجلتش`)
-            report({
+            await report({
               tool: call.tool,
               ok: false,
               error: `${resolved.failMessage ?? resolved.missing ?? 'ناقصة بيانات'} — العملية دي ماتسجلتش خالص، ولازم تقول للمستخدم كده بصراحة في ردك`,
@@ -4514,7 +4515,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             emit({ event: 'card', card: draftCard })
           }
           brainFacts.push(...[...resolved.card.fields, ...resolved.card.effects].map((f) => ({ label: f.label, value: f.value })))
-          void jotNote({
+          await jotNote({
             businessId: business.id,
             userId: user.id,
             conversationId: ctx.conversationId,
@@ -4547,7 +4548,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
               replyParts.push(`وسجلت في ذاكرتي الموعد: ${memText}`)
             }
           }
-          report({ tool: call.tool, ok: true, ref: draft.ref, summary: resolved.summary, note: 'مسودة مستنية اعتماد — مبتنفذش لوحدها', ...(resolved.issues?.length ? { تنبيه: resolved.issues.join('؛ ') } : {}) })
+          await report({ tool: call.tool, ok: true, ref: draft.ref, summary: resolved.summary, note: 'مسودة مستنية اعتماد — مبتنفذش لوحدها', ...(resolved.issues?.length ? { تنبيه: resolved.issues.join('؛ ') } : {}) })
           replyParts.push(`جهزت مسودة «${TYPE_AR[resolved.opType] ?? resolved.opType}» (${draft.ref}): ${resolved.summary} — مستنية اعتمادك.`)
           // A draft can carry a caveat the owner MUST read (e.g. the amount was
           // lowered to the real debt) — it goes through the same failure guard so
@@ -4559,14 +4560,14 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         // Presentation plugins cannot execute JS/CSS, grant roles, or touch money.
         if (call.tool === 'configure_workspace') {
           const preferences = await updateWorkspacePreferences(business.id, user.id, call.args)
-          report({ tool: call.tool, ok: true, preferences })
+          await report({ tool: call.tool, ok: true, preferences })
           confirmedMutationReplies.push('حفظت إعدادات واجهتك لحسابك في المنشأة دي؛ الحسابات والصلاحيات متغيرتش.')
           await trackUsage(business.id, user.id, 'tool', call.tool)
           return
         }
         if (call.tool === 'list_plugins') {
           const plugins = await getBusinessPlugins(business.id)
-          report({ tool: call.tool, ok: true, plugins: plugins.map((p) => ({ slug: p.slug, name: p.name, installed: p.installed, active: p.active })) })
+          await report({ tool: call.tool, ok: true, plugins: plugins.map((p) => ({ slug: p.slug, name: p.name, installed: p.installed, active: p.active })) })
           return
         }
         if (call.tool === 'install_plugin') {
@@ -4575,7 +4576,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           const prompt = String(call.args.prompt ?? '').trim().slice(0, 1200)
           if (!prompt || containsMemorySecret(prompt)) throw new Error('وصف الإضافة غير صالح')
           const plugin = await synthesizePluginWithAI({ businessId: business.id, userId: user.id, prompt, preferredName: String(call.args.name ?? '').slice(0, 80) || undefined })
-          report({ tool: call.tool, ok: true, slug: plugin.slug, name: plugin.name, active: plugin.active })
+          await report({ tool: call.tool, ok: true, slug: plugin.slug, name: plugin.name, active: plugin.active })
           confirmedMutationReplies.push(`ثبّت إضافة «${plugin.name}»؛ دي خطوات تحليل معتمدة، مش كود حر ولا صلاحية جديدة.`)
           return
         }
@@ -4586,7 +4587,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           if (!plugin) throw new Error('إضافة غير مثبتة في المنشأة')
           const updated = await togglePluginActive(plugin.id, call.args.active, business.id, user.id)
           if (!updated) throw new Error('لم يتأكد تغيير الإضافة')
-          report({ tool: call.tool, ok: true, slug: updated.slug, active: updated.active })
+          await report({ tool: call.tool, ok: true, slug: updated.slug, active: updated.active })
           confirmedMutationReplies.push(`${updated.active ? 'فعّلت' : 'وقفت'} الإضافة «${updated.name}» في المنشأة دي.`)
           return
         }
@@ -4597,7 +4598,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           const result = await executePlugin({ businessId: business.id, pluginOrSlug: slug })
           allCards.push(...result.cards)
           if (result.cards.length) emit({ event: 'cards', cards: result.cards })
-          report({ tool: call.tool, ok: true, summary: result.summaryText })
+          await report({ tool: call.tool, ok: true, summary: result.summaryText })
           return
         }
         // ---- memory_save (the model's own long-term learning tool) ----
@@ -4606,12 +4607,12 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           const memText = String(call.args.text ?? '').trim().slice(0, 200)
           if (containsMemorySecret(memText)) {
             const error = 'مش هحفظ كلمات مرور أو رموز أمان في الذاكرة.'
-            report({ tool: 'memory_save', ok: false, error })
+            await report({ tool: 'memory_save', ok: false, error })
             brainFailures.push(error)
             return
           }
           if (memText.length < 3) {
-            report({ tool: 'memory_save', ok: false, error: 'نص فاضي' })
+            await report({ tool: 'memory_save', ok: false, error: 'نص فاضي' })
             return
           }
           const memNorm = normalizeAr(memText)
@@ -4630,7 +4631,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             })
           }
           step.detail = dup ? 'موجودة أصلًا — من غير تكرار' : memText.slice(0, 60)
-          report({ tool: 'memory_save', ok: true, saved: true, duplicate: dup })
+          await report({ tool: 'memory_save', ok: true, saved: true, duplicate: dup })
           replyParts.push(dup ? `دي محفوظة عندي أصلًا ✅ — «${memText}»` : `اتحفظت في ذاكرتي ✅ — «${memText}»`)
           modelSavedMemory = true
           return
@@ -4646,11 +4647,11 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             // as the deterministic path) — no retrieval of a forgotten row.
             localVectorDB.removeDocument(business.id, target.id)
             step.detail = target.text.slice(0, 60)
-            report({ tool: 'memory_forget', ok: true, forgotten: target.text.slice(0, 80) })
+            await report({ tool: 'memory_forget', ok: true, forgotten: target.text.slice(0, 80) })
             replyParts.push(`اتمسحت من ذاكرتي ✅ — «${target.text.slice(0, 100)}»`)
           } else {
             step.detail = 'ملقيتش حاجة بالشكل ده'
-            report({ tool: 'memory_forget', ok: false, error: 'ملقيتش حاجة بالشكل ده' })
+            await report({ tool: 'memory_forget', ok: false, error: 'ملقيتش حاجة بالشكل ده' })
             replyParts.push('ملقيتش في ذاكرتي حاجة بالشكل ده 🤔')
           }
           return
@@ -4671,11 +4672,11 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             emit({ event: 'cards', cards: allCards })
             brainFacts.push({ label: prettyExpr, value: valueAr })
             step.detail = `${prettyExpr} = ${valueAr}`
-            report({ tool: 'calculate', ok: true, expression: prettyExpr, value: calc.value })
+            await report({ tool: 'calculate', ok: true, expression: prettyExpr, value: calc.value })
             replyParts.push(`${prettyExpr} = ${valueAr}`)
           } else {
             step.detail = calc.error
-            report({ tool: 'calculate', ok: false, error: calc.error })
+            await report({ tool: 'calculate', ok: false, error: calc.error })
           }
           await trackUsage(business.id, user.id, 'tool', 'calculate')
           return
@@ -4684,7 +4685,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         if (call.tool === 'schedule_task') {
           await requirePermission(business.id, user.id, 'automation.manage')
           if (/اقترح|اقتراح|لا تنشئ|ماتفع[لّ]|نفكر/.test(text) || !/فكرني|ذكرني|جدول|تذكير|موافق|أكد|تاكيد|تأكيد/.test(text)) {
-            report({ tool: call.tool, ok: false, error: 'اعرض اقتراح فقط، واطلب موافقة صريحة بالموعد والتكرار قبل إنشاء مهمة' })
+            await report({ tool: call.tool, ok: false, error: 'اعرض اقتراح فقط، واطلب موافقة صريحة بالموعد والتكرار قبل إنشاء مهمة' })
             replyParts.push('ده اقتراح فقط؛ محتاج موافقتك وموعد وتكرار محددين بتوقيت القاهرة قبل التفعيل.')
             return
           }
@@ -4692,7 +4693,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           const whenLabel = String(call.args.whenLabel ?? call.args.when ?? '').trim().slice(0, 80)
           if (!title) {
             step.detail = 'عنوان المهمة فاضي'
-            report({ tool: 'schedule_task', ok: false, error: 'title مطلوب' })
+            await report({ tool: 'schedule_task', ok: false, error: 'title مطلوب' })
             return
           }
           const rawTool = String(call.args.tool ?? '').trim()
@@ -4700,7 +4701,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           if (rawTool && rawTool !== 'remind' && !READ_TOOLS.has(rawTool)) throw new Error('ممنوع جدولة أداة كتابة مالية')
           const when = resolveCairoSchedule(whenLabel)
           if (!when || when <= new Date()) {
-            report({ tool: call.tool, ok: false, error: 'حدد موعدًا مستقبليًا مفهومًا؛ لا نفترض غدًا أو وقتًا افتراضيًا' })
+            await report({ tool: call.tool, ok: false, error: 'حدد موعدًا مستقبليًا مفهومًا؛ لا نفترض غدًا أو وقتًا افتراضيًا' })
             return
           }
           const recurrence = call.args.recurrence == null ? null : String(call.args.recurrence)
@@ -4720,7 +4721,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             },
           })
           step.detail = `${title} — ${whenLabel || whenAr}`
-          void jotNote({
+          await jotNote({
             businessId: business.id,
             userId: user.id,
             conversationId: ctx.conversationId,
@@ -4729,7 +4730,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             source: 'scheduled',
           })
           meta.notesJotted++
-          report({ tool: 'schedule_task', ok: true, task: title, when: whenLabel || whenAr })
+          await report({ tool: 'schedule_task', ok: true, task: title, when: whenLabel || whenAr })
           confirmedMutationReplies.push(`حفظت مهمة «${title}» في ${whenLabel} بتوقيت القاهرة${recurrence ? `؛ التكرار: ${recurrence}` : '؛ مرة واحدة'}. تقرير أو تذكير فقط، مش حركة فلوس.`)
           await trackUsage(business.id, user.id, 'tool', 'schedule_task')
           return
@@ -4741,7 +4742,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           const key = toneKey(raw)
           if (!key) {
             step.detail = 'نبرة مش معروفة'
-            report({ tool: 'set_persona', ok: false, error: 'اختار: ودود / رسمي / مختصر' })
+            await report({ tool: 'set_persona', ok: false, error: 'اختار: ودود / رسمي / مختصر' })
             return
           }
           await db.agentSettings.upsert({
@@ -4750,7 +4751,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
             create: { businessId: business.id, vertical: business.type, tone: key },
           })
           step.detail = TONE_AR[key] ?? key
-          report({ tool: 'set_persona', ok: true, tone: key })
+          await report({ tool: 'set_persona', ok: true, tone: key })
           replyParts.push(`ظبطت نبرتي من دلوقتي ✅ — ${TONE_AR[key] ?? key}.`)
           await trackUsage(business.id, user.id, 'tool', 'set_persona')
           return
@@ -4770,7 +4771,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           for (const t of pipelineResult.completedTasks) {
             if (t.resultSummary) replyParts.push(`- **${t.agentLabel}**: ${t.resultSummary}`)
           }
-          report({
+          await report({
             tool: 'decompose_and_run_tasks',
             ok: true,
             tasksCount: subtasks.length,
@@ -4780,13 +4781,13 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
           return
         }
         // ---- unknown tool ----
-        report({ tool: call.tool, ok: false, error: 'أداة غير معروفة' })
+        await report({ tool: call.tool, ok: false, error: 'أداة غير معروفة' })
         step.detail = 'أداة مش معروفة — تجاهلتها'
       } catch (err) {
         console.error('[brain] tool exec failed:', call.tool, err)
         step.detail = err instanceof AuthorizationError ? 'الصلاحية لا تسمح بالإجراء' : 'تعذّر تأكيد نتيجة الإجراء'
         brainFailures.push(err instanceof AuthorizationError ? 'صلاحيتك الحالية مش بتسمح بالإجراء ده — مغيرتش صلاحياتك.' : 'تعذّر تأكيد نتيجة الإجراء من السجل؛ راجعها قبل إعادة المحاولة.')
-        report({ tool: call.tool, ok: false, error: 'فشل تنفيذ الأداة' })
+        await report({ tool: call.tool, ok: false, error: 'فشل تنفيذ الأداة' })
       } finally {
         step.state = 'done'
         step.ms = Math.max(0, Date.now() - toolClock)
@@ -4871,7 +4872,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         // ---- context pressure, the CHEAP layer first (dsh compaction listener):
         // older tool results are digested instead of re-sent whole to the model.
         const { kept, budget } = budgetToolHistory(resultsForModel, 3)
-        if (budget.compressed) void logContextPressure(business.id, user.id, { ...budget, rounds })
+        if (budget.compressed) await logContextPressure(business.id, user.id, { ...budget, rounds })
         convo.push({
           role: 'user',
           content: `نتايج الأدوات (JSON):\n${
@@ -5063,10 +5064,11 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   // («المورد … والحساب 2000» is slots for the open request, not a new command).
   // R48: a COMPLETED credit-to-new-customer request owns the turn — it is two
   // deterministic writes, and the model (or deep research) must not take over.
-  if (!pendingWriteIntent && !creditSubs) {
-    // All user queries flow through the genuine Gemini model via runBrainTurn() first.
-    // Rule-based intent patterns are preserved strictly as an offline fallback when the LLM
-    // is unreachable or times out, never intercepting when the model is operational.
+  if (!pendingWriteIntent && !creditSubs && !deterministicEvalMode) {
+    // Normal operation and offline integration tests still exercise the model-first
+    // orchestration (tests may inject a synthetic response source; WAKIL_OFFLINE
+    // prevents real network calls). Only deterministic evaluation bypasses it so
+    // 1000+ rule-ladder scenarios do not spin through LLM retry/backoff.
     const brainTurn = await runBrainTurn()
     if (brainTurn) return brainTurn
   }
@@ -5259,7 +5261,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         usedTools.push(sub.tool)
         // R15: ground-truth facts + scratchpad jot («ورقة وقلم»)
         turnFacts.push(...factsFromCards(subCards))
-        meta.notesJotted += jotFactsFromCards(
+        meta.notesJotted += await jotFactsFromCards(
           { businessId: business.id, userId: user.id, conversationId: ctx.conversationId },
           subCards,
         )
@@ -5330,7 +5332,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         turnFacts.push(
           ...[...resolved.card.fields, ...resolved.card.effects].map((f) => ({ label: f.label, value: f.value })),
         )
-        void jotNote({
+        await jotNote({
           businessId: business.id,
           userId: user.id,
           conversationId: ctx.conversationId,
@@ -5357,7 +5359,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         .slice(4)
         .map((s) => s.sourceText.slice(0, 60))
         .join('؛ ')
-      void jotNote({
+      await jotNote({
         businessId: business.id,
         userId: user.id,
         conversationId: ctx.conversationId,
@@ -5392,7 +5394,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     done(IDX.verify, 'الأرقام جاية من قاعدة البيانات مباشرة')
     // R15: ground-truth facts + scratchpad jot («ورقة وقلم»)
     turnFacts.push(...factsFromCards(cards))
-    meta.notesJotted += jotFactsFromCards(
+    meta.notesJotted += await jotFactsFromCards(
       { businessId: business.id, userId: user.id, conversationId: ctx.conversationId },
       cards,
     )
@@ -5442,7 +5444,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         questionMode = true
         // R15: an ambiguous request lands on the paper as a HYPOTHESIS — the
         // employee notes what he THINKS the user wants before asking
-        void jotNote({
+        await jotNote({
           businessId: business.id,
           userId: user.id,
           conversationId: ctx.conversationId,
@@ -5516,7 +5518,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
         turnFacts.push(
           ...[...resolved.card.fields, ...resolved.card.effects].map((f) => ({ label: f.label, value: f.value })),
         )
-        void jotNote({
+        await jotNote({
           businessId: business.id,
           userId: user.id,
           conversationId: ctx.conversationId,
@@ -5540,7 +5542,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
       { label: 'مبيعات النهاردة', value: egp(snapshot.salesToday) },
       { label: 'تحصيلات النهاردة', value: egp(snapshot.collectionsToday) },
       { label: 'مصروفات النهاردة', value: egp(snapshot.expensesToday) },
-      { label: 'رصيد الخزنة', value: egp(snapshot.cash) },
+      { label: 'رصيد الخزنة', value: snapshot.cash == null ? 'غير معروف — محتاج رصيد بداية أو عدّ فعلي' : egp(snapshot.cash) },
       { label: 'أصناف ناقصة', value: String(snapshot.lowStockCount) },
       { label: 'مديونيات العملاء', value: egp(snapshot.receivablesTotal) },
       { label: 'عمليات مستنية اعتماد', value: String(snapshot.pendingCount) },
@@ -5548,7 +5550,7 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
     // «ورقة وكيل» rides along the advisory prompt too — the paper is alive
     const baseAdvisory = buildAdvisoryPrompt({ business, user, snapshot, memories, history: ctx.history })
     advisorySystem = notesSection ? `${baseAdvisory}\n\n${notesSection}` : baseAdvisory
-    situation = `سؤال عام عن الشغل (استشارة). سياق حقيقي: مبيعات النهاردة ${egp(snapshot.salesToday)}، خزنة ${egp(snapshot.cash)}، ${snapshot.lowStockCount} صنف ناقص، مديونيات ${egp(snapshot.receivablesTotal)}، ${snapshot.pendingCount} عملية مستنية.`
+    situation = `سؤال عام عن الشغل (استشارة). سياق حقيقي: مبيعات النهاردة ${egp(snapshot.salesToday)}، خزنة ${snapshot.cash == null ? 'غير معروف — لا يوجد رصيد بداية أو عدّ معتمد' : egp(snapshot.cash)}، ${snapshot.lowStockCount} صنف ناقص، مديونيات ${egp(snapshot.receivablesTotal)}، ${snapshot.pendingCount} عملية مستنية.`
     replyInstruction = 'انصحه كموظف شاطر بالمصري — ودود ودافئ.'
     for (const m of memories) memCtx.referencedIds.push(m.id)
   }

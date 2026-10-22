@@ -7,7 +7,7 @@ import { setWorkflow } from '@/lib/domain/workflow'
 import type { Business, User } from '@prisma/client'
 import { db } from '@/lib/db'
 import { createDraft } from '@/lib/domain/executors'
-import { cashbookCash, CASHBOOK_LABELS, type CashbookKind } from '@/lib/domain/cashbook'
+import { cashPositionEvidence, CASHBOOK_LABELS, type CashbookKind } from '@/lib/domain/cashbook'
 import { computeRisk } from '@/lib/domain/risk'
 import { restockTurn } from './shop-restock'
 import { normalizeAr } from './arabic'
@@ -44,9 +44,16 @@ export async function cashbookTurn(ctx: { business: Business; user: User; text: 
     emit({ event: 'cards', cards })
     return finish('ده المسجل فعلًا، مش تأكيد إن حد لسه ما دفعش. لو حصل سداد ولسه ما اتسجلش قولّي نسجله بعد مراجعتك.', { cards })
   }
-  if (business.workflowMode !== 'cashbook') return null
+  // The general employee must still understand a clear, explicit cashbook command.
+  // `workflowMode` enables the focused ledger workflow and restock helpers; it is
+  // not a permission boundary and must not hide safe draft creation from a new shop.
   let parsed = parseCashbook(text)
   const correction = parseFinancialCorrection(text)
+  // Outside the focused ledger workflow, intercept only a structurally parsed
+  // financial instruction or an explicit correction. An ambiguous phrase must
+  // fall through to the general employee/model pipeline instead of hijacking
+  // ordinary sector-specific requests.
+  if (business.workflowMode !== 'cashbook' && (!parsed || parsed === 'ambiguous') && !correction) return null
   if (correction) {
     const edited = await pendingCashbookCorrection(ctx, correction)
     if (edited?.replyText) return finish(edited.replyText)
@@ -68,7 +75,11 @@ export async function cashbookTurn(ctx: { business: Business; user: User; text: 
   const payload: Record<string, unknown> = { ...parsed, note: dialogue?.intent || correction ? parsed.note : text }
   if (parsed.dueOn === undefined) delete payload.dueOn
   try {
-    if (parsed.kind === 'cash_count') payload.expectedCash = await db.$transaction(tx => cashbookCash(tx, business.id))
+    if (parsed.kind === 'cash_count') {
+      const position = await db.$transaction(tx => cashPositionEvidence(tx, business.id))
+      payload.expectedCash = position.ledgerCash
+      payload.expectedCashKnown = position.currentCashKnown
+    }
     const op = await createDraft({ businessId: business.id, userId: user.id, type: 'cashbook', summary: `${CASHBOOK_LABELS[parsed.kind]}${parsed.partyName ? ` · ${parsed.partyName}` : ''} · ${egp(parsed.amount)}`, payload, conversationId: ctx.conversationId, risk: computeRisk('cashbook', parsed.amount), idempotencyKey: `cashbook:${ctx.conversationId}:${ctx.turnId ?? crypto.randomUUID()}`, ...(parsed.supersedesRef ? { replaceDraftRef: parsed.supersedesRef } : {}) })
     if (op.status !== 'AWAITING_APPROVAL') return finish(`الحركة ${op.ref} حالتها ${op.status}؛ مش هكرر تسجيلها.`, { opId: op.id })
     const canonical = JSON.parse(op.payload) as CashbookIntent & { expectedCash?: number }
@@ -79,7 +90,11 @@ export async function cashbookTurn(ctx: { business: Business; user: User; text: 
       { label: 'يوم الحركة', value: parsed.occurredOn, hint: parsed.dateSource === 'assumed_today' ? 'اعتبرناها النهارده لأن اليوم ما اتقالش؛ راجعه قبل الاعتماد' : 'الساعة غير محددة؛ وقت الإدخال محفوظ لوحده' },
       ...(parsed.dueOn ? [{ label: 'ميعاد السداد', value: parsed.dueOn }] : []),
       ...(parsed.reason ? [{ label: 'بند المصروف', value: parsed.reason }] : []),
-    ], effects: [], ...(parsed.kind === 'cash_count' ? { dangerNote: `المسجل قبل العد ${egp(Number(payload.expectedCash))}؛ الفرق ${egp(parsed.amount - Number(payload.expectedCash))} هيفضل «فرق عدّ غير مصنف»، مش مبيعات ولا أرباح.` } : {}) }
+    ], effects: [], ...(parsed.kind === 'cash_count' ? {
+      dangerNote: payload.expectedCashKnown === false
+        ? `ده أول عدّ فعلي للخزنة. عند الاعتماد هيحدد الرصيد الحالي ${egp(parsed.amount)}؛ مش هيتسجل كبيع أو قبض.`
+        : `المسجل قبل العد ${egp(Number(payload.expectedCash))}؛ الفرق ${egp(parsed.amount - Number(payload.expectedCash))} هيفضل «فرق عدّ غير مصنف»، مش مبيعات ولا أرباح.`
+    } : {}) }
     emit({ event: 'card', card })
     return finish(`${parsed.supersedesRef ? `لغيت المسودة ${parsed.supersedesRef} واستبدلتها بالتفاصيل المصححة؛ مفيش فلوس اتغيرت. ` : ''}جهزت تسجيل ${CASHBOOK_LABELS[parsed.kind]}؛ راجع الاسم والمبلغ واليوم واعتمد. لسه مفيش رصيد اتغير.${parsed.dueOn ? ' بعد الاعتماد هتابع الميعاد وأسألك لو حصل سداد ولسه ما اتسجلش؛ مش هفترض إنه حصل.' : ''}`, { card, opId: op.id })
   } catch (error) {

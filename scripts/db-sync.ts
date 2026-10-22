@@ -23,6 +23,8 @@
 import { readFileSync } from 'node:fs'
 import { createClient } from '@libsql/client'
 import { getDMMF } from '@prisma/internals'
+import { defaultPrismaIndexName } from './lib/prisma-index-names'
+import { hasEquivalentIndex } from './lib/prisma-index-equivalence'
 
 interface DmmfField {
   name: string
@@ -80,7 +82,7 @@ function parseIndexDirectives(schema: string): Record<string, { name: string; ki
       if (!match) continue
       const [, kind, fieldsRaw, mapName] = match
       const fields = fieldsRaw.split(',').map((f) => f.trim().replace(/\(.*\)$/, ''))
-      const name = mapName || `${model}_${fields.join('_')}_${kind}`
+      const name = defaultPrismaIndexName(model, fields, kind as 'index' | 'unique', mapName)
       ;(out[model] ??= []).push({ name, kind: kind as 'index' | 'unique', fields, raw: trimmed })
     }
   }
@@ -172,12 +174,30 @@ async function main() {
     }
   }
 
-  // Indexes (idempotent: IF NOT EXISTS).
-  const indexRes = await client.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
-  const existingIndexes = new Set(indexRes.rows.map((r) => String(r.name)))
+  // Indexes (idempotent: IF NOT EXISTS). Compare actual table/columns/order/unique
+  // semantics as well as name: older releases of db-sync generated `_index`
+  // names for default Prisma indexes. Recreating those indexes under `_idx`
+  // would waste disk and write amplification without changing query semantics.
   for (const model of models) {
+    const actual: { name: string; unique: boolean; partial: boolean; fields: string[] }[] = []
+    const listed = await client.execute(`PRAGMA index_list(${quote(model.name)})`)
+    for (const row of listed.rows) {
+      const name = String(row.name)
+      const detail = await client.execute(`PRAGMA index_info(${quote(name)})`)
+      const fields = [...detail.rows]
+        .sort((a, b) => Number(a.seqno) - Number(b.seqno))
+        .map((field) => String(field.name))
+        .filter((field) => field && field !== 'null')
+      actual.push({
+        name,
+        unique: Number(row.unique) === 1,
+        partial: Number(row.partial) === 1,
+        fields,
+      })
+    }
     for (const idx of indexDirectives[model.name] ?? []) {
-      if (existingIndexes.has(idx.name)) continue
+      const defaultName = defaultPrismaIndexName(model.name, idx.fields, idx.kind)
+      if (hasEquivalentIndex(idx, actual, defaultName)) continue
       statements.push(createIndexSql(model.name, idx))
       report.push(`+ index   ${idx.name} (${idx.fields.join(', ')})`)
     }

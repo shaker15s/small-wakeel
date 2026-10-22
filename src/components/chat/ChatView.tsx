@@ -555,10 +555,6 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
   // R60: keyboard quick-approve — the owner's hands are often on the keyboard,
   // not the mouse. e.code (not e.key) so it works on Arabic keyboard layouts.
   useEffect(() => {
-    approveRef.current = approve
-    rejectRef.current = reject
-  })
-  useEffect(() => {
     if (!keyboardTargetId) return
     const onKey = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.metaKey || e.altKey) return
@@ -596,6 +592,11 @@ export function ChatView({ business, businesses, userId, onNavigate }: ChatViewP
     },
     [userId, business.id, toast, queryClient],
   )
+
+  useEffect(() => {
+    approveRef.current = approve
+    rejectRef.current = reject
+  })
 
   // ---- derived ----
   const lastTurn = turns.length > 0 ? turns[turns.length - 1] : null

@@ -46,7 +46,7 @@ beforeAll(async () => {
   supervisor = await db.user.create({ data: { businessId: business.id, name: 'supervisor', role: 'supervisor' } })
 })
 afterEach(() => {
-  for (const key of ['NODE_ENV', 'WAKIL_AUTH_CREDENTIALS', 'WAKIL_OFFLINE', 'WAKIL_STRICT_APPROVALS']) {
+  for (const key of ['NODE_ENV', 'WAKIL_AUTH_CREDENTIALS', 'WAKIL_OFFLINE', 'WAKIL_STRICT_APPROVALS', 'WAKIL_ALLOW_DELEGATED_APPROVALS']) {
     if (original[key] === undefined) delete process.env[key]
     else process.env[key] = original[key]
   }
@@ -116,14 +116,23 @@ test('same-tenant staff cannot approve/reject an expense or mutate its reason', 
   expect(await db.cashEntry.count({ where: { ref: op.ref } })).toBe(0)
 })
 
-test('strict approvals means management-only, not a false four-eyes guarantee; own cancellation works', async () => {
-  process.env.WAKIL_STRICT_APPROVALS = '1'
-  const it = await db.item.create({ data: { businessId: business.id, name: 'sale item', unit: 'piece', sellPrice: 100, stockQty: 5 } })
-  const op = await createDraft({ businessId: business.id, userId: cashier.id, type: 'sale', summary: 'sale', payload: { itemId: it.id, qty: 1, total: 100 }, idempotencyKey: randomUUID() })
+test('owner approval is the default for a cashier draft; explicit supervisor delegation is bounded', async () => {
+  delete process.env.WAKIL_STRICT_APPROVALS
+  delete process.env.WAKIL_ALLOW_DELEGATED_APPROVALS
+  const it = await db.item.create({ data: { businessId: business.id, name: 'owner-approved sale item', unit: 'piece', sellPrice: 100, stockQty: 5 } })
+  const op = await createDraft({ businessId: business.id, userId: cashier.id, type: 'sale', summary: 'cashier draft', payload: { itemId: it.id, qty: 1, total: 100 }, idempotencyKey: randomUUID() })
   await expect(executeOperation(op.id, cashier.id)).rejects.toBeInstanceOf(AuthorizationError)
-  expect((await rejectOperation(op.id, cashier.id, 'changed mind', 'cancel')).status).toBe('CANCELLED')
-  const ownerDraft = await createDraft({ businessId: business.id, userId: owner.id, type: 'expense', summary: 'expense', payload: { total: 100 }, idempotencyKey: randomUUID() })
-  expect((await executeOperation(ownerDraft.id, owner.id)).op.status).toBe('SUCCEEDED')
+  expect((await db.operation.findUniqueOrThrow({ where: { id: op.id } })).status).toBe('AWAITING_APPROVAL')
+  expect((await db.item.findUniqueOrThrow({ where: { id: it.id } })).stockQty).toBe(5)
+  expect(await db.cashEntry.count({ where: { ref: op.ref } })).toBe(0)
+  expect((await executeOperation(op.id, owner.id)).op.status).toBe('SUCCEEDED')
+  expect((await db.item.findUniqueOrThrow({ where: { id: it.id } })).stockQty).toBe(4)
+  expect(await db.cashEntry.count({ where: { ref: op.ref } })).toBe(1)
+
+  const supervisorDraft = await createDraft({ businessId: business.id, userId: owner.id, type: 'sale', summary: 'owner draft', payload: { itemId: it.id, qty: 1, total: 100 }, idempotencyKey: randomUUID() })
+  process.env.WAKIL_ALLOW_DELEGATED_APPROVALS = '1'
+  expect((await executeOperation(supervisorDraft.id, supervisor.id)).op.status).toBe('SUCCEEDED')
+  expect((await db.item.findUniqueOrThrow({ where: { id: it.id } })).stockQty).toBe(3)
 })
 
 test('R3 reason is required and is never overwritten by repeat approval/rejection', async () => {

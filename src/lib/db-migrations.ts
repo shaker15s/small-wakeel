@@ -102,46 +102,97 @@ export function findMigrationsDir(): string | null {
   return null
 }
 
-export async function applyMigrations(dbPath: string, migrationsDir?: string): Promise<MigrationResult> {
+export async function applyMigrations(
+  dbPath: string,
+  migrationsDir?: string,
+  options: { integrityCheck?: boolean } = {},
+): Promise<MigrationResult> {
   const dir = migrationsDir ?? findMigrationsDir()
   if (!dir) throw new Error('db/migrations directory not found (run from the repo root or set WAKIL_PROJECT_ROOT)')
   const absolute = isAbsolute(dbPath) ? dbPath : join(process.cwd(), dbPath)
-  const client: Client = createClient({ url: `file:${absolute}` })
+  // SAFETY POLICY: keep local SQLite in DELETE (rollback-journal) mode until
+  // the SQLite core bundled by @libsql/client includes the upstream WAL-reset
+  // corruption fix (SQLite 3.51.3+). The current dependency line predates that
+  // fix; WAL plus concurrent writes/checkpoints can corrupt financial data.
+  // This deliberately trades some reader/writer concurrency for integrity.
+  // The local client is also bounded to one concurrent operation with a finite
+  // lock timeout. Do not manually switch a live local database back to WAL.
+  const client: Client = createClient({ url: `file:${absolute}`, timeout: 10_000, concurrency: 1 })
   const applied: string[] = []
   let skipped = 0
   try {
-    await client.execute('PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON;')
+    const journal = await client.execute('PRAGMA journal_mode = DELETE')
+    const journalMode = String(journal.rows[0]?.journal_mode ?? '').toLowerCase()
+    if (journalMode !== 'delete') {
+      throw new Error(`Local SQLite must use DELETE journal mode until the bundled WAL-reset fix is verified; got ${journalMode || 'unknown'}`)
+    }
+    const engine = await client.execute('SELECT sqlite_version() AS version')
+    const sqliteVersion = String(engine.rows[0]?.version ?? 'unknown')
+    console.info(`[sqlite-safety] journal=${journalMode}; bundled SQLite=${sqliteVersion}; WAL disabled pending patched libSQL core`)
+    await client.execute('PRAGMA foreign_keys = ON')
     await client.execute('CREATE TABLE IF NOT EXISTS _WakilMigration (id TEXT PRIMARY KEY, checksum TEXT NOT NULL, appliedAt TEXT NOT NULL)')
     for (const id of readdirSync(dir).sort()) {
       const contentPath = join(dir, id, 'migration.sql')
       if (!existsSync(contentPath)) continue
       const content = readFileSync(contentPath, 'utf8')
       const checksum = createHash('sha256').update(content).digest('hex')
-      let isNew = false
-      // libsql modes: 'write' (immediate write lock) | 'read' | 'deferred'
-      const tx = await client.transaction('write')
-      try {
-        const row = await tx.execute({ sql: 'SELECT checksum FROM _WakilMigration WHERE id = ?', args: [id] })
-        const existing = row.rows[0]?.checksum as string | undefined
-        if (existing) {
-          if (existing !== checksum) throw new Error(`Migration checksum mismatch: ${id}`)
-        } else {
-          for (const stmt of splitSqlStatements(content)) {
-            await tx.execute({ sql: stmt })
-          }
-          await tx.execute({ sql: 'INSERT INTO _WakilMigration VALUES (?, ?, ?)', args: [id, checksum, new Date().toISOString()] })
-          isNew = true
-        }
-        await tx.commit()
-      } catch (e) {
-        await tx.rollback().catch(() => {})
-        throw e
+      // Read the ledger first, then use Client.migrate() for an atomic file
+      // migration. Do not open one interactive client.transaction() per file:
+      // local @libsql/client versions can retain the detached native SQLite/WAL
+      // handle after commit/rollback; dozens of migrations then leave competing
+      // handles on the same test/runtime DB (observed SQLITE_IOERR_SHORT_READ).
+      const row = await client.execute({
+        sql: 'SELECT checksum FROM _WakilMigration WHERE id = ?',
+        args: [id],
+      })
+      const existing = row.rows[0]?.checksum as string | undefined
+      if (existing) {
+        if (existing !== checksum) throw new Error(`Migration checksum mismatch: ${id}`)
+        skipped++
+        continue
       }
-      if (isNew) applied.push(id)
-      else skipped++
+
+      const statements = [
+        ...splitSqlStatements(content).map((sql) => ({ sql })),
+        {
+          sql: 'INSERT INTO _WakilMigration VALUES (?, ?, ?)',
+          args: [id, checksum, new Date().toISOString()],
+        },
+      ]
+      try {
+        // The library-managed migration path uses its active client handle and
+        // wraps all statements + the ledger receipt in one SQLite transaction.
+        await client.migrate(statements)
+        applied.push(id)
+      } catch (error) {
+        // Two app processes may race on first startup. If the other process
+        // atomically applied this exact checksum, treat it as already applied;
+        // otherwise preserve the original failure and stop boot.
+        const settled = await client.execute({
+          sql: 'SELECT checksum FROM _WakilMigration WHERE id = ?',
+          args: [id],
+        })
+        const settledChecksum = settled.rows[0]?.checksum as string | undefined
+        if (settledChecksum === checksum) {
+          skipped++
+          continue
+        }
+        throw error
+      }
     }
     const fk = await client.execute('PRAGMA foreign_key_check')
     if (fk.rows.length) throw new Error('Migration foreign key check failed')
+
+    // Optional expensive full-database integrity verification. The caller can
+    // request this for throwaway fixtures / backup drills; run it on the SAME
+    // libsql client that performed migrations. Do not reopen a migrated DB with a second SQLite engine between migrations
+    // and Prisma's first use. Local journal policy is DELETE to avoid the known
+    // WAL-reset corruption risk in the bundled libSQL SQLite core.
+    if (options.integrityCheck) {
+      const integrity = await client.execute('PRAGMA integrity_check')
+      const result = String(integrity.rows[0]?.integrity_check ?? '')
+      if (result !== 'ok') throw new Error(`Migration SQLite integrity check failed: ${result || 'no result'}`)
+    }
   } finally {
     client.close()
   }

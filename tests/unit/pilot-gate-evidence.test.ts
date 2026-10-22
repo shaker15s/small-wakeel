@@ -1,0 +1,132 @@
+import { createHash } from 'node:crypto'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { describe, expect, test } from 'bun:test'
+import {
+  hasShaBoundCiArtifact,
+  selectSuccessfulHostedCiRun,
+  verifyEvidenceReportHash,
+  reportsMatchHashes,
+  validateCapacityEvidence,
+  validateIndependentSecurityAudit,
+  validateLegalPolicyReview,
+  validateP0P8Evidence,
+} from '../../scripts/lib/pilot-gate-evidence.mjs'
+
+const sha = 'a'.repeat(40)
+const reportHash = 'b'.repeat(64)
+
+describe('release-gate evidence is exact-SHA and evidence-bound', () => {
+  test('a directory, a failed run, PR run, wrong workflow, or another SHA is not a hosted CI pass', () => {
+    expect(selectSuccessfulHostedCiRun([], sha)).toBeNull()
+    expect(selectSuccessfulHostedCiRun([
+      { id: 1, head_sha: sha, path: '.github/workflows/ci.yml', event: 'push', status: 'completed', conclusion: 'failure', html_url: 'https://github.com/run', updated_at: new Date().toISOString() },
+      { id: 2, head_sha: sha, path: '.github/workflows/ci.yml', event: 'pull_request', status: 'completed', conclusion: 'success', html_url: 'https://github.com/run', updated_at: new Date().toISOString() },
+      { id: 3, head_sha: 'c'.repeat(40), path: '.github/workflows/ci.yml', event: 'push', status: 'completed', conclusion: 'success', html_url: 'https://github.com/run', updated_at: new Date().toISOString() },
+      { id: 4, head_sha: sha, path: '.github/workflows/other.yml', event: 'push', status: 'completed', conclusion: 'success', html_url: 'https://github.com/run', updated_at: new Date().toISOString() },
+    ], sha)).toBeNull()
+  })
+
+  test('requires a completed green push run on the exact SHA', () => {
+    const run = { id: 5, head_sha: sha, path: '.github/workflows/ci.yml', event: 'push', status: 'completed', conclusion: 'success', html_url: 'https://github.com/run', updated_at: new Date().toISOString() }
+    expect(selectSuccessfulHostedCiRun([run], sha)).toEqual(run)
+  })
+
+  test('requires the non-expired log artifact whose name embeds the exact SHA', () => {
+    expect(hasShaBoundCiArtifact([{ name: `launch-gate-${sha}`, expired: false, size_in_bytes: 100 }], sha)).toBe(true)
+    expect(hasShaBoundCiArtifact([{ name: `launch-gate-${'c'.repeat(40)}`, expired: false, size_in_bytes: 100 }], sha)).toBe(false)
+    expect(hasShaBoundCiArtifact([{ name: `launch-gate-${sha}`, expired: true, size_in_bytes: 100 }], sha)).toBe(false)
+  })
+
+  test('hashes actual local report bytes and rejects missing, altered, or escaping report paths', () => {
+    const root = mkdtempSync(join(tmpdir(), 'wakil-evidence-'))
+    try {
+      const directory = join(root, 'docs/evidence/artifacts')
+      mkdirSync(directory, { recursive: true })
+      const bytes = Buffer.from('independent report bytes for the evidence gate')
+      writeFileSync(join(directory, 'report.pdf'), bytes)
+      writeFileSync(join(root, 'outside.pdf'), bytes)
+      const digest = createHash('sha256').update(bytes).digest('hex')
+      expect(verifyEvidenceReportHash('docs/evidence/artifacts/report.pdf', digest, root)).toBe(true)
+      expect(verifyEvidenceReportHash('docs/evidence/artifacts/report.pdf', 'c'.repeat(64), root)).toBe(false)
+      expect(verifyEvidenceReportHash('outside.pdf', digest, root)).toBe(false)
+      expect(verifyEvidenceReportHash('../outside.pdf', digest, root)).toBe(false)
+      expect(reportsMatchHashes({
+        targetCommitSha: sha,
+        gates: [{ reportPath: 'docs/evidence/artifacts/report.pdf', reportSha256: digest }],
+      }, root)).toBe(true)
+      expect(reportsMatchHashes({
+        targetCommitSha: sha,
+        gates: [{ reportPath: 'docs/evidence/artifacts/report.pdf', reportSha256: 'd'.repeat(64) }],
+      }, root)).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('P0–P8 requires all nine gate entries with report URLs and SHA256 digests', () => {
+    const gates = Array.from({ length: 9 }, (_, i) => ({ id: `P${i}`, status: 'passed', reportUrl: 'https://evidence.example/report', reportPath: `docs/evidence/artifacts/p${i}.pdf`, reportSha256: reportHash }))
+    expect(validateP0P8Evidence({ targetCommitSha: sha, gates }, sha)).toBe(true)
+    expect(validateP0P8Evidence({ targetCommitSha: 'c'.repeat(40), gates }, sha)).toBe(false)
+    expect(validateP0P8Evidence({ targetCommitSha: sha, gates: gates.slice(0, 8) }, sha)).toBe(false)
+  })
+
+  test('security review must identify independent auditor and an external hashed report', () => {
+    const evidence = {
+      targetCommitSha: sha, status: 'passed', independenceConfirmed: true,
+      auditor: { name: 'Independent Reviewer', organization: 'External Audit Firm' },
+      reportUrl: 'https://audit.example/report', reportPath: 'docs/evidence/artifacts/independent-audit.pdf', reportSha256: reportHash,
+      scope: 'Security, tenant isolation, financial writes', completedAt: '2026-10-22T00:00:00Z',
+    }
+    expect(validateIndependentSecurityAudit(evidence, sha)).toBe(true)
+    expect(validateIndependentSecurityAudit({ ...evidence, independenceConfirmed: false }, sha)).toBe(false)
+    expect(validateIndependentSecurityAudit({ ...evidence, targetCommitSha: 'c'.repeat(40) }, sha)).toBe(false)
+  })
+
+  test('public launch needs independent Egyptian counsel review of both policy documents and PDPL topics', () => {
+    const evidence = {
+      targetCommitSha: sha,
+      status: 'passed',
+      independentReview: true,
+      counsel: {
+        name: 'Independent Egyptian Counsel',
+        organization: 'External Law Office',
+        licenceNumber: 'EG-LAW-0000',
+        licensedInEgypt: true,
+      },
+      reviewedPolicies: ['docs/PRIVACY.md', 'docs/TERMS.md'],
+      reviewedTopics: [
+        'law_151_2020',
+        'executive_regulations_816_2025',
+        'controller_processor_roles_and_registration',
+        'cross_border_ai_and_asr_transfers',
+        'data_subject_rights_and_retention',
+        'security_breach_and_incident_reporting',
+        'privacy_policy_and_terms_of_service',
+        'dpo_and_other_applicable_obligations',
+      ],
+      completedAt: '2026-10-22T00:00:00Z',
+      reportUrl: 'https://legal.example/report',
+      reportPath: 'docs/evidence/artifacts/legal-review.pdf',
+      reportSha256: reportHash,
+    }
+    expect(validateLegalPolicyReview(evidence, sha)).toBe(true)
+    expect(validateLegalPolicyReview({ ...evidence, targetCommitSha: 'c'.repeat(40) }, sha)).toBe(false)
+    expect(validateLegalPolicyReview({ ...evidence, counsel: { ...evidence.counsel, licensedInEgypt: false } }, sha)).toBe(false)
+    expect(validateLegalPolicyReview({ ...evidence, reviewedTopics: evidence.reviewedTopics.slice(1) }, sha)).toBe(false)
+    expect(validateLegalPolicyReview({ ...evidence, reviewedPolicies: ['docs/PRIVACY.md'] }, sha)).toBe(false)
+  })
+
+  test('capacity evidence must contain real-shaped metrics tied to exact code and environment', () => {
+    const evidence = {
+      targetCommitSha: sha, status: 'passed', environmentClass: 'production-like',
+      testSuite: 'load-v1', testedAt: '2026-10-22T00:00:00Z',
+      metrics: { requestCount: 1000, concurrency: 20, p50Ms: 100, p95Ms: 300, p99Ms: 500, errorRatePct: 0 },
+      reportUrl: 'https://load.example/report', reportPath: 'docs/evidence/artifacts/capacity.pdf', reportSha256: reportHash,
+    }
+    expect(validateCapacityEvidence(evidence, sha)).toBe(true)
+    expect(validateCapacityEvidence({ ...evidence, targetCommitSha: 'c'.repeat(40) }, sha)).toBe(false)
+    expect(validateCapacityEvidence({ ...evidence, metrics: { ...evidence.metrics, p99Ms: 200 } }, sha)).toBe(false)
+  })
+})

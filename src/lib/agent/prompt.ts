@@ -490,7 +490,7 @@ ${appSkillsPromptBlock()}`
 - الوقت دلوقتي (بتوقيت القاهرة): ${cairoNowAr()}
 - ${business.workflowMode === 'cashbook' ? 'المبيعات المسجلة فقط (ليست كل مبيعات المحل)' : 'مبيعات النهاردة'}: ${egp(snapshot.salesToday)}${snapshot.collectionsToday > 0 ? ` — وتحصيلات ${egp(snapshot.collectionsToday)}` : ''}
 - مصروفات النهاردة: ${egp(snapshot.expensesToday)} — صافي اليوم: ${egp(snapshot.netToday)}
-- رصيد الخزنة الفعلي: ${egp(snapshot.cash)}
+- رصيد الخزنة الفعلي: ${snapshot.cash == null ? 'غير معروف — رصيد البداية لم يتسجل ولا يوجد عدّ معتمد' : egp(snapshot.cash)}
 - ${snapshot.lowStockCount > 0 ? `${snapshot.lowStockCount} صنف ناقص${snapshot.lowStockTop ? ` (منهم: ${snapshot.lowStockTop})` : ''}` : 'المخزون مستقر'}
 - ${snapshot.receivablesTotal > 0 ? `مديونيات عند العملاء: ${egp(snapshot.receivablesTotal)}${snapshot.receivablesTop ? ` (أكبرها: ${snapshot.receivablesTop.name} — ${egp(snapshot.receivablesTop.balance)})` : ''}` : 'مفيش مديونيات على العملاء'}
 - ${snapshot.pendingCount > 0 ? `${snapshot.pendingCount} عملية مستنية اعتماد` : 'مفيش عمليات معلقة'}
@@ -565,7 +565,7 @@ export function buildAdvisoryPrompt(params: {
 ## أرقام الشغل دلوقتي (من سجلك الحقيقي — دي أرقامك الوحيدة)
 - ${business.workflowMode === 'cashbook' ? 'المبيعات المسجلة فقط (ليست كل مبيعات المحل)' : 'مبيعات النهاردة'}: ${egp(snapshot.salesToday)}${snapshot.collectionsToday > 0 ? ` — تحصيلات: ${egp(snapshot.collectionsToday)}` : ''}
 - مصروفات النهاردة: ${egp(snapshot.expensesToday)}${business.workflowMode === 'cashbook' ? ' — الربح غير محسوب لعدم اكتمال بيانات المبيعات والتكلفة' : ` — صافي النهاردة: ${egp(snapshot.netToday)}`}
-- رصيد الخزنة دلوقتي: ${egp(snapshot.cash)}
+- رصيد الخزنة دلوقتي: ${snapshot.cash == null ? 'غير معروف — رصيد البداية لم يتسجل ولا يوجد عدّ معتمد' : egp(snapshot.cash)}
 - ${snapshot.lowStockCount > 0 ? `⚠️ ${snapshot.lowStockCount} صنف ناقص${snapshot.lowStockTop ? ` (أهمهم: ${snapshot.lowStockTop})` : ''}` : business.workflowMode === 'cashbook' ? 'المخزون غير محسوب من المبيعات؛ اسأل عن النواقص الفعلية' : 'المخزون مستقر — مفيش أصناف ناقصة'}
 - ${snapshot.receivablesTotal > 0 ? `مديونيات عند العملاء: ${egp(snapshot.receivablesTotal)}${snapshot.receivablesTop ? ` (أكبرهم: ${snapshot.receivablesTop.name} — ${egp(snapshot.receivablesTop.balance)})` : ''}` : 'مفيش مديونيات على حد'}
 - ${snapshot.pendingCount > 0 ? `${snapshot.pendingCount} عملية مستنية اعتماد` : 'مفيش عمليات مستنية'}

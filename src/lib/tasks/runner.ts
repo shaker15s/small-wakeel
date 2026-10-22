@@ -180,7 +180,7 @@ export async function runDueTasks(limit = 10, opts: RunDueOptions = {}): Promise
 
   // Step 3 runs as its own pass: pending outbox rows (including ones from
   // earlier crashed firings) are delivered and committed.
-  const delivered = await deliverPendingNotifications(20)
+  const delivered = await deliverPendingNotifications(20, opts)
   summary.delivered = delivered
   return summary
 }
@@ -260,16 +260,20 @@ function messageIdFor(task: { id: string; executionCount: number }): string {
  * the chat message has a deterministic id, so a redelivery after a crash finds
  * the already-posted message instead of posting a duplicate.
  */
-export async function deliverPendingNotifications(limit = 20): Promise<number> {
+export async function deliverPendingNotifications(
+  limit = 20,
+  scope: Pick<RunDueOptions, 'businessId'> = {},
+): Promise<number> {
+  const businessFilter = scope.businessId ? { businessId: scope.businessId } : {}
   const pending = await db.taskNotification.findMany({
-    where: { status: 'pending' },
+    where: { status: 'pending', ...businessFilter },
     orderBy: { createdAt: 'asc' },
     take: limit,
   })
   let delivered = 0
   for (const row of pending) {
     const claim = await db.taskNotification.updateMany({
-      where: { id: row.id, status: 'pending' },
+      where: { id: row.id, status: 'pending', ...businessFilter },
       data: { status: 'sending', claimedAt: new Date(), claimedBy: WORKER_ID, attempts: { increment: 1 } },
     })
     if (claim.count === 0) continue
@@ -394,16 +398,20 @@ async function finishTask(taskId: string, conversationId: string, result: string
  * claimed longer ago than the lease goes back to `pending` (retry keeps its
  * budget) and is claimed again by the next sweep.
  */
-export async function requeueStuckTasks(stuckAfterMs = leaseMs()): Promise<number> {
+export async function requeueStuckTasks(
+  stuckAfterMs = leaseMs(),
+  scope: Pick<RunDueOptions, 'businessId'> = {},
+): Promise<number> {
   const cutoff = new Date(Date.now() - stuckAfterMs)
+  const businessFilter = scope.businessId ? { businessId: scope.businessId } : {}
   const stuck = await db.scheduledTask.findMany({
-    where: { status: 'running', claimedAt: { lt: cutoff } },
+    where: { status: 'running', claimedAt: { lt: cutoff }, ...businessFilter },
     select: { id: true },
     take: 50,
   })
   if (stuck.length === 0) return 0
   const res = await db.scheduledTask.updateMany({
-    where: { id: { in: stuck.map((t) => t.id) } },
+    where: { id: { in: stuck.map((t) => t.id) }, ...businessFilter },
     data: {
       status: 'pending',
       claimedAt: null,
@@ -418,21 +426,26 @@ export async function requeueStuckTasks(stuckAfterMs = leaseMs()): Promise<numbe
  * Recover outbox rows stuck in `sending` (crash between posting the message
  * and committing). Within budget they go back to `pending` — redelivery is
  * idempotent. Over budget the notification is `failed` (shown honestly) and,
- * if its task is still `running`, the task is `failed` with the real reason —
- * a lost notification is never reported as delivered.
+ * if its task is still `running`, the task is `failed` with the real reason.
+ * When the caller supplied a business scope, recovery remains inside it.
  */
-export async function requeueStuckNotifications(staleAfterMs = deliveryLeaseMs()): Promise<number> {
+export async function requeueStuckNotifications(
+  staleAfterMs = deliveryLeaseMs(),
+  scope: Pick<RunDueOptions, 'businessId'> = {},
+): Promise<number> {
   const cutoff = new Date(Date.now() - staleAfterMs)
+  const businessFilter = scope.businessId ? { businessId: scope.businessId } : {}
   const stuck = await db.taskNotification.findMany({
-    where: { status: 'sending', claimedAt: { lt: cutoff } },
+    where: { status: 'sending', claimedAt: { lt: cutoff }, ...businessFilter },
     take: 50,
   })
   if (stuck.length === 0) return 0
   let touched = 0
   for (const row of stuck) {
+    const rowWhere = { id: row.id, ...businessFilter }
     if (row.attempts >= MAX_DELIVERY_ATTEMPTS) {
       await db.taskNotification.update({
-        where: { id: row.id },
+        where: rowWhere,
         data: {
           status: 'failed',
           failReason: 'تعذر تسليم التنبيه بعد عدة محاولات — الرسالة لم تُرسَل',
@@ -440,10 +453,12 @@ export async function requeueStuckNotifications(staleAfterMs = deliveryLeaseMs()
           claimedBy: null,
         },
       })
-      const task = await db.scheduledTask.findUnique({ where: { id: row.taskId } })
+      const task = await db.scheduledTask.findFirst({
+        where: { id: row.taskId, businessId: row.businessId },
+      })
       if (task?.status === 'running') {
-        await db.scheduledTask.update({
-          where: { id: task.id },
+        await db.scheduledTask.updateMany({
+          where: { id: task.id, businessId: row.businessId, status: 'running' },
           data: {
             status: 'failed',
             failReason: 'انتهت المهمة لكن تعذر تسليم نتيجتها',
@@ -456,7 +471,7 @@ export async function requeueStuckNotifications(staleAfterMs = deliveryLeaseMs()
       }
     } else {
       await db.taskNotification.update({
-        where: { id: row.id },
+        where: rowWhere,
         data: { status: 'pending', claimedAt: null, claimedBy: null },
       })
     }

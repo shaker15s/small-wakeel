@@ -61,27 +61,28 @@ const DRAFT_ALLOWED: Record<string, string[]> = {
 /**
  * Who may APPROVE (decide) a draft.
  *
- * Default policy (an Egyptian small shop has 2–4 people, and the cashier must
- * be able to complete a sale without waking the owner):
- *   R1/R2 → owner, supervisor, cashier, reception
- *   R3    → owner, supervisor only (large/sensitive amounts, reversals)
- *   R4    → nobody (blocked by design)
+ * Safe default: the business owner approves every formal state change,
+ * regardless of who created the draft. This matches WAKIL's trust boundary:
+ * the model and staff can prepare a proposal; they cannot make it official.
  *
- * Shops that need management-only approvals (including drafts created by
- * management themselves) flip `WAKIL_STRICT_APPROVALS=1`, which routes
- * EVERY write through management. It is opt-in so the default demo flows keep
- * working, but real deployments with employees should turn it on.
+ * Explicit delegation is available only to supervisors for R1/R2 when the
+ * operator deliberately sets WAKIL_ALLOW_DELEGATED_APPROVALS=1. Cashiers and
+ * reception can NEVER approve. R3 always stays owner-only and R4 is blocked.
+ * WAKIL_STRICT_APPROVALS=1 overrides delegation and forces owner-only.
+ *
+ * This is not four-eyes segregation: the owner may approve their own draft.
+ * A submitter can cancel their own still-pending permitted draft separately.
  */
 export function canApprove(role: string, risk: Risk): boolean {
   if (risk === 'R4') return false
-  if (risk === 'R3') return role === 'owner' || role === 'supervisor'
-  if (risk === 'R2' || risk === 'R1') {
-    if (process.env.WAKIL_STRICT_APPROVALS === '1') {
-      return role === 'owner' || role === 'supervisor'
-    }
-    return role === 'owner' || role === 'supervisor' || role === 'cashier' || role === 'reception'
-  }
-  return false
+  if (role === 'owner') return true
+  if (process.env.WAKIL_STRICT_APPROVALS === '1') return false
+  if (risk === 'R3') return false
+  return (
+    process.env.WAKIL_ALLOW_DELEGATED_APPROVALS === '1' &&
+    role === 'supervisor' &&
+    (risk === 'R1' || risk === 'R2')
+  )
 }
 
 export function canDraft(role: string, type: OpType): boolean {

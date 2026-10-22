@@ -27,6 +27,121 @@ export async function cashbookCash(tx: Prisma.TransactionClient, businessId: str
   return entries.reduce((n, e) => n + (e.direction === 'in' ? e.amount : -e.amount), biz.openingCash)
 }
 
+export interface CashPositionEvidence {
+  /** Owner-verifiable current balance; null until an opening figure or count establishes it. */
+  cash: number | null
+  /** Arithmetic ledger value, for internal reconciliation only. */
+  ledgerCash: number
+  openingCashKnown: boolean
+  currentCashKnown: boolean
+  cashIn: number
+  cashOut: number
+  /** Net discrepancy from counts performed against an already-known balance. */
+  cashCountAdjustment: number
+}
+
+function countPayload(raw: string): Record<string, unknown> {
+  try {
+    const value: unknown = JSON.parse(raw)
+    return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+  } catch {
+    return {}
+  }
+}
+
+function signedCash(entry: { direction: string; amount: number }): number {
+  return entry.direction === 'in' ? entry.amount : -entry.amount
+}
+
+/**
+ * The database's zero default is a storage detail, not an owner-stated fact.
+ * Only an explicit onboarding answer or an approved, unreversed cash count can
+ * make the current balance user-facing truth. Cash-count movements are kept
+ * out of normal receipt/payment totals because they are reconciliation deltas,
+ * never sales, receipts, or payments.
+ */
+export async function cashPositionEvidence(
+  tx: Prisma.TransactionClient,
+  businessId: string,
+): Promise<CashPositionEvidence> {
+  const [business, profile, cashEntries, countEntries] = await Promise.all([
+    tx.business.findUniqueOrThrow({ where: { id: businessId }, select: { openingCash: true } }),
+    tx.businessProfile.findUnique({ where: { businessId }, select: { openingCashStatedAt: true, answers: true } }),
+    tx.cashEntry.findMany({ where: { businessId }, select: { direction: true, amount: true, ref: true } }),
+    tx.cashbookEntry.findMany({
+      where: { businessId, kind: 'cash_count' },
+      select: {
+        operationRef: true,
+        operation: { select: { reversedByRef: true, payload: true } },
+      },
+    }),
+  ])
+
+  // A stored numeric zero is not proof by itself. Prefer the explicit owner
+  // answer/marker; infer a nonzero legacy opening only if the owner has not
+  // explicitly skipped this question in the newer business profile.
+  const profileAnswers = profile ? countPayload(profile.answers) : {}
+  const rawOpeningAnswer = profileAnswers.openingCash
+  const openingAnswer = rawOpeningAnswer && typeof rawOpeningAnswer === 'object' && !Array.isArray(rawOpeningAnswer)
+    ? rawOpeningAnswer as Record<string, unknown>
+    : null
+  const openingWasSkipped = openingAnswer?.skipped === true || openingAnswer?.value === null
+  const openingWasAnswered = typeof openingAnswer?.value === 'number' && openingAnswer.skipped !== true
+  const openingCashKnown =
+    (profile?.openingCashStatedAt !== null && profile?.openingCashStatedAt !== undefined) ||
+    openingWasAnswered ||
+    (!openingWasSkipped && business.openingCash !== 0)
+  const activeCounts = countEntries.filter((entry) => entry.operation.reversedByRef === null)
+  const currentCashKnown = openingCashKnown || activeCounts.length > 0
+  const allCountRefs = countEntries.map((entry) => entry.operationRef)
+  const reversals = allCountRefs.length
+    ? await tx.operation.findMany({
+        where: { businessId, reversalOfRef: { in: allCountRefs } },
+        select: { ref: true, reversalOfRef: true },
+      })
+    : []
+  const countFlowRefs = new Set<string>([
+    ...allCountRefs,
+    ...reversals.map((operation) => operation.ref),
+  ])
+  const knownCountRefs = new Set<string>()
+  for (const entry of countEntries) {
+    const payload = countPayload(entry.operation.payload)
+    // Older entries without the new flag can be treated as a reconciliation
+    // only when the business currently has a documented opening balance.
+    if (payload.expectedCashKnown === true ||
+        (payload.expectedCashKnown === undefined && openingCashKnown)) {
+      knownCountRefs.add(entry.operationRef)
+    }
+  }
+  const knownCountFlowRefs = new Set<string>([
+    ...knownCountRefs,
+    ...reversals
+      .filter((operation) => operation.reversalOfRef != null && knownCountRefs.has(operation.reversalOfRef))
+      .map((operation) => operation.ref),
+  ])
+  const ledgerCash = cashEntries.reduce((balance, entry) => balance + signedCash(entry), business.openingCash)
+  const cashIn = cashEntries
+    .filter((entry) => entry.direction === 'in' && !countFlowRefs.has(entry.ref ?? ''))
+    .reduce((sum, entry) => sum + entry.amount, 0)
+  const cashOut = cashEntries
+    .filter((entry) => entry.direction === 'out' && !countFlowRefs.has(entry.ref ?? ''))
+    .reduce((sum, entry) => sum + entry.amount, 0)
+  const cashCountAdjustment = cashEntries
+    .filter((entry) => knownCountFlowRefs.has(entry.ref ?? ''))
+    .reduce((sum, entry) => sum + signedCash(entry), 0)
+
+  return {
+    cash: currentCashKnown ? ledgerCash : null,
+    ledgerCash,
+    openingCashKnown,
+    currentCashKnown,
+    cashIn,
+    cashOut,
+    cashCountAdjustment,
+  }
+}
+
 /** Runs both at draft and approval. No floats, implicit party matching, or backdated drawer overwrite. */
 export async function validateCashbook(tx: Prisma.TransactionClient, businessId: string, p: Record<string, unknown>) {
   const kind = String(p.kind)
@@ -55,12 +170,19 @@ export async function validateCashbook(tx: Prisma.TransactionClient, businessId:
       if (!rows[0] || rows[0].balance < p.amount) fail('المبلغ أكبر من الدين المسجل؛ مش هسجل زيادة أو أعتبرها سداد تلقائي')
     }
   } else if (p.customerId || p.supplierId || p.partyName) fail('الحركة دي مش محتاجة حساب عميل أو مورد')
-  const cash = await cashbookCash(tx, businessId)
+  const cashPosition = await cashPositionEvidence(tx, businessId)
+  const cash = cashPosition.ledgerCash
   if (kind === 'cash_count') {
     if (typeof p.expectedCash !== 'number' || !Number.isSafeInteger(p.expectedCash)) fail('رصيد المقارنة مطلوب لعدّ الخزنة')
     if (cash !== p.expectedCash) fail('الخزنة اتحركت بعد تجهيز العد؛ اعمل عدّ جديد بدل ما نكتب فوق حركة أحدث')
+    if (typeof p.expectedCashKnown === 'boolean' && p.expectedCashKnown !== cashPosition.currentCashKnown) {
+      fail('حالة رصيد الخزنة اتغيرت بعد تجهيز العد؛ اعمل عدّ جديد وراجع الرصيد')
+    }
   }
-  if (['cash_purchase', 'pay', 'expense', 'withdrawal', 'lend'].includes(kind) && p.amount > cash) fail(`الخزنة المسجلة لا تكفي: ${cash / 100} جنيه. عدّ الفلوس أو سجّل مصدرها الأول؛ مش هسيب الرصيد بالسالب`)
+  if (['cash_purchase', 'pay', 'expense', 'withdrawal', 'lend'].includes(kind)) {
+    if (!cashPosition.currentCashKnown) fail('رصيد الخزنة غير معروف؛ سجّل رصيد البداية أو اعمل عدّ فعلي قبل اعتماد خروج فلوس')
+    if (p.amount > cash) fail(`الخزنة المسجلة لا تكفي: ${cash / 100} جنيه. عدّ الفلوس أو سجّل مصدرها الأول؛ مش هسيب الرصيد بالسالب`)
+  }
 }
 
 type Check = { label: string; expected: string; actual: string; pass: boolean }
@@ -88,7 +210,14 @@ export async function executeCashbook(tx: Prisma.TransactionClient, businessId: 
     }
   }
   const settlements = kind === 'receive' || kind === 'pay' ? await allocateDebtSettlement(tx, businessId, partyId!, customer, amount) : []
-  if (delta !== 0) await tx.cashEntry.create({ data: { businessId, ref, direction: delta > 0 ? 'in' : 'out', amount: Math.abs(delta), reason: kind === 'cash_count' ? 'فرق عدّ غير مصنّف — ليس مبيعات أو أرباح' : CASHBOOK_LABELS[kind] } })
+  if (delta !== 0) await tx.cashEntry.create({ data: {
+    businessId, ref, direction: delta > 0 ? 'in' : 'out', amount: Math.abs(delta),
+    reason: kind === 'cash_count'
+      ? p.expectedCashKnown === false
+        ? 'تثبيت رصيد الخزنة من أول عدّ — ليس مبيعات أو أرباح'
+        : 'فرق عدّ غير مصنّف — ليس مبيعات أو أرباح'
+      : CASHBOOK_LABELS[kind],
+  } })
   const operation = await tx.operation.findUniqueOrThrow({ where: { ref } })
   const entry = await tx.cashbookEntry.create({ data: {
     businessId, operationRef: ref, userId: operation.userId, kind, amount,
@@ -109,7 +238,11 @@ export async function executeCashbook(tx: Prisma.TransactionClient, businessId: 
   return { ok: check.every(c => c.pass), checks: check, effects: [
     { label: CASHBOOK_LABELS[kind], value: `${amount / 100} جنيه`, tone: 'neutral' as const },
     { label: 'رصيد الخزنة المسجل', value: `${cashAfter / 100} جنيه`, tone: 'good' as const },
-    ...(kind === 'cash_count' ? [{ label: 'فرق عدّ غير مصنّف (مش مبيعات)', value: `${delta / 100} جنيه`, tone: 'neutral' as const }] : []),
+    ...(kind === 'cash_count'
+      ? p.expectedCashKnown === false
+        ? [{ label: 'تثبيت الرصيد بعد أول عدّ', value: `${amount / 100} جنيه`, tone: 'neutral' as const }]
+        : [{ label: 'فرق عدّ غير مصنّف (مش مبيعات)', value: `${delta / 100} جنيه`, tone: 'neutral' as const }]
+      : []),
   ] }
 }
 

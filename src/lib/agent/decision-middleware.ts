@@ -399,7 +399,7 @@ export class DecisionEngine {
     const lexicon = parseLexicon(params.memories)
 
     // Continual background learning of implicit user preferences & habits
-    void autoLearnFromUserMessage({
+    await autoLearnFromUserMessage({
       businessId: params.business.id,
       userId: params.user.id,
       text: params.text,

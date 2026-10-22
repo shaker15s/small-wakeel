@@ -1,4 +1,5 @@
 import { reportedType } from '@/lib/cashbook-report'
+import { cashPositionEvidence } from '@/lib/domain/cashbook'
 import { cairoIsoDay } from '@/app/api/_lib/dates'
 // وكيل — THE 5-LAYER MEMORY ENGINE.
 //
@@ -556,7 +557,7 @@ export interface BusinessSnapshot {
   collectionsToday: number
   expensesToday: number
   netToday: number // sales + collections - expenses
-  cash: number // current drawer balance
+  cash: number | null // null until an opening balance or approved cash count establishes a baseline
   lowStockCount: number
   lowStockTop?: string | null
   receivablesTotal: number
@@ -569,9 +570,9 @@ export interface BusinessSnapshot {
 
 export async function getSnapshot(business: Business): Promise<BusinessSnapshot> {
   const today = startOfCairoDay(0)
-  const [opsToday, cashEntries, items, customers, pendingCount] = await Promise.all([
+  const [opsToday, cashPosition, items, customers, pendingCount] = await Promise.all([
     db.operation.findMany({ where: { businessId: business.id, status: 'SUCCEEDED', createdAt: { gte: today } }, select: { type: true, payload: true, reversedByRef: true } }),
-    db.cashEntry.findMany({ where: { businessId: business.id }, select: { direction: true, amount: true } }),
+    db.$transaction(tx => cashPositionEvidence(tx, business.id)),
     db.item.findMany({ where: { businessId: business.id }, select: { name: true, stockQty: true, lowStockThreshold: true, expiresAt: true } }),
     db.customer.findMany({ where: { businessId: business.id }, select: { name: true, balance: true, expiresAt: true } }),
     db.operation.count({ where: { businessId: business.id, status: 'AWAITING_APPROVAL' } }),
@@ -591,8 +592,6 @@ export async function getSnapshot(business: Business): Promise<BusinessSnapshot>
   const salesToday = sumOf('sale') + sumOf('membership')
   const collectionsToday = sumOf('collection')
   const expensesToday = sumOf('expense')
-  const inn = cashEntries.filter((e) => e.direction === 'in').reduce((s, e) => s + e.amount, 0)
-  const out = cashEntries.filter((e) => e.direction === 'out').reduce((s, e) => s + e.amount, 0)
   // R70 / PR-001: a shortage needs a COUNTED stock and a recorded threshold.
   const low = items.filter((it) => it.stockQty != null && it.lowStockThreshold != null && it.stockQty <= it.lowStockThreshold)
   const receivables = customers.filter((c) => c.balance > 0).sort((a, b) => b.balance - a.balance)
@@ -610,7 +609,7 @@ export async function getSnapshot(business: Business): Promise<BusinessSnapshot>
     collectionsToday,
     expensesToday,
     netToday: salesToday + collectionsToday - expensesToday,
-    cash: business.openingCash + inn - out,
+    cash: cashPosition.cash,
     lowStockCount: low.length,
     lowStockTop: low[0]?.name ?? null,
     receivablesTotal: receivables.reduce((s, c) => s + c.balance, 0),

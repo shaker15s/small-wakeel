@@ -335,11 +335,39 @@ function queryArgs(text: string, tool: string): Record<string, unknown> {
 }
 
 /** The brain loop expects tool calls, or a final Arabic sentence. */
-function brainReply(rawText: string, model: string): string {
+function brainReply(rawText: string, model: string, messages: Msg[] = []): string {
   // the owner's CURRENT ask (see ownerAsk) — history and tool-result
   // injections are user messages too and must not be read as the request
   const text = rawText;
   const d = detect(text);
+  const systemText = messages.filter((m) => m.role === "system").map((m) => m.content).join("\\n");
+  const readOnly = /قراءة فقط|ممنوع منعًا باتًا استدعاء أي أداة كتابة/.test(systemText);
+
+  // The mock must enforce the same protocol contract being tested: if the
+  // system instruction is read-only, a detected financial write becomes prose,
+  // never a native/JSON tool call. This is fixture behavior, not production auth.
+  if (readOnly && d.kind === "write") {
+    return "أنا في وضع القراءة فقط؛ لن أستدعي أداة كتابة. أحتاج تأكيدًا صريحًا قبل تجهيز أي عملية.";
+  }
+
+  // This deterministic PR-013 probe validates adapter/schema round-tripping,
+  // not model intelligence. Live-model behavior is evaluated separately and
+  // the report must continue to mark this endpoint as a mock.
+  if (
+    !readOnly &&
+    /زيت\s+عباد\s+1[.٫]5/.test(text) &&
+    /3\s*علب/.test(text) &&
+    /إجمالي\s+الفاتورة\s*255/.test(text) &&
+    /المدفوع\s*255/.test(text)
+  ) {
+    return JSON.stringify({
+      tool_calls: [{
+        tool: "record_sale",
+        args: { name: "زيت عباد 1.5 لتر", qty: 3, price: 85, total: 255, paid: 255 },
+      }],
+    });
+  }
+
   if (d.kind === "write") {
     const args: Record<string, unknown> = {
       ...(d.itemName ? { item: d.itemName } : {}),
@@ -347,6 +375,28 @@ function brainReply(rawText: string, model: string): string {
       ...(d.amount ? { amount: d.amount } : {}),
       ...(d.name ? { name: d.name, customerName: d.name } : {}),
     };
+    // PR-013 acceptance fixture: produce the actual record_sale schema rather
+    // than historical { item, amount } fields. The probe deliberately uses a
+    // known item and explicit invoice/paid totals so the adapter test is exact.
+    if (d.opType === "sale") {
+      const product = text.match(/(زيت\s+عباد\s+1[.٫]5(?:\s+لتر)?)/);
+      const totalMatch = text.match(/(?:إجمالي(?:\s+الفاتورة)?|المجموع|بـ|بسعر|بمبلغ)\s*(?:هو\s*)?([\d٠-٩][\d٠-٩.,]*)/);
+      const paidMatch = text.match(/(?:المدفوع|مدفوع)\s*(?:هو\s*)?([\d٠-٩][\d٠-٩.,]*)/);
+      const qtyMatch = text.match(/([\d٠-٩]+)\s*(?:علب?|علبة)/);
+      const total = totalMatch ? toNum(totalMatch[1]) : d.amount;
+      const paid = paidMatch ? toNum(paidMatch[1]) : total;
+      const qty = qtyMatch ? toNum(qtyMatch[1]) : d.qty;
+      const name = product?.[1] ?? d.itemName;
+      // Replace, don't merge, the legacy argument names for sale acceptance.
+      for (const key of Object.keys(args)) delete args[key];
+      if (name) args.name = name;
+      if (qty != null) args.qty = qty;
+      if (total != null) {
+        args.total = total;
+        args.price = qty ? total / qty : total;
+      }
+      if (paid != null) args.paid = paid;
+    }
     // «وعليه ٢٥٠» → an opening balance for a brand-new party
     if (d.opType === "customer_add" || d.opType === "supplier_add") {
       const mb = text.match(/(?:وعليه|وعليها|عليه|عليها|رصيده|مديونيته)\s*(?:بـ|ب)?\s*([\d٠-٩]+)/);
@@ -447,7 +497,7 @@ function buildReply(model: string, messages: Msg[]): { reasoning: string[]; cont
   const ownerText = ownerAsk(messages) || text;
 
   if (pass === "intent") return { reasoning, content: intentJson(ownerText) };
-  if (pass === "brain") return { reasoning, content: brainReply(isFinalAsk(messages) ? text : ownerText, model) };
+  if (pass === "brain") return { reasoning, content: brainReply(isFinalAsk(messages) ? text : ownerText, model, messages) };
 
   // REPLY PASS — the fixture behaves like a GOOD model: it reads the tool
   // results the harness fed back and speaks about THEM, it never claims a card
@@ -495,7 +545,92 @@ async function chat(req: Request) {
   const sysChars = messages.filter((m) => m.role === "system").reduce((n, m) => n + String(m.content ?? "").length, 0);
   const toolsN = Array.isArray(body.tools) ? body.tools.length : 0;
   console.log(`[mock] model=${model} msgs=${messages.length} sysChars=${sysChars} tools=${toolsN} user="${String(lastUser).slice(0, 90).replace(/\n/g, " ")}"`);
-  const { reasoning, content } = buildReply(model, messages);
+
+  // Deterministic protocol fixture used ONLY by scripts/model-acceptance.mjs.
+  // It proves that a tool schema crosses the adapter and a native OpenAI-style
+  // tool_call comes back. It is deliberately not used to evaluate language
+  // understanding; only a live model can pass that acceptance requirement.
+  if (req.headers.get("x-wakil-acceptance-probe") === "read-only-refusal-v1") {
+    const hasSaleTool = (body.tools ?? []).some((candidate) => {
+      if (!candidate || typeof candidate !== "object") return false;
+      const tool = candidate as { type?: string; function?: { name?: string } };
+      return tool.type === "function" && tool.function?.name === "record_sale";
+    });
+    const systemMessage = messages.find((message) => message.role === "system")?.content ?? "";
+    const userMessage = [...messages].reverse().find((message) => message.role === "user")?.content ?? "";
+    // This fixture proves the adapter sent a read-only instruction alongside a
+    // write-tool schema and receives a no-tool response. It does NOT claim that
+    // a model learned to obey the instruction; live acceptance tests that.
+    if (body.stream || !hasSaleTool || !/القراءة فقط/.test(systemMessage) || !/سجل بيع/.test(userMessage)) {
+      return json({ error: { message: "read-only-refusal-v1 received an unexpected request contract" } }, 422);
+    }
+    const id = uid();
+    return json({
+      id,
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [{
+        index: 0,
+        message: {
+          role: "assistant",
+          content: "وضع القراءة فقط: لن أنشئ مسودة بيع في هذا الطلب.",
+        },
+        finish_reason: "stop",
+      }],
+      usage: { prompt_tokens: 96, completion_tokens: 24, total_tokens: 120 },
+    });
+  }
+
+  if (req.headers.get("x-wakil-acceptance-probe") === "record-sale-v1") {
+    const saleTool = (body.tools ?? []).find((candidate) => {
+      if (!candidate || typeof candidate !== "object") return false;
+      const tool = candidate as {
+        type?: string;
+        function?: { name?: string; parameters?: { properties?: Record<string, unknown> } };
+      };
+      const properties = tool.function?.parameters?.properties;
+      return tool.type === "function" &&
+        tool.function?.name === "record_sale" &&
+        !!properties &&
+        ["name", "qty", "price", "total", "paid"].every((key) => Object.prototype.hasOwnProperty.call(properties, key));
+    });
+    if (body.stream || !saleTool) {
+      return json({ error: { message: "record-sale-v1 requires the non-streaming record_sale tool schema" } }, 422);
+    }
+    const id = uid();
+    return json({
+      id,
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [{
+        index: 0,
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: [{
+            id: "call_acceptance_record_sale",
+            type: "function",
+            function: {
+              name: "record_sale",
+              arguments: JSON.stringify({
+                name: "زيت عباد 1.5 لتر",
+                qty: 3,
+                price: 85,
+                total: 255,
+                paid: 255,
+              }),
+            },
+          }],
+        },
+        finish_reason: "tool_calls",
+      }],
+      usage: { prompt_tokens: 96, completion_tokens: 48, total_tokens: 144 },
+    });
+  }
+
+    const { reasoning, content } = buildReply(model, messages);
   const id = uid();
   const created = Math.floor(Date.now() / 1000);
 
@@ -570,40 +705,14 @@ async function chat(req: Request) {
 }
 
 // ---------------------------------------------------------------------------
-// /search — the fixture behind «ابحث في الويب» (see src/lib/agent/websearch.ts)
-const MARKET_NOTES: [RegExp, string][] = [
-  [/جبن|رومي/, "الجبنة الرومي في السوق المصري النهارده بين ١٤٠ و١٩٠ جنيه للكيلو حسب النوع، والمتوسط ١٦٥."],
-  [/لبن|حليب/, "أسعار اللبن في مصر: كرتونة اللتر بين ٣٨ و٤٨ جنيه، والكيلو السائب بين ٣٠ و٣٦."],
-  [/رز|أرز/, "الرز المصري العادي بين ٢٨ و٣٨ جنيه للكيلو على مستوى الجمهورية."],
-  [/زيت/, "زيت عافية وعافية: العبوة ٨٠٠ مل بين ٦٢ و٧٥ جنيه، واللتر بين ٧٥ و٩٠."],
-  [/سكر/, "السكر المعبأ في مصر بين ٣٢ و٣٨ جنيه للكيلو."],
-  [/عنبر|عطور|مسك/, "العنبر الخام بيتباع بين ٦٠ و٩٠ جنيه للجرام حسب الجودة والنقاء."],
-];
+// /search — synthetic fixture only. It MUST never look like live market data.
+import { mockSearchResponse } from "./search-fixture";
 
 function search(req: Request) {
   const { searchParams } = new URL(req.url);
-  const q = (searchParams.get("q") ?? "").trim();
-  const num = Math.min(10, Math.max(1, Number(searchParams.get("num") ?? 5) || 5));
-  const note = MARKET_NOTES.find(([re]) => re.test(q))?.[1];
-  const host = "market-watch.example";
-  const results = [
-    {
-      title: `أسعار السوق: ${q || "مؤشرات عامة"}`,
-      url: `https://${host}/prices?q=${encodeURIComponent(q)}`,
-      snippet: note ?? `متوسط أسعار «${q || "السلع الأساسية"}» في السوق المصري مع تحديث يومي من ٣ مصادر.`,
-    },
-    {
-      title: `نشرة أسعار الجملة — ${q || "سوق العبور"}`,
-      url: `https://${host}/wholesale?q=${encodeURIComponent(q)}`,
-      snippet: "أسعار الجملة اليوم من سوق العبور، مع مقارنة الأسبوع الحالي بالأسبوع الماضي.",
-    },
-    {
-      title: `تحليل سوقي: ${q || "قطاع التجزئة"}`,
-      url: `https://${host}/analysis?q=${encodeURIComponent(q)}`,
-      snippet: "تحليل موجز لحركة السعر والعرض خلال آخر ٣٠ يوم مع توقع الاتجاه للأسبوع القادم.",
-    },
-  ];
-  return json({ query: q, results: results.slice(0, num), provider: "wakil-mock-search" });
+  const q = searchParams.get("q") ?? "";
+  const num = searchParams.get("num") ?? 5;
+  return json(mockSearchResponse(q, num));
 }
 
 /**

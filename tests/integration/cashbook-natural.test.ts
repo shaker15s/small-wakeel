@@ -19,7 +19,7 @@ beforeAll(async () => {
   business = await db.business.findUniqueOrThrow({ where: { id: b.id } })
   owner = await db.user.findUniqueOrThrow({ where: { id: b.users[0].id } })
   cashier = await db.user.create({ data: { businessId: b.id, name: 'كاشير', role: 'cashier' } })
-  const count = await createDraft({ businessId: b.id, userId: owner.id, type: 'cashbook', summary: 'عد اختبار معزول', idempotencyKey: randomUUID(), payload: { kind: 'cash_count', amount: 500000, expectedCash: 0, occurredOn: today, note: 'اختبار لا يمس البيانات الأصلية' } })
+  const count = await createDraft({ businessId: b.id, userId: owner.id, type: 'cashbook', summary: 'عد اختبار معزول', idempotencyKey: randomUUID(), payload: { kind: 'cash_count', amount: 500000, expectedCash: 0, expectedCashKnown: false, occurredOn: today, note: 'اختبار لا يمس البيانات الأصلية' } })
   await executeOperation(count.id, owner.id, 'عد اختبار')
 })
 afterAll(async () => { await db.business.delete({ where: { id: business.id } }) })

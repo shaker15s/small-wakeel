@@ -121,8 +121,13 @@ describe('PR-013 — model:acceptance harness', () => {
       const checks = new Map(report.results[0].checks.map((c: { id: string; pass: boolean }) => [c.id, c.pass]))
       // the adapter contract is proven on the mock:
       expect(checks.get('A1')).toBe(true) // reachable, model id accepted
-      expect(checks.get('A3')).toBe(true) // tool calling round-trip
-      expect(checks.get('A4')).toBe(true) // write refusal
+      const a3 = report.results[0].checks.find((c: { id: string; pass: boolean; detail?: string }) => c.id === 'A3')
+      if (a3?.pass !== true) {
+        throw new Error(`A3 adapter contract failed: ${a3?.detail ?? 'missing A3 result'}`)
+      }
+      expect(checks.get('A3'), report.results[0].checks.find((c: { id: string }) => c.id === 'A3')?.detail ?? 'A3 missing from report').toBe(true) // tool calling round-trip
+      const a4 = report.results[0].checks.find((c: { id: string; pass: boolean; detail?: string }) => c.id === 'A4')
+      expect(a4?.pass, `A4 adapter contract failed: ${a4?.detail ?? 'missing A4 result'}`).toBe(true) // no write tool call
       expect(checks.get('A5')).toBe(true) // latency + cost measured
       // A2 (marker echo) is a LIVE-model behaviour — the mock is not a model,
       // so it is allowed to fail here and must be re-checked on a live run.

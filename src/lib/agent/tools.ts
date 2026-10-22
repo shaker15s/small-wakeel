@@ -1,5 +1,5 @@
 import { reportedType } from '@/lib/cashbook-report'
-import { cashbookCash } from '@/lib/domain/cashbook'
+import { cashPositionEvidence } from '@/lib/domain/cashbook'
 // وكيل — read tools: deterministic queries the agent can run (R0).
 // Results are structured ResultCardDTOs the UI renders as tables/kv cards.
 
@@ -325,27 +325,30 @@ export async function runReadTool(
       const type = reportedType(op.type, p)
       if (type in sums) sums[type] += payloadMoney(p)
     }
-    const cash = await db.$transaction(tx => cashbookCash(tx, businessId))
+    const cashPosition = await db.$transaction(tx => cashPositionEvidence(tx, businessId))
     return [{ kind: 'kv', title: `المسجل فقط · آخر ${days} يوم`, rows: [
-      { label: 'رصيد الخزنة المسجل دلوقتي', value: egp(cash) }, { label: 'بيع مسجل فقط (يشمل الآجل)', value: egp(sums.sale) },
+      { label: 'رصيد الخزنة المسجل دلوقتي', value: cashPosition.cash == null ? 'غير معروف — محتاج رصيد بداية أو عدّ فعلي' : egp(cashPosition.cash) },
+      { label: 'داخل نقدي مسجل (من غير فرق العد)', value: egp(cashPosition.cashIn) },
+      { label: 'خارج نقدي مسجل (من غير فرق العد)', value: egp(cashPosition.cashOut) },
+      ...(cashPosition.cashCountAdjustment !== 0 ? [{ label: 'فرق عدّ غير مصنّف (مش مبيعات)', value: egp(cashPosition.cashCountAdjustment) }] : []),
+      { label: 'بيع مسجل فقط (يشمل الآجل)', value: egp(sums.sale) },
       { label: 'شراء مسجل (يشمل الآجل)', value: egp(sums.purchase) }, { label: 'مصروفات مسجلة', value: egp(sums.expense) },
       { label: 'تحصيلات مسجلة', value: egp(sums.collection) }, { label: 'سداد مسجل', value: egp(sums.payment) },
-    ] }, { kind: 'text', title: 'مش حساب أرباح', body: 'ده جزء الدفتر اللي اتسجل، مش إجمالي المبيعات أو الربح. فرق عدّ الخزنة غير مصنف. القرض والسحب والإيداع مش مبيعات.' }]
+    ] }, { kind: 'text', title: 'مش حساب أرباح', body: 'ده جزء الدفتر اللي اتسجل، مش إجمالي المبيعات أو الربح. فرق عدّ الخزنة غير مصنف ولا يُعامل كقبض أو دفع. القرض والسحب والإيداع مش مبيعات.' }]
   }
   switch (tool) {
     case 'get_cash_position': {
-      const entries = await db.cashEntry.findMany({ where: { businessId }, select: { direction: true, amount: true } })
-      const inn = entries.filter((e) => e.direction === 'in').reduce((s, e) => s + e.amount, 0)
-      const out = entries.filter((e) => e.direction === 'out').reduce((s, e) => s + e.amount, 0)
+      const position = await db.$transaction(tx => cashPositionEvidence(tx, businessId))
       return [
         {
           kind: 'kv',
           title: 'وضع الخزنة',
           rows: [
-            { label: 'الافتتاحي', value: egp(biz.openingCash) },
-            { label: 'داخل (قبض)', value: egp(inn) },
-            { label: 'خارج (دفع)', value: egp(out) },
-            { label: 'الرصيد دلوقتي', value: egp(biz.openingCash + inn - out) },
+            { label: 'الافتتاحي', value: position.openingCashKnown ? egp(biz.openingCash) : 'غير مسجل من صاحب المحل' },
+            { label: 'داخل (قبض)', value: egp(position.cashIn) },
+            { label: 'خارج (دفع)', value: egp(position.cashOut) },
+            ...(position.cashCountAdjustment !== 0 ? [{ label: 'فرق عدّ غير مصنّف (مش مبيعات)', value: egp(position.cashCountAdjustment) }] : []),
+            { label: 'الرصيد دلوقتي', value: position.cash == null ? 'غير معروف — اعمل عدّ فعلي أو سجّل رصيد البداية' : egp(position.cash) },
           ],
         },
       ]
@@ -503,14 +506,13 @@ export async function runReadTool(
       // money sits: cash + at the customers + on the shelves − owed to
       // suppliers = working capital. Same readers as get_cash_position and
       // get_stock_value so every screen adds the ledger the same way.
-      const [cashEntries, customers, suppliers, items] = await Promise.all([
-        db.cashEntry.findMany({ where: { businessId }, select: { direction: true, amount: true } }),
+      const [cashPosition, customers, suppliers, items] = await Promise.all([
+        db.$transaction(tx => cashPositionEvidence(tx, businessId)),
         db.customer.findMany({ where: { businessId }, select: { balance: true } }),
         db.supplier.findMany({ where: { businessId }, select: { balance: true } }),
         db.item.findMany({ where: { businessId } }),
       ])
-      const cash =
-        biz.openingCash + cashEntries.reduce((s, e) => s + (e.direction === 'in' ? e.amount : -e.amount), 0)
+      const cash = cashPosition.cash
       const receivables = customers.reduce((s, c) => s + Math.max(0, c.balance), 0)
       const payables = suppliers.reduce((s, sp) => s + Math.max(0, sp.balance), 0)
       // R70 / PR-001: an item whose qty or cost is unrecorded has an UNKNOWN
@@ -523,23 +525,23 @@ export async function runReadTool(
         if (it.stockQty == null || it.costPrice == null) unknownStockItems += 1
         else stock += it.stockQty * it.costPrice
       }
-      const net = cash + receivables + stock - payables
+      const net = cash == null ? null : cash + receivables + stock - payables
       return [
         {
           kind: 'kv',
           title: 'المركز المالي — فلوسي واقفين فين',
           rows: [
-            { label: 'كاش في الخزنة', value: egp(cash) },
+            { label: 'كاش في الخزنة', value: cash == null ? 'غير معروف — محتاج رصيد بداية أو عدّ فعلي' : egp(cash) },
             { label: 'فلوسي عند العملاء', value: egp(receivables) },
             { label: 'بضاعة على الرف (تكلفة)', value: unknownStockItems > 0 ? `${egp(stock)} (فيهم ${unknownStockItems} صنف غير مسجل كمية أو تكلفة)` : egp(stock) },
             { label: 'علينا للموردين', value: `- ${egp(payables)}` },
-            { label: 'رأس المال العامل التقريبي', value: egp(net) },
+            { label: 'رأس المال العامل التقريبي', value: net == null ? 'غير محسوم لحد ما رصيد الخزنة يتحدد' : egp(net) },
           ],
         },
         {
           kind: 'text',
           title: 'ببساطة',
-          body: `فلوسك دلوقتي: ${egp(cash)} كاش في الخزنة + ${egp(receivables)} عند العملاء + ${egp(stock)} بضاعة على الرف، ومعنا ${egp(payables)} عند الموردين. الصافي التقريبي ${egp(net)}.`,
+          body: cash == null ? `رصيد الخزنة غير معروف لأن رصيد البداية لم يتسجل ولا يوجد عدّ فعلي معتمد. المسجل عند العملاء ${egp(receivables)}، والبضاعة المعروفة التكلفة ${egp(stock)}، والمستحق للموردين ${egp(payables)}؛ لذلك لن أخمّن صافي رأس المال العامل.` : `فلوسك دلوقتي: ${egp(cash)} كاش في الخزنة + ${egp(receivables)} عند العملاء + ${egp(stock)} بضاعة على الرف، ومعنا ${egp(payables)} عند الموردين. الصافي التقريبي ${egp(net!)}.`,
         },
       ]
     }
@@ -1781,18 +1783,18 @@ export async function runReadTool(
       const days = Math.min(90, Math.max(7, Number(args.days ?? 30) || 30))
       const since = startOfCairoDay(-(days - 1))
       const prevStart = startOfCairoDay(-(days * 2 - 1))
-      const [ops, prevOps, items, entries] = await Promise.all([
+      const [ops, prevOps, items, cashPosition] = await Promise.all([
         db.operation.findMany({ where: { businessId, status: 'SUCCEEDED', createdAt: { gte: since } }, orderBy: { createdAt: 'desc' } }),
         db.operation.findMany({ where: { businessId, status: 'SUCCEEDED', createdAt: { gte: prevStart, lt: since } } }),
         db.item.findMany({ where: { businessId } }),
-        db.cashEntry.findMany({ where: { businessId } }),
+        db.$transaction(tx => cashPositionEvidence(tx, businessId)),
       ])
       const sum = (list: typeof ops, type: string) => list.filter((o) => o.type === type).reduce((acc, o) => acc + opAmount(o.payload), 0)
       const sales = sum(ops, 'sale')
       const prevSales = sum(prevOps, 'sale')
       const expenses = sum(ops, 'expense')
       const collections = sum(ops, 'collection')
-      const cash = biz.openingCash + entries.reduce((acc, e) => acc + (e.direction === 'in' ? e.amount : -e.amount), 0)
+      const cash = cashPosition.cash
 
       // Velocity per item (last `days`) → what is about to run out.
       const sold = new Map<string, number>()
@@ -1831,7 +1833,8 @@ export async function runReadTool(
       if (collectionRate != null && collectionRate < 60) findings.push(`بتحصّل ${collectionRate}٪ بس من مبيعات الفترة — الفلوس قاعدة عند العملاء مش في الخزنة`)
       if (atRisk.length > 0) findings.push(`${fmtQty(atRisk.length)} صنف هتخلص في أقل من أسبوع (أسرعهم ${atRisk[0].it.name})`)
       if (dead.length > 0) findings.push(`رأس مال راكد ${egp(dead.reduce((acc, d) => acc + d.value, 0))} في ${fmtQty(dead.length)} صنف مش بيتحرك`)
-      if (cash < 0) findings.push('الخزنة بالسالب — راجع التحصيلات المسجلة')
+      if (cash == null) findings.push('رصيد الخزنة غير معروف — سجّل رصيد البداية أو اعمل عدّ فعلي قبل ما نقيّم السيولة')
+      else if (cash < 0) findings.push('الخزنة بالسالب — راجع التحصيلات المسجلة')
       if (findings.length === 0) findings.push('مفيش مؤشر خطر واضح في الفترة دي — الأرقام ماشية في نطاقها الطبيعي')
 
       return [
@@ -1842,7 +1845,7 @@ export async function runReadTool(
             { label: 'المبيعات', value: egp(sales) },
             { label: 'المصروفات', value: egp(expenses) },
             { label: 'التحصيل', value: egp(collections) },
-            { label: 'المتاح في الخزنة', value: egp(cash) },
+            { label: 'المتاح في الخزنة', value: cash == null ? 'غير معروف — محتاج رصيد بداية أو عدّ فعلي' : egp(cash) },
             { label: 'مديونيات العملاء', value: egp(receivables) },
             { label: 'أهم ملاحظة', value: findings[0] },
           ],
@@ -2062,17 +2065,15 @@ export async function runReadTool(
     }
 
     case 'get_proactive_insights': {
-      const [items, customers, suppliers, pendingCount, dueTasks, entries] = await Promise.all([
+      const [items, customers, suppliers, pendingCount, dueTasks, cashPosition] = await Promise.all([
         db.item.findMany({ where: { businessId } }),
         db.customer.findMany({ where: { businessId, balance: { gt: 0 } }, orderBy: { balance: 'desc' } }),
         db.supplier.findMany({ where: { businessId, balance: { gt: 0 } }, orderBy: { balance: 'desc' } }),
         db.operation.count({ where: { businessId, status: 'AWAITING_APPROVAL' } }),
         db.scheduledTask.count({ where: { businessId, status: 'pending' } }),
-        db.cashEntry.findMany({ where: { businessId }, select: { direction: true, amount: true } }),
+        db.$transaction(tx => cashPositionEvidence(tx, businessId)),
       ])
-      const inn = entries.filter((e) => e.direction === 'in').reduce((s, e) => s + e.amount, 0)
-      const out = entries.filter((e) => e.direction === 'out').reduce((s, e) => s + e.amount, 0)
-      const cashNow = biz.openingCash + inn - out
+      const cashNow = cashPosition.cash
       // R70 / PR-001: a shortage needs a COUNTED stock and a recorded
       // threshold. Items never counted get their own honest row — the
       // proactive nudge to record a stocktake, not a fake «out of stock».
@@ -2087,7 +2088,7 @@ export async function runReadTool(
           kind: 'kv',
           title: 'نبض الشغل الاستباقي (تقرير وكيل اللحظي)',
           rows: [
-            { label: 'السيولة النقدية في الخزنة', value: egp(cashNow) },
+            { label: 'السيولة النقدية في الخزنة', value: cashNow == null ? 'غير معروف — محتاج رصيد بداية أو عدّ فعلي' : egp(cashNow) },
             {
               label: 'حالة المخزون والنواقص',
               value: low.length > 0 ? `${fmtQty(low.length)} صنف تحت حد الأمان (${low.slice(0, 3).map((i) => i.name).join('، ')})` : 'مستقر تماماً',

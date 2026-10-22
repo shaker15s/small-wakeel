@@ -5,6 +5,7 @@ import { testDb } from '../helpers/test-db'
 import { createDraft, executeOperation, rejectOperation } from '@/lib/domain/executors'
 import { AuthorizationError } from '@/lib/security/permissions'
 import { OperationValidationError } from '@/lib/domain/errors'
+import { runAgentTurn } from '@/lib/agent/harness'
 
 let db: Awaited<ReturnType<typeof testDb>>
 let business: Business
@@ -40,6 +41,28 @@ afterAll(async () => {
 })
 
 describe('financial write boundary', () => {
+  test('collecting from a known zero-balance customer asks about an advance/loan and creates no draft', async () => {
+    const customer = await db.customer.create({
+      data: { businessId: business.id, name: 'عميل اختبار', balance: 0 },
+    })
+    const conversation = await db.conversation.create({
+      data: { businessId: business.id, userId: owner.id, title: key() },
+    })
+
+    const result = await runAgentTurn({
+      business,
+      user: owner,
+      conversationId: conversation.id,
+      modelKey: null,
+      text: `حصلت ١٨٠ جنيه من ${customer.name}`,
+      history: [],
+    }, () => {})
+
+    expect(result.replyText).toMatch(/عربون ولا سلفة/)
+    expect(await db.operation.count({ where: { conversationId: conversation.id } })).toBe(0)
+    expect((await db.customer.findUniqueOrThrow({ where: { id: customer.id } })).balance).toBe(0)
+  })
+
   test('draft creation checks live membership, type permissions and conversation ownership', async () => {
     const conversation = await db.conversation.create({ data: { businessId: business.id, userId: cashier.id, title: 'private' } })
     const params = { businessId: business.id, userId: owner.id, type: 'expense' as const, summary: key(), payload: { total: 100 }, idempotencyKey: key() }
@@ -55,6 +78,76 @@ describe('financial write boundary', () => {
       { businessId: business.id, userId: cashier.id, type: 'sale' as const },
       { businessId: business.id, userId: owner.id, type: 'purchase' as const },
     ]) await expect(createDraft({ ...params, summary: '', payload: {}, idempotencyKey: op.idempotencyKey })).rejects.toBeInstanceOf(AuthorizationError)
+  })
+  test('pre-binding legacy rows fail closed instead of guessing the replay payload', async () => {
+    const legacy = await expense(7000)
+    await db.operation.update({
+      where: { id: legacy.id },
+      data: { payloadHash: null, requestPayloadHash: null },
+    })
+    await expect(createDraft({
+      businessId: business.id, userId: owner.id, type: 'expense', summary: key(),
+      payload: { total: 7000 }, idempotencyKey: legacy.idempotencyKey,
+    })).rejects.toBeInstanceOf(OperationValidationError)
+    expect(await db.operation.count({ where: { idempotencyKey: legacy.idempotencyKey } })).toBe(1)
+  })
+
+  test('legacy row with malformed approval payload cannot be replayed', async () => {
+    const legacy = await expense(7000)
+    await db.operation.update({
+      where: { id: legacy.id },
+      data: { payloadHash: null, requestPayloadHash: null, payload: '{not-json' },
+    })
+    await expect(createDraft({
+      businessId: business.id, userId: owner.id, type: 'expense', summary: key(),
+      payload: { total: 7000 }, idempotencyKey: legacy.idempotencyKey,
+    })).rejects.toBeInstanceOf(OperationValidationError)
+  })
+
+  test('same sale retry replays even when the stored draft contains server-added defaults', async () => {
+    const it = await item(business.id, 10, 100)
+    const params = {
+      businessId: business.id, userId: owner.id, type: 'sale' as const, summary: key(),
+      payload: { itemId: it.id, qty: 2, total: 200 }, idempotencyKey: key(),
+    }
+    const originalRequestPayload = structuredClone(params.payload)
+    const first = await createDraft(params)
+    expect(params.payload).toEqual(originalRequestPayload) // the draft validator must not mutate caller-owned input
+    const stored = JSON.parse(first.payload) as Record<string, unknown>
+    expect(stored.paid).toBe(200) // validation materializes paid=total
+    expect(first.requestPayloadHash).toMatch(/^[0-9a-f]{64}$/)
+    const replay = await createDraft(params)
+    expect(replay.id).toBe(first.id)
+    await expect(createDraft({
+      ...params,
+      payload: { itemId: it.id, qty: 2, total: 200, paid: 50 },
+    })).rejects.toBeInstanceOf(OperationValidationError)
+    expect(await db.operation.count({ where: { idempotencyKey: first.idempotencyKey } })).toBe(1)
+  })
+
+  test('stored approval hash prevents idempotency replay after payload tampering', async () => {
+    const op = await expense(7000)
+    await db.operation.update({
+      where: { id: op.id },
+      data: { payload: JSON.stringify({ total: 8000 }) },
+    })
+    await expect(createDraft({
+      businessId: business.id, userId: owner.id, type: 'expense', summary: key(),
+      payload: { total: 7000 }, idempotencyKey: op.idempotencyKey,
+    })).rejects.toBeInstanceOf(OperationValidationError)
+    expect(await db.operation.count({ where: { idempotencyKey: op.idempotencyKey } })).toBe(1)
+  })
+  test('a present payloadHash cannot mask a tampered stored payload during replay', async () => {
+    const op = await expense(7000)
+    await db.operation.update({
+      where: { id: op.id },
+      data: { payload: JSON.stringify({ total: 8000 }) },
+    })
+    await expect(createDraft({
+      businessId: business.id, userId: owner.id, type: 'expense', summary: key(),
+      payload: { total: 7000 }, idempotencyKey: op.idempotencyKey,
+    })).rejects.toBeInstanceOf(OperationValidationError)
+    expect(await db.operation.count({ where: { idempotencyKey: op.idempotencyKey } })).toBe(1)
   })
   test('concurrent creation with one key produces one draft and one audit', async () => {
     const params = { businessId: business.id, userId: owner.id, type: 'expense' as const, summary: key(), payload: { total: 100 }, idempotencyKey: key() }
@@ -80,6 +173,19 @@ describe('financial write boundary', () => {
       expect((await db.operation.findUniqueOrThrow({ where: { id: op.id } })).status).toBe('AWAITING_APPROVAL')
     }
   })
+  test('a successful approval writes actor-bound approval and success audit rows', async () => {
+    const op = await expense(100)
+    const result = await executeOperation(op.id, owner.id)
+    expect(result.op.status).toBe('SUCCEEDED')
+    expect(result.outcome.ok).toBe(true)
+    const events = await db.auditEvent.findMany({
+      where: { businessId: business.id, ref: op.ref },
+      select: { actor: true, action: true },
+    })
+    expect(events.some((event) => event.action === 'operation.approved' && event.actor === owner.id)).toBe(true)
+    expect(events.some((event) => event.action === 'operation.succeeded' && event.actor === owner.id)).toBe(true)
+  })
+
   test('direct approval/rejection checks both role and tenant without touching reason/status', async () => {
     const op = await expense()
     for (const user of [cashier, outsider]) {

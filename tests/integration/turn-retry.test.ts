@@ -31,18 +31,21 @@ afterAll(async () => {
   await db?.$disconnect?.()
 })
 
-async function turn(text: string, turnId: string) {
-  const conversation = await db.conversation.create({
-    data: { businessId: business.id, userId: user.id, title: text.slice(0, 40) },
-  })
+async function turn(text: string, turnId: string, conversationId?: string): Promise<string> {
+  // A network retry is the SAME turn in the SAME conversation; making a new
+  // conversation here would correctly produce a different draft, not test a retry.
+  const conversation = conversationId
+    ? await db.conversation.findFirstOrThrow({ where: { id: conversationId, businessId: business.id, userId: user.id } })
+    : await db.conversation.create({
+        data: { businessId: business.id, userId: user.id, title: text.slice(0, 40) },
+      })
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const events: any[] = []
   await runAgentTurn(
     { business, user, conversationId: conversation.id, text, modelKey: null, history: [], turnId },
     (ev: unknown) => events.push(ev),
   )
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return events.filter((e) => e.event === 'card' || e.event === 'cards')
+  return conversation.id
 }
 
 const newTurnId = () => `r34test-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
@@ -53,9 +56,9 @@ describe('turn retry — نفس الرسالة مرتين = مسودة واحد�
     const text = 'ضيف مصروف ٣٣ جنيه بند صيانة'
     const before = await db.operation.count({ where: { businessId: business.id } })
 
-    await turn(text, turnId)
+    const conversationId = await turn(text, turnId)
     const afterFirst = await db.operation.count({ where: { businessId: business.id } })
-    await turn(text, turnId)
+    await turn(text, turnId, conversationId)
     const afterRetry = await db.operation.count({ where: { businessId: business.id } })
 
     expect(afterFirst - before).toBe(1)
