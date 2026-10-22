@@ -102,7 +102,11 @@ export function findMigrationsDir(): string | null {
   return null
 }
 
-export async function applyMigrations(dbPath: string, migrationsDir?: string): Promise<MigrationResult> {
+export async function applyMigrations(
+  dbPath: string,
+  migrationsDir?: string,
+  options: { integrityCheck?: boolean } = {},
+): Promise<MigrationResult> {
   const dir = migrationsDir ?? findMigrationsDir()
   if (!dir) throw new Error('db/migrations directory not found (run from the repo root or set WAKIL_PROJECT_ROOT)')
   const absolute = isAbsolute(dbPath) ? dbPath : join(process.cwd(), dbPath)
@@ -174,6 +178,17 @@ export async function applyMigrations(dbPath: string, migrationsDir?: string): P
     }
     const fk = await client.execute('PRAGMA foreign_key_check')
     if (fk.rows.length) throw new Error('Migration foreign key check failed')
+
+    // Optional expensive full-database integrity verification. The caller can
+    // request this for throwaway fixtures / backup drills; run it on the SAME
+    // libsql client that performed migrations. Do not reopen a WAL-mode DB with
+    // Bun's SQLite engine between migrations and Prisma's first use: mixed
+    // native SQLite/libsql handles can disagree on WAL shared-memory state.
+    if (options.integrityCheck) {
+      const integrity = await client.execute('PRAGMA integrity_check')
+      const result = String(integrity.rows[0]?.integrity_check ?? '')
+      if (result !== 'ok') throw new Error(`Migration SQLite integrity check failed: ${result || 'no result'}`)
+    }
   } finally {
     client.close()
   }
