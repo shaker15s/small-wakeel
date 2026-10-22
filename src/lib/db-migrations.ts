@@ -128,28 +128,47 @@ export async function applyMigrations(dbPath: string, migrationsDir?: string): P
       if (!existsSync(contentPath)) continue
       const content = readFileSync(contentPath, 'utf8')
       const checksum = createHash('sha256').update(content).digest('hex')
-      let isNew = false
-      // libsql modes: 'write' (immediate write lock) | 'read' | 'deferred'
-      const tx = await client.transaction('write')
-      try {
-        const row = await tx.execute({ sql: 'SELECT checksum FROM _WakilMigration WHERE id = ?', args: [id] })
-        const existing = row.rows[0]?.checksum as string | undefined
-        if (existing) {
-          if (existing !== checksum) throw new Error(`Migration checksum mismatch: ${id}`)
-        } else {
-          for (const stmt of splitSqlStatements(content)) {
-            await tx.execute({ sql: stmt })
-          }
-          await tx.execute({ sql: 'INSERT INTO _WakilMigration VALUES (?, ?, ?)', args: [id, checksum, new Date().toISOString()] })
-          isNew = true
-        }
-        await tx.commit()
-      } catch (e) {
-        await tx.rollback().catch(() => {})
-        throw e
+      // Read the ledger first, then use Client.migrate() for an atomic file
+      // migration. Do not open one interactive client.transaction() per file:
+      // local @libsql/client versions can retain the detached native SQLite/WAL
+      // handle after commit/rollback; dozens of migrations then leave competing
+      // handles on the same test/runtime DB (observed SQLITE_IOERR_SHORT_READ).
+      const row = await client.execute({
+        sql: 'SELECT checksum FROM _WakilMigration WHERE id = ?',
+        args: [id],
+      })
+      const existing = row.rows[0]?.checksum as string | undefined
+      if (existing) {
+        if (existing !== checksum) throw new Error(`Migration checksum mismatch: ${id}`)
+        skipped++
+        continue
       }
-      if (isNew) applied.push(id)
-      else skipped++
+
+      const statements = splitSqlStatements(content).map((sql) => ({ sql }))
+      statements.push({
+        sql: 'INSERT INTO _WakilMigration VALUES (?, ?, ?)',
+        args: [id, checksum, new Date().toISOString()],
+      })
+      try {
+        // The library-managed migration path uses its active client handle and
+        // wraps all statements + the ledger receipt in one SQLite transaction.
+        await client.migrate(statements)
+        applied.push(id)
+      } catch (error) {
+        // Two app processes may race on first startup. If the other process
+        // atomically applied this exact checksum, treat it as already applied;
+        // otherwise preserve the original failure and stop boot.
+        const settled = await client.execute({
+          sql: 'SELECT checksum FROM _WakilMigration WHERE id = ?',
+          args: [id],
+        })
+        const settledChecksum = settled.rows[0]?.checksum as string | undefined
+        if (settledChecksum === checksum) {
+          skipped++
+          continue
+        }
+        throw error
+      }
     }
     const fk = await client.execute('PRAGMA foreign_key_check')
     if (fk.rows.length) throw new Error('Migration foreign key check failed')
