@@ -26,6 +26,7 @@
  *     node scripts/model-acceptance.mjs [--report out.json]
  */
 import { createHash } from 'node:crypto'
+import { providerFetch } from '../src/lib/security/provider-network.ts'
 import { writeFileSync } from 'node:fs'
 import { assertSafeAcceptanceCredentialTarget, evaluateExpectedSaleCall, isLiveAcceptanceEndpoint, isMockAcceptanceEndpoint, resolveChatCompletionsUrl, SALE_TOOL_ACCEPTANCE_SCHEMA } from './lib/model-acceptance-contract.mjs'
 
@@ -58,12 +59,16 @@ async function chat(model, messages, { tools, stream = false, acceptanceProbe } 
   const started = Date.now()
   let ttft = null
   let raw = ''
-  const res = await fetch(url, {
+  const request = {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...(KEY ? { authorization: `Bearer ${KEY}` } : {}), ...(acceptanceProbe ? { 'x-wakil-acceptance-probe': acceptanceProbe } : {}) },
     body: JSON.stringify(body),
     redirect: 'error',
-  })
+  }
+  // A credentialed live test must use the same DNS-pinned, public-address
+  // transport as the application; a hostname that looks public may resolve to
+  // loopback/private space. Uncredentialed mock fixtures remain loopback-capable.
+  const res = KEY ? await providerFetch(url, request) : await fetch(url, request)
   if (!res.ok) {
     const text = await res.text().catch(() => '')
     throw new Error(`HTTP ${res.status}: ${text.slice(0, 300)}`)

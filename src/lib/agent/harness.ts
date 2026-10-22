@@ -3465,9 +3465,12 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   if (cashbook) return cashbook
   const v = getVertical(business.type)
   const model = await resolveModel(ctx.modelKey)
-  const offlineMode = process.env.WAKIL_OFFLINE === '1'
-  const modelLabel = offlineMode ? 'القواعد المحلية · وضع دون اتصال' : modelLabelFor(model)
-  if (offlineMode) meta.fallback = true
+  // Offline networking and deterministic-only evaluation are separate modes:
+  // integration tests may inject a synthetic model while still forbidding real
+  // network access; only the golden evaluator skips the model loop entirely.
+  const deterministicEvalMode = process.env.WAKIL_DETERMINISTIC_EVAL === '1'
+  const modelLabel = deterministicEvalMode ? 'القواعد المحلية · تقييم حتمي' : modelLabelFor(model)
+  if (deterministicEvalMode) meta.fallback = true
   // «الشفافية»: when the SELECTED model cannot be reached, the user must not
   // receive an unmarked local-engine reply as if it were the model's words.
   // Set at the first provider failure; appended to the final reply.
@@ -5065,11 +5068,11 @@ async function runAgentTurnInner(ctx: TurnContext, emit: TurnEmit, meta: TurnMet
   // («المورد … والحساب 2000» is slots for the open request, not a new command).
   // R48: a COMPLETED credit-to-new-customer request owns the turn — it is two
   // deterministic writes, and the model (or deep research) must not take over.
-  if (!pendingWriteIntent && !creditSubs && !offlineMode) {
-    // Normal operation uses the model-first brain loop. Explicit offline mode is
-    // different: it must enter the deterministic rule ladder directly, not call
-    // completeChat/streamChat and wait through model retry/backoff before falling
-    // back. This keeps offline evaluations truly offline and makes the label honest.
+  if (!pendingWriteIntent && !creditSubs && !deterministicEvalMode) {
+    // Normal operation and offline integration tests still exercise the model-first
+    // orchestration (tests may inject a synthetic response source; WAKIL_OFFLINE
+    // prevents real network calls). Only deterministic evaluation bypasses it so
+    // 1000+ rule-ladder scenarios do not spin through LLM retry/backoff.
     const brainTurn = await runBrainTurn()
     if (brainTurn) return brainTurn
   }

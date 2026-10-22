@@ -36,7 +36,9 @@ async function main() {
   await applyMigrations(dbFile)
   process.env.DATABASE_URL = `file:${dbFile}`
   // Deterministic ladder only: no network, no retries, no model latency.
+  // Separate flag: WAKIL_OFFLINE alone still permits synthetic-model contract tests.
   process.env.WAKIL_OFFLINE = '1'
+  process.env.WAKIL_DETERMINISTIC_EVAL = '1'
 
   const { db } = await import('../../src/lib/db')
   const { runAgentTurn } = await import('../../src/lib/agent/harness')
