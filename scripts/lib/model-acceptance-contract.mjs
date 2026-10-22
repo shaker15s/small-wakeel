@@ -2,16 +2,22 @@ import ipaddr from 'ipaddr.js'
 
 const GOOGLE_OPENAI_HOST = 'generativelanguage.googleapis.com'
 
-/** True only for an explicit mock model or a loopback test endpoint. */
-export function isMockAcceptanceEndpoint(base, models = []) {
-  if (Array.isArray(models) && models.some((model) => /mock/i.test(String(model)))) return true
+/** A mock is an explicitly local endpoint; model names alone never make a remote URL safe. */
+export function isLoopbackAcceptanceEndpoint(base) {
   try {
-    const host = new URL(base).hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '')
-    return host === 'localhost' || host.endsWith('.localhost') ||
-      host === '127.0.0.1' || host === '::1' || host === '0.0.0.0'
+    const url = new URL(base)
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return false
+    const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '')
+    if (host === 'localhost' || host.endsWith('.localhost')) return true
+    return ipaddr.process(host).range() === 'loopback'
   } catch {
     return false
   }
+}
+
+/** Only a local loopback endpoint is allowed to stand in for a model provider. */
+export function isMockAcceptanceEndpoint(base, _models = []) {
+  return isLoopbackAcceptanceEndpoint(base)
 }
 
 /**
@@ -104,10 +110,21 @@ export function isLiveAcceptanceEndpoint(base, apiKey, models = []) {
   }
 }
 
-/** Fail before network I/O if an API key would be sent to a non-live endpoint. */
+/**
+ * Fail before any network I/O unless this is either (a) an uncredentialed local
+ * adapter mock, or (b) a credentialed HTTPS endpoint classified as live. A
+ * model id containing "mock" is not permission to send prompts to a remote URL.
+ */
 export function assertSafeAcceptanceCredentialTarget(base, apiKey, models = []) {
-  if (apiKey && !isLiveAcceptanceEndpoint(base, apiKey, models)) {
-    throw new Error('Refusing to send WAKIL_ACCEPTANCE_API_KEY to a non-HTTPS, private, or mock endpoint')
+  if (typeof base !== 'string' || !base.trim()) {
+    throw new Error('WAKIL_ACCEPTANCE_BASE_URL is required; no request was sent')
+  }
+  if (isLoopbackAcceptanceEndpoint(base)) {
+    if (apiKey) throw new Error('Refusing to send WAKIL_ACCEPTANCE_API_KEY to a local mock endpoint')
+    return
+  }
+  if (!isLiveAcceptanceEndpoint(base, apiKey, models)) {
+    throw new Error('Refusing uncredentialed or unsafe model acceptance target; use an uncredentialed loopback mock or a keyed HTTPS public endpoint')
   }
 }
 
