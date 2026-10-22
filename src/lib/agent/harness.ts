@@ -3415,13 +3415,9 @@ async function reflectOnDraft(args: {
       console.error('[audit] trail write failed:', err)
     }
   }
-  await decisionEngine.syncSystemOnMutation({
-    businessId: args.businessId,
-    userId: args.userId,
-    mutationKind: 'system_updated',
-    mutationType: args.type,
-    detail: args.summary,
-  }).catch(() => null)
+  // A draft is only a proposal, not a business/system mutation. Do not
+  // append a system_updated audit event or refresh memory/plugin state until
+  // the relevant mutation is actually approved and executed.
   const danger = result.findings.some((f) => f.severity === 'danger')
   return { findings: result.findings, confidence: result.confidence, risk: danger ? 'R3' : undefined, ms: result.ms }
 }
