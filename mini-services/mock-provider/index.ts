@@ -375,6 +375,24 @@ function brainReply(rawText: string, model: string, messages: Msg[] = []): strin
       ...(d.amount ? { amount: d.amount } : {}),
       ...(d.name ? { name: d.name, customerName: d.name } : {}),
     };
+    // Mirror the production record_sale tool contract in the acceptance mock.
+    // The mock is not the business system of record; this is only a protocol fixture.
+    if (d.opType === "sale") {
+      const itemName = String(d.itemName ?? d.name ?? "").replace(/^(?:من|لـ|ل)\s+/, "").trim();
+      const qty = Number(d.qty ?? 0);
+      const unitPrice = d.amount == null ? undefined : Number(d.amount);
+      const totalMatch = text.match(/إجمالي(?:\s+الفاتورة)?\s*(?:هو|=|:)?\s*([\d٠-٩.,]+)/);
+      const paidMatch = text.match(/(?:المدفوع|دفعتله|دفعت|دفع)\s*(?:هو|=|:|بس)?\s*([\d٠-٩.,]+)/);
+      const total = totalMatch ? toNum(totalMatch[1]) : unitPrice != null && Number.isFinite(qty) ? unitPrice * qty : undefined;
+      const paid = paidMatch ? toNum(paidMatch[1]) : undefined;
+      delete args.item;
+      delete args.amount;
+      delete args.customerName;
+      if (itemName) args.name = itemName;
+      if (unitPrice != null && Number.isFinite(unitPrice)) args.price = unitPrice;
+      if (total != null && Number.isFinite(total)) args.total = total;
+      if (paid != null && Number.isFinite(paid)) args.paid = paid;
+    }
 
     // PR-013 acceptance fixture: produce the actual record_sale schema rather
     // than historical { item, amount } fields. The probe deliberately uses a
