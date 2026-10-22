@@ -13,6 +13,7 @@
 // The connection string still comes from DATABASE_URL. A *relative* `file:`
 // URL is resolved against the process CWD by libsql, so the default below keeps
 // `bun dev` working from the repo root without a .env at all.
+import { createClient } from '@libsql/client'
 import { PrismaClient } from '@prisma/client'
 import { PrismaLibSQL } from '@prisma/adapter-libsql'
 import { isLocalSqliteUrl, sqliteBusyTimeoutMs } from './db-config'
@@ -25,13 +26,21 @@ const globalForPrisma = globalThis as unknown as {
 
 function createPrismaClient(): PrismaClient {
   const url = databaseUrl()
-  // Pass the bounded lock-wait timeout through the adapter's supported config
-  // API. A PRAGMA on a separate admin/test connection does not configure the
-  // adapter's own local SQLite connections.
-  const adapter = new PrismaLibSQL({
+  // Local files are financial system-of-record storage. The libSQL client
+  // defaults to 20 concurrent operations, and each local statement can use a
+  // separate logical SQLite connection. On WAL, that permits overlapping
+  // writes/checkpoints across handles in the bundled pre-3.51.3 SQLite core.
+  // Serialize the local file adapter at the driver boundary; remote databases
+  // keep the prior default concurrency. The bounded timeout prevents transient
+  // locks from becoming immediate failures.
+  const localFile = isLocalSqliteUrl(url)
+  const driver = createClient({
     url,
-    ...(isLocalSqliteUrl(url) ? { timeout: sqliteBusyTimeoutMs() } : {}),
+    ...(localFile
+      ? { timeout: sqliteBusyTimeoutMs(), concurrency: 1 }
+      : {}),
   })
+  const adapter = new PrismaLibSQL(driver)
   return new PrismaClient({
     adapter,
     // `log: ['query']` used to be hardcoded — it printed every SQL statement in

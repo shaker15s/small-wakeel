@@ -115,8 +115,10 @@ export async function applyMigrations(
   // mode: later writes may fail with P1008/SocketTimeout for the life of the
   // process. WAL lets readers keep their snapshot without blocking COMMIT.
   // Make the mode explicit before creating transactions; fail closed if the
-  // database cannot enter WAL rather than serving a fragile local ledger.
-  const client: Client = createClient({ url: `file:${absolute}`, timeout: 10_000 })
+  // database cannot enter WAL rather than serving a fragile local ledger. The
+  // local driver concurrency is 1 because migrations target one file and
+  // parallel connections are not a useful optimization during boot.
+  const client: Client = createClient({ url: `file:${absolute}`, timeout: 10_000, concurrency: 1 })
   const applied: string[] = []
   let skipped = 0
   try {
