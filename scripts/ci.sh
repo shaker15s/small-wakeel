@@ -8,6 +8,13 @@ FAST=0
 # CI must never snapshot a DATABASE_URL inherited from a developer or a
 # connected service. Use only the checked-in synthetic fixture as the source.
 SOURCE_DATABASE_PATH="$PWD/db/custom.db"
+if [ ! -f "$SOURCE_DATABASE_PATH" ] || [ -L "$SOURCE_DATABASE_PATH" ] ||
+   ! git ls-files --error-unmatch -- db/custom.db >/dev/null 2>&1 ||
+   ! git diff --quiet HEAD -- db/custom.db ||
+   ! git diff --cached --quiet HEAD -- db/custom.db; then
+  printf '✘ Refusing CI: db/custom.db must be the unchanged, tracked synthetic fixture (not a symlink or local business DB).\\n' >&2
+  exit 1
+fi
 export DATABASE_URL="file:./db/custom.db"
 export NEXT_TELEMETRY_DISABLED=1
 export WAKIL_OFFLINE=1
