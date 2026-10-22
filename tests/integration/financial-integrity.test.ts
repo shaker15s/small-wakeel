@@ -43,7 +43,7 @@ afterAll(async () => {
 describe('financial write boundary', () => {
   test('collecting from a known zero-balance customer asks about an advance/loan and creates no draft', async () => {
     const customer = await db.customer.create({
-      data: { businessId: business.id, name: `عميل بلا مديونية ${randomUUID().slice(0, 8)}`, balance: 0 },
+      data: { businessId: business.id, name: 'عميل اختبار', balance: 0 },
     })
     const conversation = await db.conversation.create({
       data: { businessId: business.id, userId: owner.id, title: key() },
@@ -54,7 +54,7 @@ describe('financial write boundary', () => {
       user: owner,
       conversationId: conversation.id,
       modelKey: null,
-      text: `حصلت من ${customer.name} ١٨٠`,
+      text: `حصلت ١٨٠ جنيه من ${customer.name}`,
       history: [],
     }, () => {})
 
