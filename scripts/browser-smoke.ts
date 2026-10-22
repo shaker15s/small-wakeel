@@ -201,7 +201,7 @@ export async function browserSmoke(databaseUrl: string, key: string, boot: (orig
     await countInput.press('Enter')
     const countResponse = await countResponsePromise
     try {
-      await page.getByRole('button', { name: 'اعتماد العملية', exact: true }).click()
+      await page.getByRole('button', { name: /اعتماد العملية/ }).click()
     } catch (error) {
       const conv = (await sql.execute({
         sql: 'SELECT id, title FROM Conversation WHERE businessId=? AND userId=? ORDER BY updatedAt DESC LIMIT 1',
@@ -238,7 +238,7 @@ export async function browserSmoke(databaseUrl: string, key: string, boot: (orig
     await page.getByLabel('رسالة إلى وكيل', { exact: true }).fill('ضيف مصروف ٣٣ جنيه بند صيانة')
     await page.getByLabel('رسالة إلى وكيل', { exact: true }).press('Enter')
     await page.getByLabel('رسالة إلى وكيل', { exact: true }).press('Enter')
-    await page.getByRole('button', { name: 'اعتماد العملية', exact: true }).click()
+    await page.getByRole('button', { name: /اعتماد العملية/ }).click()
     await expect.poll(async () => Number((await sql.execute({ sql: "SELECT COUNT(*) n FROM Operation WHERE businessId=? AND status='SUCCEEDED'", args: [home.businessId] })).rows[0].n)).toBe(2)
     const op = (await sql.execute({ sql: "SELECT id,ref FROM Operation WHERE businessId=? AND (type='expense' OR json_extract(payload,'$.kind')='expense')", args: [home.businessId] })).rows[0]
     assert.equal(Number((await sql.execute({ sql: 'SELECT COUNT(*) n FROM CashEntry WHERE ref=?', args: [op.ref] })).rows[0].n), 1)
@@ -284,7 +284,7 @@ export async function browserSmoke(databaseUrl: string, key: string, boot: (orig
     await expect(page.getByLabel('عدّ الخزنة / قفل اليوم', { exact: true })).toBeVisible()
     assert.equal(await page.evaluate(async () => { const r = await fetch('/api/cashbook'); return (await r.json()).cash }), 246700)
     await page.locator('details').filter({ hasText: 'راجع العملية' }).first().locator('summary').click()
-    await page.getByRole('button', { name: 'اعتماد العملية', exact: true }).click()
+    await page.getByRole('button', { name: /اعتماد العملية/ }).click()
     await expect.poll(async () => Number((await sql.execute({ sql: "SELECT COUNT(*) n FROM Operation WHERE businessId=? AND status='SUCCEEDED'", args: [home.businessId] })).rows[0].n)).toBe(3)
     await expect(page.locator('details').filter({ hasText: 'راجع العملية' })).toHaveCount(0)
     const closeNotice = page.getByRole('button', { name: 'إغلاق التنبيه', exact: true })
@@ -308,13 +308,13 @@ export async function browserSmoke(databaseUrl: string, key: string, boot: (orig
     const compose = page.getByLabel('رسالة إلى وكيل', { exact: true })
     await expect(compose).toBeVisible()
     await compose.fill('بعت لمريم بضاعة بمية على الحساب امبارح وهيسدد بكرة'); await compose.press('Enter')
-    await expect(page.getByRole('button', { name: 'اعتماد العملية', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: /اعتماد العملية/ })).toBeVisible()
     const oldDraft = (await sql.execute({ sql: "SELECT id,ref FROM Operation WHERE businessId=? AND status='AWAITING_APPROVAL' AND json_extract(payload,'$.partyName')='مريم'", args: [home.businessId] })).rows[0]
     assert.ok(oldDraft)
     await compose.fill('المبلغ مش مية هو مية وعشرين'); await compose.press('Enter')
     await expect.poll(async () => String((await sql.execute({ sql: 'SELECT status FROM Operation WHERE id=?', args: [oldDraft.id] })).rows[0].status)).toBe('CANCELLED')
-    await expect(page.getByRole('button', { name: 'اعتماد العملية', exact: true })).toHaveCount(1)
-    await page.getByRole('button', { name: 'اعتماد العملية', exact: true }).click()
+    await expect(page.getByRole('button', { name: /اعتماد العملية/ })).toHaveCount(1)
+    await page.getByRole('button', { name: /اعتماد العملية/ }).click()
     await expect.poll(async () => Number((await sql.execute({ sql: "SELECT balance FROM Customer WHERE businessId=? AND name='مريم'", args: [home.businessId] })).rows[0]?.balance)).toBe(12000)
     assert.equal(Number((await sql.execute({ sql: "SELECT COUNT(*) n FROM CashEntry WHERE ref=?", args: [oldDraft.ref] })).rows[0].n), 0)
     const choiceA = randomUUID(), choiceB = randomUUID()
@@ -323,9 +323,9 @@ export async function browserSmoke(databaseUrl: string, key: string, boot: (orig
     const choiceButton = page.getByRole('button', { name: /01077777772/ })
     await expect(choiceButton).toBeEnabled()
     await choiceButton.click()
-    await expect(page.getByRole('button', { name: 'اعتماد العملية', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: /اعتماد العملية/ })).toBeVisible()
     await expect(choiceButton).toBeDisabled()
-    await page.getByRole('button', { name: 'اعتماد العملية', exact: true }).click()
+    await page.getByRole('button', { name: /اعتماد العملية/ }).click()
     await expect.poll(async () => Number((await sql.execute({ sql: 'SELECT balance FROM Customer WHERE id=?', args: [choiceB] })).rows[0].balance)).toBe(10000)
     assert.equal(Number((await sql.execute({ sql: 'SELECT balance FROM Customer WHERE id=?', args: [choiceA] })).rows[0].balance), 0)
     assert.equal(await page.evaluate(async () => { const r = await fetch('/api/cashbook'); return (await r.json()).cash }), 245000)
