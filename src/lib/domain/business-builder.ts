@@ -17,10 +17,11 @@ export async function createNewBusinessWithDefaults(params: {
   ownerName?: string
   customItems?: string[]
   skipDefaultSeeds?: boolean
-}): Promise<BusinessLite & { itemsCount: number; cashBalance: number }> {
+}): Promise<BusinessLite & { itemsCount: number; cashBalance: number | null }> {
   const cleanName = params.name.trim().slice(0, 80) || 'منشأة جديدة'
   const cleanType = params.type.trim().slice(0, 60) || 'supermarket'
   if (!Number.isFinite(params.openingCashEgp ?? 0) || (params.openingCashEgp ?? 0) < 0) throw new Error('رصيد البداية غير صالح')
+  const openingCashWasStated = typeof params.openingCashEgp === 'number'
   const openingCashPiastres = Math.max(0, Math.round((params.openingCashEgp ?? 0) * 100))
   const ownerName = params.ownerName?.trim().slice(0, 60) || 'المدير التنفيذي'
 
@@ -56,6 +57,28 @@ export async function createNewBusinessWithDefaults(params: {
     },
   })
 
+  // Do not let the schema's numeric default masquerade as a fact. If the
+  // creation flow explicitly supplied an opening cash, record the owner-stated
+  // provenance in the same transaction, including an explicitly stated zero.
+  if (openingCashWasStated) {
+    const answeredAt = new Date()
+    await tx.businessProfile.create({
+      data: {
+        businessId: biz.id,
+        stage: 'interviewing',
+        answers: JSON.stringify({
+          openingCash: {
+            value: params.openingCashEgp!,
+            source: 'owner',
+            answeredAt: answeredAt.toISOString(),
+            skipped: false,
+          },
+        }),
+        openingCashStatedAt: answeredAt,
+      },
+    })
+  }
+
   // Only names explicitly supplied by the user. Unknown prices/stock stay zero.
   const seeds = [...new Set(params.customItems ?? [])].filter((name) => name.trim()).slice(0, 100).map((name) => ({
     name: name.trim().slice(0, 120), aliases: '', unit: v.units[0] ?? 'piece', category: '',
@@ -84,7 +107,7 @@ export async function createNewBusinessWithDefaults(params: {
     type: biz.type as Vertical,
     workflowMode: biz.workflowMode,
     itemsCount: seeds.length,
-    cashBalance: openingCashPiastres,
+    cashBalance: openingCashWasStated ? openingCashPiastres : null,
     users: [
       { id: owner.id, name: owner.name, role: owner.role as Role, title: owner.title },
     ],
