@@ -38,7 +38,9 @@ export default function CashbookToday({ businessId, userId, onNavigate }: ViewPr
     if (op.type === 'debt_promise') return { kind: 'draft', opId: op.id, ref: op.ref, type: op.type, risk: op.risk, status: op.status, title: 'تعديل وعد السداد', summary: op.summary, fields: [{ label: 'الحساب', value: String(p.partyName) }, { label: 'أصل الدين', value: String(p.debtRef) }, { label: 'ميعاده السابق', value: String(p.previousDueOn ?? 'مش متحدد') }, { label: 'ميعاده الجديد', value: String(p.dueOn) }], effects: [], dangerNote: 'ميعاد بس؛ مش تحصيل أو سداد ولا تغيير في الخزنة.' }
     return { kind: 'draft', opId: op.id, ref: op.ref, type: op.type, risk: op.risk, status: op.status, title: kindLabels[String(p.kind)] ?? op.summary, summary: op.summary,
       fields: [{ label: 'المبلغ', value: egp(Number(p.amount ?? p.total ?? 0)) }, ...(p.partyName ? [{ label: 'صاحب الحساب', value: String(p.partyName) }] : []), ...(p.occurredOn ? [{ label: 'يوم الحركة', value: String(p.occurredOn), hint: p.dateSource === 'assumed_today' ? 'اليوم مفترض وقت الطلب؛ راجعه قبل الاعتماد' : undefined }] : []), ...(p.dueOn ? [{ label: 'ميعاد السداد', value: String(p.dueOn) }] : []), ...(p.reason ? [{ label: 'بند المصروف', value: String(p.reason) }] : []), ...(p.note ? [{ label: 'الوصف', value: String(p.note) }] : [])], effects: [],
-      ...(p.kind === 'cash_count' ? { dangerNote: `فرق العد ${egp(Number(p.amount) - Number(p.expectedCash))} غير مصنف؛ مش مبيعات أو أرباح. الرصيد قبل العد ${egp(Number(p.expectedCash))}.` } : {}) }
+      ...(p.kind === 'cash_count' ? { dangerNote: p.expectedCashKnown === false
+        ? `ده أول عدّ فعلي. عند الاعتماد هيحدد الرصيد الحالي ${egp(Number(p.amount))}؛ مش مبيعات أو قبض.`
+        : `فرق العد ${egp(Number(p.amount) - Number(p.expectedCash))} غير مصنف؛ مش مبيعات أو أرباح. الرصيد قبل العد ${egp(Number(p.expectedCash))}.` } : {}) }
   }
   if (error) return <div className={PAGE}><ErrorState message={error.message} onRetry={() => refetch()} /></div>
   return <div className={`${PAGE} space-y-6`} dir="rtl">
@@ -47,10 +49,11 @@ export default function CashbookToday({ businessId, userId, onNavigate }: ViewPr
       <div aria-hidden className="pointer-events-none absolute -left-16 -top-20 size-72 rounded-full bg-emerald-400/15 blur-3xl" />
       <div className="relative grid min-w-0 grid-cols-1 gap-8 md:grid-cols-2">
         <div className="min-w-0"><span className="inline-flex items-center gap-2 rounded-full border border-white/15 px-3 py-1 text-xs text-emerald-100"><span className="size-1.5 rounded-full bg-emerald-300" />من الدفتر الحقيقي</span>
-          <p className="mt-6 flex items-center gap-2 text-sm text-slate-300"><Wallet className="size-4" />المسجل في الخزنة دلوقتي</p>
-          <p className={`mt-2 break-words text-4xl font-bold tracking-tight sm:text-5xl ${data && data.cash < 0 ? 'text-red-300' : ''}`} aria-live="polite">{isPending ? 'بنفتح الدفتر…' : data ? egp(data.cash) : '—'}</p>
+          <p className="mt-6 flex items-center gap-2 text-sm text-slate-300"><Wallet className="size-4" />{data?.cash == null ? "رصيد الخزنة غير معروف" : "المسجل في الخزنة دلوقتي"}</p>
+          <p className={`mt-2 break-words text-4xl font-bold tracking-tight sm:text-5xl ${data?.cash != null && data.cash < 0 ? 'text-red-300' : ''}`} aria-live="polite">{isPending ? 'بنفتح الدفتر…' : !data ? '—' : data.cash == null ? 'غير محدد' : egp(data.cash)}</p>
           <p className="mt-4 max-w-sm text-xs leading-6 text-slate-300">مش لازم تسجل كل بيعة. عدّ اللي في الدرج وسجّل الديون والمصاريف. فرق العد مش دليل مبيعات أو مكسب.</p>
-          {data && data.cash < 0 && <p role="alert" className="mt-2 text-sm text-red-300">الرصيد القديم بالسالب؛ راجع الحركات وعدّ الخزنة. مش هنسمح بخروج كاش يزيد المشكلة.</p>}
+          {data?.cash == null && <p className="mt-2 max-w-sm text-xs leading-6 text-amber-200">لسه مفيش رصيد افتتاحي مُصرّح به ولا عدّ فعلي معتمد. الرقم مش صفر؛ الرصيد غير معروف. اعمل عدّ فعلي واعتمد المسودة عشان نثبت الرصيد.</p>}
+          {data?.cash != null && data.cash < 0 && <p role="alert" className="mt-2 text-sm text-red-300">الرصيد القديم بالسالب؛ راجع الحركات وعدّ الخزنة. مش هنسمح بخروج كاش يزيد المشكلة.</p>}
         </div>
         <form onSubmit={e => { e.preventDefault(); if (/^\d+(?:\.\d{1,2})?$/.test(count)) ask(`باقي في الخزنة ${count}`) }} className="min-w-0 self-end rounded-2xl border border-white/15 bg-white/5 p-5 backdrop-blur">
           <label htmlFor="cashbook-count" className="flex items-center gap-2 font-semibold"><Coins className="size-5 text-emerald-300" />عدّ الخزنة / قفل اليوم</label>
