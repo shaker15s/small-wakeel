@@ -51,7 +51,7 @@ process.on('exit', cleanup)
 if (!existsSync(pilotSeedPath)) {
   throw new Error('pilot:gate refuses to run: the checked-in synthetic SQLite fixture is missing')
 }
-for (const suffix of ['-wal', '-shm']) {
+for (const suffix of ['-wal', '-shm', '-journal']) {
   const sidecar = pilotSeedPath + suffix
   if (existsSync(sidecar) && statSync(sidecar).size > 0) {
     throw new Error(`pilot:gate refuses to copy a seed with a non-empty ${suffix} sidecar; stop fixture writers and retry`)
