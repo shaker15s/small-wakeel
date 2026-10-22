@@ -27,7 +27,7 @@
  */
 import { createHash } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
-import { evaluateExpectedSaleCall, isLiveAcceptanceEndpoint, resolveChatCompletionsUrl } from './lib/model-acceptance-contract.mjs'
+import { assertSafeAcceptanceCredentialTarget, evaluateExpectedSaleCall, isLiveAcceptanceEndpoint, resolveChatCompletionsUrl } from './lib/model-acceptance-contract.mjs'
 
 const BASE = (process.env.WAKIL_ACCEPTANCE_BASE_URL ?? '').replace(/\/$/, '')
 const KEY = process.env.WAKIL_ACCEPTANCE_API_KEY ?? ''
@@ -59,11 +59,8 @@ const READ_TOOL = {
 }
 
 async function chat(model, messages, { tools, stream = false } = {}) {
-  // Do not send a real credential to localhost, a private endpoint, HTTP, or a mock.
-  // A mock can still be exercised when no API key is configured.
-  if (KEY && !isLiveAcceptanceEndpoint(BASE, KEY, MODELS)) {
-    throw new Error('Refusing to send WAKIL_ACCEPTANCE_API_KEY to a non-HTTPS, private, or mock endpoint')
-  }
+  // Fail closed before network I/O when a real key targets an unsafe endpoint.
+  assertSafeAcceptanceCredentialTarget(BASE, KEY, MODELS)
   const url = resolveChatCompletionsUrl(BASE)
   const body = { model, messages, stream, ...(tools ? { tools: tools.map((t) => ({ type: 'function', function: t })) } : {}) }
   const started = Date.now()
