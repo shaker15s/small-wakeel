@@ -15,7 +15,6 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (businessIds.length) await db.business.deleteMany({ where: { id: { in: businessIds } } })
-  await db.$disconnect?.()
 })
 
 describe('core sale accounting across the ten sector profiles', () => {
