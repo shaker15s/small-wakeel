@@ -110,23 +110,25 @@ export async function applyMigrations(
   const dir = migrationsDir ?? findMigrationsDir()
   if (!dir) throw new Error('db/migrations directory not found (run from the repo root or set WAKIL_PROJECT_ROOT)')
   const absolute = isAbsolute(dbPath) ? dbPath : join(process.cwd(), dbPath)
-  // Local libSQL currently has an upstream lock-leak edge case when a
-  // deferred transaction's COMMIT returns SQLITE_BUSY under rollback-journal
-  // mode: later writes may fail with P1008/SocketTimeout for the life of the
-  // process. WAL lets readers keep their snapshot without blocking COMMIT.
-  // Make the mode explicit before creating transactions; fail closed if the
-  // database cannot enter WAL rather than serving a fragile local ledger. The
-  // local driver concurrency is 1 because migrations target one file and
-  // parallel connections are not a useful optimization during boot.
+  // SAFETY POLICY: keep local SQLite in DELETE (rollback-journal) mode until
+  // the SQLite core bundled by @libsql/client includes the upstream WAL-reset
+  // corruption fix (SQLite 3.51.3+). The current dependency line predates that
+  // fix; WAL plus concurrent writes/checkpoints can corrupt financial data.
+  // This deliberately trades some reader/writer concurrency for integrity.
+  // The local client is also bounded to one concurrent operation with a finite
+  // lock timeout. Do not manually switch a live local database back to WAL.
   const client: Client = createClient({ url: `file:${absolute}`, timeout: 10_000, concurrency: 1 })
   const applied: string[] = []
   let skipped = 0
   try {
-    const journal = await client.execute('PRAGMA journal_mode = WAL')
+    const journal = await client.execute('PRAGMA journal_mode = DELETE')
     const journalMode = String(journal.rows[0]?.journal_mode ?? '').toLowerCase()
-    if (journalMode !== 'wal') {
-      throw new Error(`Local SQLite must use WAL journal mode; got ${journalMode || 'unknown'}`)
+    if (journalMode !== 'delete') {
+      throw new Error(`Local SQLite must use DELETE journal mode until the bundled WAL-reset fix is verified; got ${journalMode || 'unknown'}`)
     }
+    const engine = await client.execute('SELECT sqlite_version() AS version')
+    const sqliteVersion = String(engine.rows[0]?.version ?? 'unknown')
+    console.info(`[sqlite-safety] journal=${journalMode}; bundled SQLite=${sqliteVersion}; WAL disabled pending patched libSQL core`)
     await client.execute('PRAGMA foreign_keys = ON')
     await client.execute('CREATE TABLE IF NOT EXISTS _WakilMigration (id TEXT PRIMARY KEY, checksum TEXT NOT NULL, appliedAt TEXT NOT NULL)')
     for (const id of readdirSync(dir).sort()) {
@@ -183,9 +185,9 @@ export async function applyMigrations(
 
     // Optional expensive full-database integrity verification. The caller can
     // request this for throwaway fixtures / backup drills; run it on the SAME
-    // libsql client that performed migrations. Do not reopen a WAL-mode DB with
-    // Bun's SQLite engine between migrations and Prisma's first use: mixed
-    // native SQLite/libsql handles can disagree on WAL shared-memory state.
+    // libsql client that performed migrations. Do not reopen a migrated DB with a second SQLite engine between migrations
+    // and Prisma's first use. Local journal policy is DELETE to avoid the known
+    // WAL-reset corruption risk in the bundled libSQL SQLite core.
     if (options.integrityCheck) {
       const integrity = await client.execute('PRAGMA integrity_check')
       const result = String(integrity.rows[0]?.integrity_check ?? '')

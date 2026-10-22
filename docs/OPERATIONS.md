@@ -57,6 +57,15 @@ curl --fail --silent --show-error "$BASE/api/health" \
 
 200 = DB reachable (healthy or degraded); 503 = DB unavailable; 401/403 = credential/configuration failure. Inspect `operational.alerts`, not just HTTP status. Alerts cover EXECUTING, oldest pending mail >300s, terminal-failed mail, failed worker, missing/stale worker completion (>300s when SaaS/mail are configured), and signup without configured mail. Heartbeat completion is runId-fenced. Aggregates exclude recipients/payload/secrets; `externalDelivery:not_probed`. Configure a trusted external poller/pager and schedule the one-shot worker frequently enough. Heartbeat is job execution, not inbox delivery or provider connectivity. Test scheduling/restarts and actual delivery separately.
 
+
+## Local SQLite journal-mode safety
+
+WAKIL currently forces local `file:` databases to SQLite's **DELETE (rollback-journal) mode**. The `@libsql/client` native SQLite core in the current dependency line predates the upstream WAL-reset corruption fix; SQLite documents this race as a database-corruption risk in WAL mode when writes/checkpoints overlap. See [SQLite WAL-reset bug](https://www3.sqlite.org/wal.html) and [libSQL bundled-core tracking issue](https://github.com/tursodatabase/libsql/issues/2271).
+
+This is a conservative mitigation, not a substitute for upgrading the database engine. Local operations use one configured client concurrency slot and a finite busy timeout; this limits contention but does not make multi-process access to one live SQLite file a supported deployment pattern. Do not manually re-enable WAL or run a second writer/checkpointer against the same live file. Backups and maintenance must follow the procedures below.
+
+Before considering WAL again, upgrade to a libSQL build that actually bundles SQLite 3.51.3 or later, log the runtime's `sqlite_version()`, and pass repeated multi-connection writer/checkpointer tests plus financial integrity and crash-recovery gates on the exact release SHA.
+
 ## 4. Full DB snapshots and restore
 
 Do not copy only a live SQLite main file while WAL/writers may be active. Logical `/api/export` includes catalog and operation/cash/audit data, but not every table/account/security state; `/api/restore` imports catalog only, never the ledger. Neither replaces full-DB recovery.

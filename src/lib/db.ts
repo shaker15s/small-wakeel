@@ -25,13 +25,12 @@ const globalForPrisma = globalThis as unknown as {
 
 function createPrismaClient(): PrismaClient {
   const url = databaseUrl()
-  // Local files are financial system-of-record storage. The libSQL client
-  // defaults to 20 concurrent operations, and each local statement can use a
-  // separate logical SQLite connection. On WAL, that permits overlapping
-  // writes/checkpoints across handles in the bundled pre-3.51.3 SQLite core.
-  // Serialize the local file adapter at the driver boundary; remote databases
-  // keep the prior default concurrency. The bounded timeout prevents transient
-  // locks from becoming immediate failures.
+  // Local files are the financial system of record. Until the bundled
+  // libSQL SQLite core contains the WAL-reset corruption fix, migrations keep
+  // the file in DELETE journal mode (rollback journal), not WAL. Local client
+  // concurrency stays at one with a bounded lock timeout; remote databases
+  // keep their configured concurrency. Do not turn WAL back on for a live file
+  // until the actual bundled SQLite version and concurrency tests prove safe.
   const localFile = isLocalSqliteUrl(url)
   // Prisma 6.19's simplified adapter accepts driver configuration and creates
   // its own client internally. Preserve libSQL's extra concurrency option even
