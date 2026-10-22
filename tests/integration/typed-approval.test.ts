@@ -89,6 +89,18 @@ describe('integration.typed-approval (R68)', () => {
     expect(await db.operation.count({ where: { conversationId: conv.id, status: 'SUCCEEDED' } })).toBe(1)
   })
 
+  test('an unapproved draft does not record a system mutation', async () => {
+    const conv = await freshConversation('R68 draft is not a system mutation')
+    const before = await db.auditEvent.count({
+      where: { businessId: business.id, action: 'system.system_updated' },
+    })
+    await draftSale(conv)
+    const after = await db.auditEvent.count({
+      where: { businessId: business.id, action: 'system.system_updated' },
+    })
+    expect(after).toBe(before)
+  })
+
   test('R3 draft refuses a typed word — the typed-reason flow stays mandatory', async () => {
     const conv = await freshConversation('R68 R3')
     // An R2 sale is the common draft; force R3 through the domain directly so
