@@ -705,40 +705,14 @@ async function chat(req: Request) {
 }
 
 // ---------------------------------------------------------------------------
-// /search — the fixture behind «ابحث في الويب» (see src/lib/agent/websearch.ts)
-const MARKET_NOTES: [RegExp, string][] = [
-  [/جبن|رومي/, "الجبنة الرومي في السوق المصري النهارده بين ١٤٠ و١٩٠ جنيه للكيلو حسب النوع، والمتوسط ١٦٥."],
-  [/لبن|حليب/, "أسعار اللبن في مصر: كرتونة اللتر بين ٣٨ و٤٨ جنيه، والكيلو السائب بين ٣٠ و٣٦."],
-  [/رز|أرز/, "الرز المصري العادي بين ٢٨ و٣٨ جنيه للكيلو على مستوى الجمهورية."],
-  [/زيت/, "زيت عافية وعافية: العبوة ٨٠٠ مل بين ٦٢ و٧٥ جنيه، واللتر بين ٧٥ و٩٠."],
-  [/سكر/, "السكر المعبأ في مصر بين ٣٢ و٣٨ جنيه للكيلو."],
-  [/عنبر|عطور|مسك/, "العنبر الخام بيتباع بين ٦٠ و٩٠ جنيه للجرام حسب الجودة والنقاء."],
-];
+// /search — synthetic fixture only. It MUST never look like live market data.
+import { mockSearchResponse } from "./search-fixture";
 
 function search(req: Request) {
   const { searchParams } = new URL(req.url);
-  const q = (searchParams.get("q") ?? "").trim();
-  const num = Math.min(10, Math.max(1, Number(searchParams.get("num") ?? 5) || 5));
-  const note = MARKET_NOTES.find(([re]) => re.test(q))?.[1];
-  const host = "market-watch.example";
-  const results = [
-    {
-      title: `أسعار السوق: ${q || "مؤشرات عامة"}`,
-      url: `https://${host}/prices?q=${encodeURIComponent(q)}`,
-      snippet: note ?? `متوسط أسعار «${q || "السلع الأساسية"}» في السوق المصري مع تحديث يومي من ٣ مصادر.`,
-    },
-    {
-      title: `نشرة أسعار الجملة — ${q || "سوق العبور"}`,
-      url: `https://${host}/wholesale?q=${encodeURIComponent(q)}`,
-      snippet: "أسعار الجملة اليوم من سوق العبور، مع مقارنة الأسبوع الحالي بالأسبوع الماضي.",
-    },
-    {
-      title: `تحليل سوقي: ${q || "قطاع التجزئة"}`,
-      url: `https://${host}/analysis?q=${encodeURIComponent(q)}`,
-      snippet: "تحليل موجز لحركة السعر والعرض خلال آخر ٣٠ يوم مع توقع الاتجاه للأسبوع القادم.",
-    },
-  ];
-  return json({ query: q, results: results.slice(0, num), provider: "wakil-mock-search" });
+  const q = searchParams.get("q") ?? "";
+  const num = searchParams.get("num") ?? 5;
+  return json(mockSearchResponse(q, num));
 }
 
 /**
