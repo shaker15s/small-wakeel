@@ -509,6 +509,9 @@ export async function* streamChat(
   model: ModelInfo,
   messages: LLMMessage[],
 ): AsyncGenerator<StreamChunk> {
+  if (process.env.WAKIL_OFFLINE === '1') {
+    throw new Error('offline mode (WAKIL_OFFLINE=1) — using deterministic fallback')
+  }
   yield* withStreamBudget(REPLY_STREAM_TIMEOUT_MS, (budget) => streamWithBudget(model, messages, budget))
 }
 async function* streamWithBudget(model: ModelInfo, messages: LLMMessage[], budget: ModelBudget): AsyncGenerator<StreamChunk> {
@@ -592,6 +595,9 @@ async function externalAlternatives(model: ModelInfo): Promise<ModelInfo[]> {
  *  wrapped with retry + breaker; the harness's deterministic fallbacks still
  *  catch the final throw. */
 export async function completeChat(model: ModelInfo, messages: LLMMessage[], opts?: CompleteChatOptions): Promise<string> {
+  if (process.env.WAKIL_OFFLINE === '1') {
+    throw new Error('offline mode (WAKIL_OFFLINE=1) — using deterministic fallback')
+  }
   const ms = model.tier === 'air' ? 12_000 : model.tier === 'deep' ? 30_000 : 20_000
   const content = await withModelBudget(ms, (budget) => strictInference() ? completeChatOnce(model, messages, budget, opts) : completeWithBudget(model, messages, budget, opts))
   if (strictInference() && !content.trim()) throw new Error('Live model returned no content')
