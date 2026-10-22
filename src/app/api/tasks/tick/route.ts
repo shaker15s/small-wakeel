@@ -15,18 +15,25 @@ export async function POST(req: NextRequest) {
   try {
     const gate = await guard(req, { scope: 'admin' })
     if (!gate.ok) return gate.res
-    const body = (await req.json().catch(() => ({}))) as {
-      businessId?: string
-      forceAll?: boolean
+    const rawBody: unknown = await req.json().catch(() => ({}))
+    if (!rawBody || typeof rawBody !== 'object' || Array.isArray(rawBody)) {
+      return NextResponse.json({ error: 'Body must be a JSON object' }, { status: 400 })
     }
+    const body = rawBody as { businessId?: unknown; forceAll?: unknown }
+    if (body.businessId !== undefined &&
+        (typeof body.businessId !== 'string' || !body.businessId.trim())) {
+      return NextResponse.json({ error: 'businessId must be a non-empty string' }, { status: 400 })
+    }
+    const businessId = typeof body.businessId === 'string' ? body.businessId.trim() : undefined
+    const scope = businessId ? { businessId } : {}
 
-    // First sweep back any work a dead worker left behind (task leases and
-    // in-flight notifications), then run what is due, then deliver.
-    const recovered = await requeueStuckTasks()
-    const recoveredNotifications = await requeueStuckNotifications()
+    // First sweep back only work in the requested business scope. The same
+    // scope is passed through recovery, task execution, and outbox delivery.
+    const recovered = await requeueStuckTasks(undefined, scope)
+    const recoveredNotifications = await requeueStuckNotifications(undefined, scope)
     const summary = await runDueTasks(10, {
       forceAll: body.forceAll === true,
-      ...(body.businessId ? { businessId: body.businessId } : {}),
+      ...scope,
     })
 
     return NextResponse.json({
