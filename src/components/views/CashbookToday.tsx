@@ -40,7 +40,9 @@ export default function CashbookToday({ businessId, userId, onNavigate }: ViewPr
       fields: [{ label: 'المبلغ', value: egp(Number(p.amount ?? p.total ?? 0)) }, ...(p.partyName ? [{ label: 'صاحب الحساب', value: String(p.partyName) }] : []), ...(p.occurredOn ? [{ label: 'يوم الحركة', value: String(p.occurredOn), hint: p.dateSource === 'assumed_today' ? 'اليوم مفترض وقت الطلب؛ راجعه قبل الاعتماد' : undefined }] : []), ...(p.dueOn ? [{ label: 'ميعاد السداد', value: String(p.dueOn) }] : []), ...(p.reason ? [{ label: 'بند المصروف', value: String(p.reason) }] : []), ...(p.note ? [{ label: 'الوصف', value: String(p.note) }] : [])], effects: [],
       ...(p.kind === 'cash_count' ? { dangerNote: p.expectedCashKnown === false
         ? `ده أول عدّ فعلي. عند الاعتماد هيحدد الرصيد الحالي ${egp(Number(p.amount))}؛ مش مبيعات أو قبض.`
-        : `فرق العد ${egp(Number(p.amount) - Number(p.expectedCash))} غير مصنف؛ مش مبيعات أو أرباح. الرصيد قبل العد ${egp(Number(p.expectedCash))}.` } : {}) }
+        : p.expectedCashKnown === true
+          ? `فرق العد ${egp(Number(p.amount) - Number(p.expectedCash))} غير مصنف؛ مش مبيعات أو أرباح. الرصيد قبل العد ${egp(Number(p.expectedCash))}.`
+          : 'مسودة عدّ قديمة لا تحتوي معلومة موثوقة عن رصيد المقارنة؛ راجع الأساس قبل الاعتماد.' } : {}) }
   }
   if (error) return <div className={PAGE}><ErrorState message={error.message} onRetry={() => refetch()} /></div>
   return <div className={`${PAGE} space-y-6`} dir="rtl">
